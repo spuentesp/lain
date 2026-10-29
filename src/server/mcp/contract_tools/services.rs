@@ -517,8 +517,13 @@ fn build_consumer_rows(
 
         let consumer_service = resolution.service.0.clone();
         let resolved_caller = call_caller_node_backend(backend, call_id);
+        let walk_from_call = resolved_caller
+            .as_ref()
+            .is_some_and(|(_, walk_from_call)| *walk_from_call);
         let caller_found = resolved_caller.is_some();
-        let caller_node = resolved_caller.unwrap_or_else(|| default_caller_node(call_id));
+        let caller_node = resolved_caller
+            .map(|(caller, _)| caller)
+            .unwrap_or_else(|| default_caller_node(call_id));
         let caller_repo = caller_node
             .id
             .split(':')
@@ -532,7 +537,12 @@ fn build_consumer_rows(
 
         // The call-site fallback is evidence, not a caller. Walking it would
         // incorrectly label the call-site as an unreferenced function.
-        let used_by = caller_found.then(|| walk_used_by_backend(backend, &caller_node.id, depth));
+        let walk_start = if walk_from_call {
+            call_id.as_str()
+        } else {
+            &caller_node.id
+        };
+        let used_by = caller_found.then(|| walk_used_by_backend(backend, walk_start, depth));
         let caller_unavailable = used_by
             .as_ref()
             .is_none_or(|result| result.start_unavailable);
@@ -671,25 +681,33 @@ struct CallerNode {
     line: u32,
 }
 
-fn call_caller_node_backend(backend: &dyn GraphBackend, call_id: &GlobalId) -> Option<CallerNode> {
-    // One indexed lookup. This runs once per consumer row, so it must not
-    // clone and scan every edge in the federation. Smallest source id wins:
-    // a deterministic pick when a call site has more than one sender.
+fn call_caller_node_backend(
+    backend: &dyn GraphBackend,
+    call_id: &GlobalId,
+) -> Option<(CallerNode, bool)> {
+    // Indexed lookups avoid cloning and scanning every federation edge.
+    // The smallest source id supplies deterministic caller evidence; for
+    // shared Calls targets the walk still starts at the call site, so all
+    // linked caller chains are included.
     let mut callers = backend
         .edges_to(call_id.as_str(), EdgeType::SendsHttp)
         .ok()?;
     // Generated GraphQL document links use Calls rather than SendsHttp.
-    if callers.is_empty() {
+    let walk_from_call = callers.is_empty();
+    if walk_from_call {
         callers = backend.edges_to(call_id.as_str(), EdgeType::Calls).ok()?;
     }
     let sends_source_id = callers.into_iter().map(|e| e.source_id).min()?;
     let caller = backend.get_node(&sends_source_id).ok().flatten()?;
-    Some(CallerNode {
-        id: caller.id,
-        path: caller.path,
-        line: caller.line_start.unwrap_or(0),
-        name: caller.name,
-    })
+    Some((
+        CallerNode {
+            id: caller.id,
+            path: caller.path,
+            line: caller.line_start.unwrap_or(0),
+            name: caller.name,
+        },
+        walk_from_call,
+    ))
 }
 
 fn default_caller_node(call_id: &GlobalId) -> CallerNode {
