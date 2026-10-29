@@ -437,6 +437,33 @@ services:
     paths: [python, sdk]
 ```
 
+### `provides` (list)
+
+A provider the analyzer cannot see. A service's routes often live in a
+runtime configuration file (a FastAPI `add_api_route(path=…)` whose path
+comes from YAML, a gateway route table, a mesh spec). State them here and
+the contract layer treats them like detected providers: they appear in
+`list_contracts`, and consumers can bind to them.
+
+```yaml
+provides:
+  - service: nat                       # a declared service or a repo-id service
+    key: "http:POST /chat/stream"      # the same key grammar check_binding accepts
+    source: "nat config.yaml (general.endpoint.path)"
+  - service: nat
+    key: "ws:/websocket"
+    source: "nat config.yaml (general.endpoint.websocket_path)"
+```
+
+The key grammar is the one `check_binding` accepts, so a declaration and a
+hand-written binding are interchangeable. The short HTTP form (`POST /chat`)
+is accepted too. A declaration that names an unknown service, or a key that
+does not parse, is refused at load time.
+
+A declared provider has no source node, so a consumer bound to it appears
+in `list_contracts` and `list_unresolved`, but it is not written as a graph
+edge: graph traversal does not follow it.
+
 ### `http_clients` (list)
 
 Wrapper-client candidates the joiner keeps (§6.3 / §7.3 rule 1).

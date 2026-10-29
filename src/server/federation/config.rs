@@ -54,6 +54,7 @@ fn is_contract_block_default(c: &ContractFederationConfig) -> bool {
         && c.generic_keys.is_empty()
         && c.schemas.is_empty()
         && c.bindings.is_empty()
+        && c.provides.is_empty()
 }
 
 /// Run parameters given on the command line (`--param KEY=VALUE`). They
@@ -209,6 +210,9 @@ impl FederationConfig {
             }
             if cfg.contract.bindings.is_empty() {
                 cfg.contract.bindings = top_level_contract.bindings;
+            }
+            if cfg.contract.provides.is_empty() {
+                cfg.contract.provides = top_level_contract.provides;
             }
         }
         cfg.validate_unique_repo_ids()?;

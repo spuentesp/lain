@@ -122,6 +122,7 @@ fn arb_service_decl() -> BoxedStrategy<ServiceDecl> {
 
 fn arb_config(services: Vec<ServiceDecl>) -> ContractFederationConfig {
     ContractFederationConfig {
+        provides: Vec::new(),
         services,
         http_clients: Vec::new(),
         generic_keys: Vec::new(),
@@ -251,6 +252,7 @@ fn ws_node(service: &str, host: &str, route: &str, line: u32) -> lain::schema::G
 
 fn ws_config(svc: &str, host: &str) -> ContractFederationConfig {
     ContractFederationConfig {
+        provides: Vec::new(),
         services: vec![ServiceDecl {
             name: svc.into(),
             repo: svc.into(),
@@ -392,6 +394,7 @@ fn every_topic_call_lands_in_exactly_one_terminal_state() {
     use lain::federation::contracts::joiner::ContractJoiner;
 
     let cfg = ContractFederationConfig {
+        provides: Vec::new(),
         services: vec![
             ServiceDecl {
                 name: "orders".into(),

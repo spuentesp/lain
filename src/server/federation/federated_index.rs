@@ -1477,6 +1477,7 @@ impl FederatedIndex {
         let desired: std::collections::BTreeSet<(String, String)> = out
             .binds
             .iter()
+            .filter(|b| !is_declared_provider(&b.provider))
             .map(|b| {
                 (
                     b.consumer.as_str().to_string(),
@@ -1498,6 +1499,7 @@ impl FederatedIndex {
         let to_add: Vec<GraphEdge> = out
             .binds
             .iter()
+            .filter(|b| !is_declared_provider(&b.provider))
             .filter(|b| {
                 !stored.contains(&(
                     b.consumer.as_str().to_string(),
@@ -1961,6 +1963,12 @@ impl crate::federation::cross_repo::CrossRepoResolver for FederatedIndex {
 
         None
     }
+}
+
+/// A declared provider (`repos.yaml#provides`) has no graph node, so a bind
+/// to it stays in the contract index and is not written as a graph edge.
+fn is_declared_provider(provider: &GlobalId) -> bool {
+    provider.as_str().contains("repos.yaml#provides[")
 }
 
 /// Ends a repo index pass when dropped. See [`FederatedIndex::enter_index_pass`].

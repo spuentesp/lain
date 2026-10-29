@@ -108,6 +108,7 @@ fn receiver_consumer_node(
 
 fn orders_billing_config() -> ContractFederationConfig {
     ContractFederationConfig {
+        provides: Vec::new(),
         services: vec![
             ServiceDecl {
                 name: "orders".into(),

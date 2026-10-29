@@ -49,6 +49,7 @@ async fn build_real_federation() -> (tempfile::TempDir, Arc<FederatedIndex>) {
     let data_dir = root.join("data");
     std::fs::create_dir_all(&data_dir).unwrap();
     let cfg = ContractFederationConfig {
+        provides: Vec::new(),
         services: vec![
             ServiceDecl {
                 name: "orders".into(),

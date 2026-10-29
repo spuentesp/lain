@@ -1558,6 +1558,7 @@ mod tests {
             ContractFederationConfig, SchemaDecl, ServiceDecl,
         };
         ContractFederationConfig {
+            provides: Vec::new(),
             services: services
                 .iter()
                 .map(|name| ServiceDecl {
@@ -1588,6 +1589,7 @@ mod tests {
     ) -> crate::federation::contracts::config::ContractFederationConfig {
         use crate::federation::contracts::config::{ContractFederationConfig, ServiceDecl};
         ContractFederationConfig {
+            provides: Vec::new(),
             services: services
                 .iter()
                 .map(|name| ServiceDecl {

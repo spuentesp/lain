@@ -27,6 +27,26 @@ use std::str::FromStr;
 /// default to empty when the YAML is silent on them. The block lives
 /// inside the same `repos.yaml` as the existing `FederationConfig`,
 /// loaded via `ContractFederationConfig::load`.
+/// A provider the analyzer cannot see. The service's API surface often
+/// lives in a runtime configuration file (FastAPI's `add_api_route(path=…)`,
+/// a gateway route table, a mesh spec); the operator states it and the
+/// contract layer treats it like a detected provider.
+///
+/// `key` uses the grammar `validate_key` accepts: `http:<METHOD> <template>`,
+/// `graphql:<op>:<field>`, `topic:<broker>:<name>`, `rpc:<system>:<service>:<method>`,
+/// `ws:<route>`, `table:<name>`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderDecl {
+    /// A declared service, or an implicit repo-id service.
+    pub service: String,
+    /// The endpoint key, in the shared key grammar.
+    pub key: String,
+    /// Where the declaration came from (a config file, a URL, a ticket).
+    /// Shown to the operator; free-form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ContractFederationConfig {
     #[serde(default)]
@@ -41,6 +61,11 @@ pub struct ContractFederationConfig {
     pub bindings: Vec<ConfirmedBinding>,
     #[serde(default)]
     pub databases: Vec<DatabaseDecl>,
+    /// Providers declared by the operator or an agent. Omitted from the
+    /// serialized form and from `config_hash` when empty, so configs that
+    /// never declare one keep their existing hash.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provides: Vec<ProviderDecl>,
 }
 
 /// One database declaration in `repos.yaml#databases` (Gap 23).
@@ -233,6 +258,10 @@ impl ContractFederationConfig {
                     out.databases = serde_yaml::from_value(v.clone())
                         .map_err(|e| LainError::Config(format!("databases: {e}")))?
                 }
+                "provides" => {
+                    out.provides = serde_yaml::from_value(v.clone())
+                        .map_err(|e| LainError::Config(format!("provides: {e}")))?
+                }
                 "contract" => {
                     let nested: ContractFederationConfig = serde_yaml::from_value(v.clone())
                         .map_err(|e| LainError::Config(format!("contract: {e}")))?;
@@ -391,6 +420,19 @@ impl ContractFederationConfig {
             .map(|s| s.name.as_str())
             .chain(implicit_services.iter().copied())
             .collect();
+
+        // Rule: every declared provider names a known service and a key in
+        // the shared grammar. A provider attached to a service nobody can
+        // consume against is a silent no-op that reads as "no contract".
+        for (i, p) in self.provides.iter().enumerate() {
+            if !known_services.contains(p.service.as_str()) {
+                return Err(LainError::Config(format!(
+                    "provides[{i}]: unknown service '{svc}'",
+                    svc = p.service
+                )));
+            }
+            validate_key(&format!("provides[{i}]"), &p.key)?;
+        }
 
         // Rule 9: path_arg > 5 (also covered below for http_clients).
         for c in &self.http_clients {
@@ -605,7 +647,7 @@ impl ContractFederationConfig {
     /// blake3 hash of the canonical JSON form of the five sections
     /// after parsing. Used for diagnostics.
     pub fn config_hash(&self) -> String {
-        let canonical = serde_json::json!({
+        let mut canonical = serde_json::json!({
             "services": self.services,
             "http_clients": self.http_clients,
             "generic_keys": self.generic_keys,
@@ -613,6 +655,9 @@ impl ContractFederationConfig {
             "bindings": self.bindings,
             "databases": self.databases,
         });
+        if !self.provides.is_empty() {
+            canonical["provides"] = serde_json::json!(self.provides);
+        }
         let s = canonical.to_string();
         blake3::hash(s.as_bytes()).to_hex().to_string()
     }
@@ -706,6 +751,81 @@ fn validate_key(field: &str, key: &str) -> Result<(), LainError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn provides_cfg(service: &str, key: &str) -> ContractFederationConfig {
+        ContractFederationConfig {
+            services: vec![ServiceDecl {
+                name: "alpha-api".into(),
+                repo: "alpha".into(),
+                paths: vec![],
+                hosts: vec![],
+                env: vec![],
+                base_path: None,
+                route_prefixes: vec![],
+                provides_graphql: true,
+            }],
+            provides: vec![ProviderDecl {
+                service: service.into(),
+                key: key.into(),
+                source: None,
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// Review focus #1: a declaration that names an unknown service is refused.
+    #[test]
+    fn provides_rejects_an_unknown_service() {
+        let err = provides_cfg("nowhere", "http:POST /chat")
+            .validate(&repo_ids())
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("provides[0]: unknown service 'nowhere'"),
+            "{err}"
+        );
+    }
+
+    /// Review focus #2: a malformed key is refused with the key grammar's error.
+    #[test]
+    fn provides_rejects_a_malformed_key() {
+        let err = provides_cfg("alpha-api", "http:POST")
+            .validate(&repo_ids())
+            .unwrap_err();
+        assert!(err.to_string().contains("provides[0]"), "{err}");
+    }
+
+    #[test]
+    fn provides_accepts_a_known_service_and_key() {
+        provides_cfg("alpha-api", "http:POST /chat/stream")
+            .validate(&repo_ids())
+            .expect("a known service and a valid key should validate");
+    }
+
+    /// A top-level `provides:` section loads as the contract config's providers.
+    #[test]
+    fn provides_loads_from_a_top_level_yaml_section() {
+        let yaml = "provides:\n  - service: alpha-api\n    key: \"http:POST /chat/stream\"\n    source: nat config.yaml\n";
+        let cfg = ContractFederationConfig::load_from_str(yaml).expect("parse");
+        assert_eq!(cfg.provides.len(), 1);
+        assert_eq!(cfg.provides[0].key, "http:POST /chat/stream");
+        assert_eq!(cfg.provides[0].source.as_deref(), Some("nat config.yaml"));
+    }
+
+    /// Adding the section must not move the hash of configs that never use it.
+    #[test]
+    fn config_hash_is_unchanged_without_provides() {
+        let base = ContractFederationConfig::default();
+        let with_empty = ContractFederationConfig {
+            provides: vec![],
+            ..Default::default()
+        };
+        assert_eq!(base.config_hash(), with_empty.config_hash());
+        assert_ne!(
+            base.config_hash(),
+            provides_cfg("alpha-api", "http:POST /x").config_hash()
+        );
+    }
 
     fn repo_ids() -> Vec<String> {
         // The test repo ids deliberately don't collide with the

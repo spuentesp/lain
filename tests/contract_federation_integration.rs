@@ -72,6 +72,7 @@ async fn build_two_repo_federation() -> (
     std::fs::write(root.join("repos.yaml"), repos_yaml).unwrap();
 
     let cfg = ContractFederationConfig {
+        provides: Vec::new(),
         services: vec![ServiceDecl {
             name: "orders".into(),
             repo: "orders".into(),
@@ -294,6 +295,7 @@ async fn contract_config_round_trip() {
     // a clean dirty flag (the joiner re-runs once but the new
     // desired set is identical to the stored set).
     let cfg = ContractFederationConfig {
+        provides: Vec::new(),
         services: vec![ServiceDecl {
             name: "orders".into(),
             repo: "orders".into(),
@@ -449,6 +451,7 @@ async fn unnormalized_consumers_are_recorded() {
     })];
 
     let cfg = ContractFederationConfig {
+        provides: Vec::new(),
         services: vec![ServiceDecl {
             name: "orders".into(),
             repo: "orders".into(),
