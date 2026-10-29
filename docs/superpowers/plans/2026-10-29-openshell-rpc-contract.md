@@ -12,7 +12,7 @@
 
 ## Implementation status
 
-Implemented on `feat/openshell-rpc-contract` (7 commits, not pushed as of 2026-10-29). Measured against the real NVIDIA clones with `scripts/eval/openshell-contract-smoke.sh`: **120 RPC contracts, 21 with a bound consumer, both repos `ready`** (Lain `4b6cafad`).
+Landed with Plan B on `feat/nat-http-contract`, open as PR #381 — one PR for both plans, because they share eight files (the gRPC sensor, the federation config and loader, the contract joiner, the smoke scripts, the protocol-coverage doc). The commit history still separates them: this plan's seven commits, then Plan B's nine. Measured against the real NVIDIA clones with `scripts/eval/openshell-contract-smoke.sh`: **120 RPC contracts, 21 with a bound consumer, three repos `ready`** (Lain `4b6cafad`).
 
 Where the implementation deliberately departs from this plan, the task below carries an **"Amended after implementation"** note:
 

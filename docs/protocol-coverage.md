@@ -46,7 +46,10 @@ each kind and are backlog, not silence.
 - **Resolver.** The HTTP ladder (`consumer_http.rs`) — §7.3 tier by
   tier: exact route, prefix-stripped template, `http_clients`
   wrapper registry, host evidence, env-var dispatch, unbound-host
-  heuristic.
+  heuristic. A declared `host_aliases:` entry routes a consumer whose
+  host the analyzer cannot follow: a known path binds like any other
+  target, a dynamic path resolves to `no_route_in_service` with the
+  service attached.
 - **Bindings.** `http:<METHOD> <template>` (the shortened
   `<METHOD> <template>` form is accepted in `provider.key`
   position). Same-kind template bridges are supported
@@ -70,17 +73,23 @@ each kind and are backlog, not silence.
   operator sees a `Coverage.unresolved_refs` entry they can act
   on (inline the schema or onboard the foreign file).
 - **Status.** Complete: detected, joined, confirmable, visible.
-- **Measured on real repositories** (2026-10-29, Lain `8e35456f`,
+- **Measured on real repositories** (2026-10-29, Lain `6afd2894`,
   `scripts/eval/nat-http-contract-smoke.sh`, NVIDIA NeMo-Agent-Toolkit,
   -UI and -Examples, three repos `ready`): 12 HTTP endpoints; 1 bound
   consumer, a test client calling the declared `http:POST /chat/stream`;
-  43 unresolved (`no_match` 31, `no_route_in_service` 8, `graphql_no_op` 2,
+  43 unresolved (`no_match` 29, `no_route_in_service` 10, `graphql_no_op` 2,
   `env_unmapped` 2). The garbage `ANY` routes went from 8 to 0. The UI's
   Next.js `pages/api/mcp/clients.ts` is now `http:ANY /api/mcp/clients`.
-  The UI proxy (`proxy/server.js`) stays unresolved: its URL host comes
-  through a multi-step variable chain that the host recovery (not yet
-  built) would have to follow. Declared providers come from `provides:`
-  (or `apply_contract_context`), since NAT registers its routes from a
+  The UI proxy (`proxy/server.js`) is attributed to the `nat` service by a
+  declared `host_aliases:` entry: it resolves to `no_route_in_service`
+  with the service attached, not to a bind — a transparent proxy forwards
+  whatever the client asked for, so the route is dynamic. The alias names
+  the *file*, because the analyzer records the fetch's URL as the
+  identifier `targetUrl` (the const lives in the request handler and the
+  call sits in a nested closure, so the expression is not followed);
+  naming the host expression instead works only when the analyzer can
+  reach it. Declared providers come from `provides:` (or
+  `apply_contract_context`), since NAT registers its routes from a
   runtime config file.
 
 ## graphql

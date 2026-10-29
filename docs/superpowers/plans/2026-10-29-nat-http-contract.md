@@ -12,7 +12,7 @@
 
 ## Implementation status
 
-In progress on `feat/nat-http-contract` (pushed; contains Plan A's commits as well). Measured against the real NVIDIA clones with `scripts/eval/nat-http-contract-smoke.sh` and recorded in `docs/protocol-coverage.md` §http: **12 HTTP endpoints, 1 bound consumer** (a test client calling the declared `http:POST /chat/stream`), 43 unresolved, and the garbage `ANY` routes down from 8 to 0. The Next.js route `http:ANY /api/mcp/clients` is now detected.
+Landed with Plan A on `feat/nat-http-contract`, open as PR #381 (both plans in one PR: they share eight files). Measured against the real NVIDIA clones with `scripts/eval/nat-http-contract-smoke.sh` and recorded in `docs/protocol-coverage.md` §http: **12 HTTP endpoints, 1 bound consumer** (a test client calling the declared `http:POST /chat/stream`), 43 unresolved (`no_match` 29, `no_route_in_service` 10, `graphql_no_op` 2, `env_unmapped` 2), the garbage `ANY` routes down from 8 to 0, `http:ANY /api/mcp/clients` detected from the Next.js file route, and the UI proxy attributed to the `nat` service.
 
 | Task | State | Note |
 |---|---|---|
@@ -26,6 +26,8 @@ In progress on `feat/nat-http-contract` (pushed; contains Plan A's commits as we
 | 8 — NAT smoke + recorded numbers | done | `scripts/eval/nat-http-contract-smoke.sh` |
 
 Two deviations from this plan, both deliberate and both recorded on the branch: Task 3 became operator-declared rather than analyzer-derived (the analyzer cannot follow the chain; the operator can state it), and Task 4 was replaced by Task 5's mechanism rather than implemented as a pattern. With the alias declared, the production UI proxy (`proxy/server.js`) is no longer an unresolved `no_match`: it is attributed to the `nat` service with the verdict `no_route_in_service` — a known service, a route that is dynamic because a transparent proxy forwards whatever the client asked for.
+
+One limitation the measurement exposed: the analyzer records the proxy's URL as the identifier `targetUrl`, not as the host expression `UPSTREAM_HTTP_ORIGIN` — the const lives in the request handler and the fetch sits in a nested closure, so the expression is not followed. The alias therefore names the *file*, which is what the analyzer can match today. Naming the host expression works only when the analyzer can reach it. Following a const from an enclosing scope into a nested closure is the analyzer-side fix, and it is not built.
 
 ## Measured baseline
 
