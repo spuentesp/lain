@@ -145,6 +145,13 @@ fn is_zero(n: &usize) -> bool {
 pub struct RepoConfig {
     pub id: String,
     pub source: SourceConfig,
+    /// Package names this repo publishes (npm, PyPI, crates.io, Go
+    /// module paths). A consumer repo that depends on one of them is
+    /// linked to this repo even when the name does not contain the
+    /// repo id — the npm scope and the hyphen in
+    /// `@nvidia/openshell-sdk` both defeat the token match.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub packages: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]

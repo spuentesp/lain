@@ -95,6 +95,7 @@ fn federation_config(fix: &Fixture) -> FederationConfig {
         ("platform", "platform"),
     ] {
         repos.push(RepoConfig {
+            packages: Vec::new(),
             id: id.to_string(),
             source: SourceConfig::WorkspaceDir {
                 path: fix.repos_root.join(dirname),

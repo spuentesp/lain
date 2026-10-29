@@ -100,6 +100,9 @@ pub struct FederatedIndex {
     /// `(source, target) -> source declares a dependency on target`;
     /// see [`Self::repo_depends_on`].
     depends_cache: DashMap<(String, String), bool>,
+    /// Package names each repo publishes (`repos[].packages`), keyed by
+    /// repo id. Read by [`Self::repo_depends_on`] as extra identifiers.
+    declared_packages: DashMap<String, Vec<String>>,
     /// Set by `project_nodes` / `project_edges` whenever the
     /// projected graph could change `Binds` outcomes. Cleared by
     /// `rejoin_contracts_if_dirty` after the join lands (§5.3).
@@ -196,6 +199,7 @@ impl FederatedIndex {
             persist_lock: parking_lot::Mutex::new(()),
             projection_lock: parking_lot::Mutex::new(()),
             depends_cache: DashMap::new(),
+            declared_packages: DashMap::new(),
             load_errors: RwLock::new(Vec::new()),
             contracts_dirty: crate::sync::DirtyFlag::new(false),
             contract_node_ids: DashMap::new(),
@@ -1599,6 +1603,15 @@ impl FederatedIndex {
     /// identifiers — repo id, directory name, or the module / package name
     /// it declares — appears there as a whole token. A source with no
     /// manifest at all cannot say, so it is not restricted.
+    /// Record the package names `repo` publishes. A declaration can
+    /// link repos the directory and manifest names cannot, so the
+    /// cached dependency answers are dropped.
+    pub fn set_declared_packages(&self, repo: &RepoId, packages: Vec<String>) {
+        self.declared_packages
+            .insert(repo.as_str().to_string(), packages);
+        self.depends_cache.clear();
+    }
+
     fn repo_depends_on(&self, source: &RepoId, target: &RepoId) -> bool {
         let key = (source.as_str().to_string(), target.as_str().to_string());
         if let Some(hit) = self.depends_cache.get(&key) {
@@ -1612,7 +1625,12 @@ impl FederatedIndex {
             true
         } else {
             let text = manifests.to_lowercase();
-            declared_identifiers(target, tgt.source().local_path())
+            let packages = self
+                .declared_packages
+                .get(target.as_str())
+                .map(|p| p.value().clone())
+                .unwrap_or_default();
+            declared_identifiers_with_packages(target, tgt.source().local_path(), &packages)
                 .iter()
                 .any(|id| contains_token(&text, id))
         };
@@ -1683,10 +1701,31 @@ fn read_manifests(root: &Path) -> String {
 /// Names another repo would use to depend on `repo`: its id, its directory,
 /// and the module / package name it declares for itself.
 fn declared_identifiers(repo: &RepoId, root: &Path) -> Vec<String> {
+    declared_identifiers_with_packages(repo, root, &[])
+}
+
+/// The names another repo would use to depend on `repo`: its id, its
+/// directory, the package names it declares, and the module / package
+/// name its root manifest declares for itself.
+fn declared_identifiers_with_packages(
+    repo: &RepoId,
+    root: &Path,
+    packages: &[String],
+) -> Vec<String> {
     let mut ids = vec![repo.as_str().to_lowercase()];
     if let Some(dir) = root.file_name() {
         ids.push(dir.to_string_lossy().to_lowercase());
     }
+    // Declared package names are the identifiers a consumer's manifest
+    // actually mentions. The npm scope and the hyphen in
+    // `@nvidia/openshell-sdk` both defeat the token match against the
+    // repo id, so the declaration is what makes the link intentional.
+    ids.extend(
+        packages
+            .iter()
+            .map(|p| p.trim().to_lowercase())
+            .filter(|p| !p.is_empty()),
+    );
     let read = |f: &str| std::fs::read_to_string(root.join(f)).unwrap_or_default();
     // go.mod: `module github.com/spf13/pflag` — the full path and its last segment.
     if let Some(module) = read("go.mod")
@@ -1991,5 +2030,86 @@ mod dependency_tests {
         .unwrap();
         let ids = declared_identifiers(&RepoId::new("core").unwrap(), dir.path());
         assert!(ids.contains(&"@acme/core".to_string()), "{ids:?}");
+    }
+
+    /// A repo that publishes `@nvidia/openshell-sdk` from a directory
+    /// named `openshell` is linkable only through that declaration: the
+    /// hyphen defeats the bare-token match on `openshell`.
+    #[test]
+    fn declared_package_names_participate_in_the_dependency_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("sdk/typescript")).unwrap();
+        let ids = declared_identifiers_with_packages(
+            &RepoId::new("openshell").unwrap(),
+            dir.path(),
+            &["@nvidia/openshell-sdk".to_string()],
+        );
+        assert!(ids.iter().any(|i| i == "@nvidia/openshell-sdk"), "{ids:?}");
+
+        let manifest = "\"dependencies\": { \"@nvidia/openshell-sdk\": \"^1.0\" }";
+        assert!(contains_token(manifest, "@nvidia/openshell-sdk"));
+        assert!(!contains_token(manifest, "openshell"));
+    }
+
+    /// The package gate reads the declared packages, not only the repo
+    /// id, so a consumer that depends on the package links to the repo.
+    #[tokio::test]
+    async fn declared_packages_link_a_consumer_to_its_provider_repo() {
+        let root = tempfile::tempdir().unwrap();
+        let provider = root.path().join("openshell");
+        let consumer = root.path().join("nemoclaw");
+        std::fs::create_dir_all(&provider).unwrap();
+        std::fs::create_dir_all(&consumer).unwrap();
+        std::fs::write(
+            consumer.join("package.json"),
+            "{ \"name\": \"nemoclaw\", \"dependencies\": { \"@nvidia/openshell-sdk\": \"^1.0\" } }",
+        )
+        .unwrap();
+        std::fs::write(provider.join("README.md"), "openshell\n").unwrap();
+        for dir in [&provider, &consumer] {
+            for args in [
+                vec!["init", "-q"],
+                vec!["add", "-A"],
+                vec![
+                    "-c",
+                    "user.email=t@example.com",
+                    "-c",
+                    "user.name=t",
+                    "commit",
+                    "-q",
+                    "-m",
+                    "init",
+                ],
+            ] {
+                let status = std::process::Command::new("git")
+                    .args(&args)
+                    .current_dir(dir)
+                    .status()
+                    .unwrap();
+                assert!(status.success(), "git {args:?} failed");
+            }
+        }
+        let backend: Arc<dyn crate::federation::graph_backend::GraphBackend> = Arc::new(
+            crate::federation::graph_backend::PetgraphBackend::new(root.path()).expect("backend"),
+        );
+        let fed = FederatedIndex::new(backend);
+        let (provider_id, consumer_id) = (
+            RepoId::new("openshell").unwrap(),
+            RepoId::new("nemoclaw").unwrap(),
+        );
+        for (id, dir) in [(&provider_id, &provider), (&consumer_id, &consumer)] {
+            let source: Box<dyn crate::federation::repo_source::RepoSource> = Box::new(
+                crate::federation::repo_source::WorkspaceDirSource::with_config(
+                    id.clone(),
+                    dir.clone(),
+                    crate::federation::config::SourceConfig::WorkspaceDir { path: dir.clone() },
+                )
+                .unwrap(),
+            );
+            fed.add_repo(source, root.path()).await.unwrap();
+        }
+        assert!(!fed.repo_depends_on(&consumer_id, &provider_id));
+        fed.set_declared_packages(&provider_id, vec!["@nvidia/openshell-sdk".into()]);
+        assert!(fed.repo_depends_on(&consumer_id, &provider_id));
     }
 }

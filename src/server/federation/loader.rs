@@ -28,6 +28,16 @@ pub(crate) fn resolve_data_dir(
     config
 }
 
+/// Hand each repo's declared package names (`repos[].packages`) to the
+/// federation, so the dependency gate can link repos by package name.
+fn register_declared_packages(fed: &FederatedIndex, config: &FederationConfig) {
+    for repo in &config.repos {
+        if let Ok(id) = crate::federation::repo_id::RepoId::new(&repo.id) {
+            fed.set_declared_packages(&id, repo.packages.clone());
+        }
+    }
+}
+
 pub async fn load_federation(config_path: &Path) -> Result<Arc<FederatedIndex>, LainError> {
     let config = resolve_data_dir(FederationConfig::load(config_path)?, config_path);
     // Symmetric with `repos_for_workspace`'s 0-member refusal: a config
@@ -54,6 +64,7 @@ pub async fn load_federation(config_path: &Path) -> Result<Arc<FederatedIndex>, 
     // already; a hot-reload failure later keeps this one in
     // place.
     fed.set_contract_config(config.contract.clone());
+    register_declared_packages(&fed, &config);
     fed.set_service_params(config.effective_params());
 
     let sources = config.build_sources()?;
@@ -283,6 +294,7 @@ pub async fn load_federation_with_workspace(
     // already; a hot-reload failure later keeps this one in
     // place.
     fed.set_contract_config(config.contract.clone());
+    register_declared_packages(&fed, &config);
     fed.set_service_params(config.effective_params());
 
     // Cold-start orchestration (Codex finding #4). Same Phase 0/1/2

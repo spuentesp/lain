@@ -80,6 +80,25 @@ The `id` becomes the prefix for every global node ID in that repo, so
 pick something stable and human-readable — agents will see it in tool
 output.
 
+**`packages`** (optional list of strings) — the package names this repo
+publishes (npm, PyPI, crates.io, Go module paths). Another repo is
+linked to this one when its manifests name one of these, even if the
+name does not contain the repo `id`:
+
+```yaml
+repos:
+  - id: openshell
+    packages: ["@nvidia/openshell-sdk", "openshell"]
+    source:
+      type: shallow_clone
+      url: https://github.com/NVIDIA/OpenShell.git
+```
+
+The package name is what a consumer's manifest mentions. Declaring it
+makes a cross-repo link intentional instead of accidental: the hyphen
+in `openshell-sdk` defeats a bare `openshell` match, and a directory
+name cannot say that a repo publishes a scoped package.
+
 ---
 
 ## Source kinds
