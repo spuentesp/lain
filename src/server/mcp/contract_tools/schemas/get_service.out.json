@@ -59,7 +59,8 @@
                 },
                 "reads_complete":     { "type": "boolean" },
                 "used_by":            { "$ref": "#/$defs/EntryPointList" },
-                "used_by_truncated":  { "type": "boolean" }
+                "used_by_truncated":  { "type": "boolean" },
+                "used_by_status": { "type": "string", "enum": ["caller_unavailable"], "description": "The caller could not be resolved in the selected graph; used_by was not evaluated." }
               },
               "required": ["endpoint", "site", "caller", "binding", "match", "fields", "reads_complete", "used_by", "used_by_truncated"]
             }

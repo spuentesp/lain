@@ -730,6 +730,13 @@ attaches a `federation` field describing per-repo health, total
 counts, and the memory estimate; single-workspace mode reports
 `federation: null`. The rest of the `/health` payload is unchanged.
 
+`GET /health/index-status` is an unauthenticated, lightweight readiness probe.
+It returns `{"repos":[{"id":"…","health":"ready"}]}` without traversing
+the graph. The HTTP status is 200 when every repository is ready, 202 if
+any repository is indexing (even if another has failed), and 503 if none
+is indexing but a repository is degraded, unavailable or missing, or the
+federation is empty. In single-workspace mode the repository id is `local`.
+
 ---
 
 ## Smoke test

@@ -230,6 +230,53 @@ pub fn is_minted_edge(edge: &GraphEdge) -> bool {
 /// `(repo, path)` → `(line_start, line_end, node_id)` spans.
 type SymbolSpans = BTreeMap<(String, String), Vec<(u32, u32, String)>>;
 
+/// "Is this edge already present or minted by this pass?" — the dedupe the
+/// mint pass asks once per candidate pair.
+///
+/// It used to be a `HashSet<(String, String, EdgeType)>` seeded with EVERY
+/// existing edge (both endpoint ids cloned for ~250k edges on Saleor). The
+/// pass only asks about its own candidate pairs, so it asks the backend's
+/// indexed `edges_to` for those and remembers only what this pass added.
+/// The backend is not modified until the pass ends, so the answers equal
+/// the old snapshot's.
+struct MintedEdges<'a> {
+    backend: &'a dyn GraphBackend,
+    added: HashSet<(String, String, EdgeType)>,
+}
+
+impl<'a> MintedEdges<'a> {
+    fn new(backend: &'a dyn GraphBackend) -> Self {
+        Self {
+            backend,
+            added: HashSet::new(),
+        }
+    }
+
+    /// `true` when the edge was absent and is now recorded; `false` when it
+    /// already existed in the backend or was added earlier in this pass.
+    fn insert(
+        &mut self,
+        source: &str,
+        target: &str,
+        edge_type: &EdgeType,
+    ) -> Result<bool, LainError> {
+        let key = (source.to_string(), target.to_string(), edge_type.clone());
+        if self.added.contains(&key) {
+            return Ok(false);
+        }
+        let present = self
+            .backend
+            .edges_to(target, edge_type.clone())?
+            .iter()
+            .any(|e| e.source_id == source);
+        if present {
+            return Ok(false);
+        }
+        self.added.insert(key);
+        Ok(true)
+    }
+}
+
 /// Index views over the backend snapshot the mint pass works against.
 struct NodeIndex {
     symbols: SymbolSpans,
@@ -241,21 +288,26 @@ struct NodeIndex {
     topics: BTreeMap<(String, String), Vec<String>>,
 }
 
-fn build_node_index(nodes: Vec<GraphNode>) -> NodeIndex {
-    let mut idx = NodeIndex {
-        symbols: BTreeMap::new(),
-        files: HashMap::new(),
-        routes: BTreeMap::new(),
-        topics: BTreeMap::new(),
-    };
-    for n in nodes {
+impl NodeIndex {
+    fn new() -> Self {
+        Self {
+            symbols: BTreeMap::new(),
+            files: HashMap::new(),
+            routes: BTreeMap::new(),
+            topics: BTreeMap::new(),
+        }
+    }
+
+    /// Index one node. Fed by a by-reference visit so the mint pass never
+    /// holds a clone of every node in the federation.
+    fn add_node(&mut self, n: &GraphNode) {
         let Ok(gid) = GlobalId::parse(&n.id) else {
-            continue;
+            return;
         };
         let repo = gid.repo_id().to_string();
         match n.node_type {
             NodeType::File => {
-                idx.files
+                self.files
                     .entry((repo, n.path.clone()))
                     .or_insert_with(|| n.id.clone());
             }
@@ -265,7 +317,7 @@ fn build_node_index(nodes: Vec<GraphNode>) -> NodeIndex {
                 // route literals.
                 if let Some((_method, template)) = n.name.split_once(' ') {
                     if let Some(stem) = normalize_route_stem(template) {
-                        idx.routes
+                        self.routes
                             .entry((repo.clone(), stem))
                             .or_default()
                             .push(n.id.clone());
@@ -273,14 +325,14 @@ fn build_node_index(nodes: Vec<GraphNode>) -> NodeIndex {
                 }
             }
             NodeType::Topic => {
-                idx.topics
+                self.topics
                     .entry((repo.clone(), n.name.clone()))
                     .or_default()
                     .push(n.id.clone());
             }
             _ => {
                 if let (Some(s), Some(e)) = (n.line_start, n.line_end) {
-                    idx.symbols
+                    self.symbols
                         .entry((repo, n.path.clone()))
                         .or_default()
                         .push((s, e, n.id.clone()));
@@ -288,11 +340,14 @@ fn build_node_index(nodes: Vec<GraphNode>) -> NodeIndex {
             }
         }
     }
-    for spans in idx.symbols.values_mut() {
-        // Innermost-first so the containing function wins over its file.
-        spans.sort_by_key(|(s, e, _)| (e.saturating_sub(*s), *s));
+
+    /// Order each file's spans once every node is added.
+    fn finish(&mut self) {
+        for spans in self.symbols.values_mut() {
+            // Innermost-first so the containing function wins over its file.
+            spans.sort_by_key(|(s, e, _)| (e.saturating_sub(*s), *s));
+        }
     }
-    idx
 }
 
 /// Mint heuristic edges from pre-extracted occurrences + commit
@@ -326,35 +381,29 @@ pub fn mint_cross_repo_observations_with(
 ) -> Result<MintReport, LainError> {
     let mut report = MintReport::default();
 
-    // Snapshot the current edge set once: the static-win filter and
-    // the temporal detectors' dedupe both read it.
-    let existing = backend.all_edges()?;
-    let mut blocked: BTreeSet<[String; 2]> = BTreeSet::new();
-    for e in &existing {
-        if matches!(
-            e.provenance,
-            Some(EdgeProvenance::Static { .. }) | Some(EdgeProvenance::Confirmed { .. })
-        ) {
-            blocked.insert(pair_key(&e.source_id, &e.target_id));
+    // Nodes: one by-reference visit. `list_nodes()` cloned every node in the
+    // federation (about 77 MB on Saleor) to read a few fields of each; the
+    // Topic labels and the symbol/file/route index are built in one pass.
+    let mut topic_labels: BTreeMap<String, String> = BTreeMap::new();
+    let mut index = NodeIndex::new();
+    backend.visit_nodes(&mut |n| {
+        if n.node_type == NodeType::Topic {
+            topic_labels.insert(n.id.clone(), n.name.clone());
         }
-    }
+        index.add_node(n);
+    })?;
+    index.finish();
 
     // Second suppression layer (Task 2): the typed bus edge a sensor
     // mints is fn/synthetic → Topic within ONE repo, so its pair key
     // can never equal the cross-repo fn↔fn (or file↔file) pair the
-    // anchor mint would create — the exact-pair rule above is blind
+    // anchor mint would create — the exact-pair rule below is blind
     // to it. Map each endpoint to the topic labels its
     // static/confirmed BusTopic/Consumes/Produces edges reach; when
     // BOTH endpoints of a would-be queue/topic anchor pair already
     // carry a label ending in `/{anchor literal}` (the
     // `{broker}/{name}` convention), the typed edges already cover
     // the coupling and the heuristic twin is skipped.
-    let nodes = backend.list_nodes()?;
-    let topic_labels: BTreeMap<String, String> = nodes
-        .iter()
-        .filter(|n| n.node_type == NodeType::Topic)
-        .map(|n| (n.id.clone(), n.name.clone()))
-        .collect();
     let mut bus_covered: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     // Fallback key: `(repo, path)` → topic labels. The typed edge's
     // endpoint may be a synthetic site node (`line_end: None`, never
@@ -362,18 +411,28 @@ pub fn mint_cross_repo_observations_with(
     // File node — same file, different node id. Coverage recorded
     // under the shared `(repo, path)` still owns the coupling.
     let mut bus_covered_by_path: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
-    for e in &existing {
+    // Edges: one by-reference pass instead of an `all_edges()` clone (about
+    // 84 MB on Saleor) held for the whole function. It keeps only what this
+    // pass reads: the static-win filter's blocked pairs, the bus coverage
+    // above, and the previously minted edges the final reconcile may retract.
+    let mut blocked: BTreeSet<[String; 2]> = BTreeSet::new();
+    let mut prior_minted: Vec<GraphEdge> = Vec::new();
+    backend.visit_edges(&mut |e| {
+        if is_minted_edge(e) {
+            prior_minted.push(e.clone());
+        }
         if !matches!(
             e.provenance,
             Some(EdgeProvenance::Static { .. }) | Some(EdgeProvenance::Confirmed { .. })
         ) {
-            continue;
+            return;
         }
+        blocked.insert(pair_key(&e.source_id, &e.target_id));
         if !matches!(
             e.edge_type,
             EdgeType::BusTopic | EdgeType::Consumes | EdgeType::Produces
         ) {
-            continue;
+            return;
         }
         let mut cover = |participant: &str, topic: &str| {
             bus_covered
@@ -396,23 +455,14 @@ pub fn mint_cross_repo_observations_with(
         if let Some(topic) = topic_labels.get(&e.target_id) {
             cover(&e.source_id, topic);
         }
-    }
+    })?;
 
-    let mut minted: HashSet<(String, String, EdgeType)> = HashSet::new();
-    for e in &existing {
-        minted.insert((
-            e.source_id.clone(),
-            e.target_id.clone(),
-            e.edge_type.clone(),
-        ));
-    }
+    let mut minted = MintedEdges::new(backend);
     // Edges this pass believes must exist. The reconcile at the end
     // retracts previously-minted edges missing from this set, so every
     // mint site records here — including the pairs skipped above as
     // already-present (dedupe must not turn into a silent retraction).
     let mut desired: HashSet<(String, String, EdgeType)> = HashSet::new();
-
-    let mut index = build_node_index(nodes);
 
     // ── group occurrences by (kind, key) ────────────────────────────
     let mut groups: BTreeMap<(AnchorKind, String), Vec<&AnchorOccurrence>> = BTreeMap::new();
@@ -505,7 +555,7 @@ pub fn mint_cross_repo_observations_with(
                         }
                         for (s, t) in [(a.clone(), b.clone()), (b.clone(), a.clone())] {
                             desired.insert((s.clone(), t.clone(), edge_type.clone()));
-                            if !minted.insert((s.clone(), t.clone(), edge_type.clone())) {
+                            if !minted.insert(&s, &t, &edge_type)? {
                                 continue;
                             }
                             new_edges.push(heuristic_edge(
@@ -557,7 +607,7 @@ pub fn mint_cross_repo_observations_with(
                     &mut desired,
                     &mut new_edges,
                     &cluster,
-                );
+                )?;
                 cluster.clear();
                 cluster_start = None;
             }
@@ -573,7 +623,7 @@ pub fn mint_cross_repo_observations_with(
                 &mut desired,
                 &mut new_edges,
                 &cluster,
-            );
+            )?;
         }
     }
 
@@ -603,7 +653,7 @@ pub fn mint_cross_repo_observations_with(
                         continue;
                     }
                     desired.insert((source.clone(), target.clone(), EdgeType::CoChangedWith));
-                    if !minted.insert((source.clone(), target.clone(), EdgeType::CoChangedWith)) {
+                    if !minted.insert(&source, &target, &EdgeType::CoChangedWith)? {
                         continue;
                     }
                     if report.commit_ref_edges >= MAX_TEMPORAL_EDGES {
@@ -630,9 +680,8 @@ pub fn mint_cross_repo_observations_with(
     // the projection reconciliation deliberately leaves minted edges
     // alone and the obsolete coupling survived every reload and
     // restart until the operator ran `lain reindex`.
-    let obsolete: Vec<GraphEdge> = existing
-        .iter()
-        .filter(|e| is_minted_edge(e))
+    let obsolete: Vec<GraphEdge> = prior_minted
+        .into_iter()
         .filter(|e| {
             !desired.contains(&(
                 e.source_id.clone(),
@@ -640,7 +689,6 @@ pub fn mint_cross_repo_observations_with(
                 e.edge_type.clone(),
             ))
         })
-        .cloned()
         .collect();
     report.retracted_edges = obsolete.len();
 
@@ -815,15 +863,15 @@ fn process_cochange_cluster(
     report: &mut MintReport,
     index: &NodeIndex,
     blocked: &BTreeSet<[String; 2]>,
-    minted: &mut HashSet<(String, String, EdgeType)>,
+    minted: &mut MintedEdges<'_>,
     desired: &mut HashSet<(String, String, EdgeType)>,
     new_edges: &mut Vec<GraphEdge>,
     cluster: &[&CommitRecord],
-) {
+) -> Result<(), LainError> {
     let repos: HashSet<&str> = cluster.iter().map(|c| c.repo.as_str()).collect();
     if repos.len() > ANCHOR_MAX_REPOS {
         report.crowds_skipped += 1;
-        return;
+        return Ok(());
     }
     for i in 0..cluster.len() {
         for j in (i + 1)..cluster.len() {
@@ -858,11 +906,11 @@ fn process_cochange_cluster(
                         continue;
                     }
                     desired.insert((s.clone(), t.clone(), EdgeType::CoChangedWith));
-                    if !minted.insert((s.clone(), t.clone(), EdgeType::CoChangedWith)) {
+                    if !minted.insert(&s, &t, &EdgeType::CoChangedWith)? {
                         continue;
                     }
                     if report.cochange_edges >= MAX_TEMPORAL_EDGES {
-                        return;
+                        return Ok(());
                     }
                     new_edges.push(heuristic_edge(
                         EdgeType::CoChangedWith,
@@ -876,6 +924,7 @@ fn process_cochange_cluster(
             }
         }
     }
+    Ok(())
 }
 
 fn normalize_message(message: &str) -> String {

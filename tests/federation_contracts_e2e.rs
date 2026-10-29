@@ -1796,6 +1796,25 @@ async fn pr13_diff_contracts_ground_truth_scenarios_over_t1_fixture() {
     // §15.2: "a path reaches `reports`" (traced in the base view).
     path_reaches(&data, "FieldRemoved", "http:GET /api/orders/{}", "reports");
 
+    // The same snapshot pair with a shorter traversal must report its
+    // bounded paths as truncated, rather than claiming a complete impact.
+    let bounded =
+        diff_contracts_handle(&ctx, json!({"base": base_id, "head": head, "max_hops": 1}))
+            .await
+            .unwrap();
+    assert!(!bounded.is_error, "{:#?}", bounded.structured);
+    let bounded_change = find_endpoint_change(
+        &bounded.structured["data"],
+        "FieldRemoved",
+        "http:GET /api/orders/{}",
+    );
+    let paths = bounded_change["paths"].as_array().unwrap();
+    assert!(!paths.is_empty());
+    assert!(paths
+        .iter()
+        .all(|p| p["hops"].as_array().unwrap().len() <= 1));
+    assert_eq!(bounded_change["truncated"], json!(true));
+
     // ── 2: orders adds optional currency — not reported ────────────
     let head = harness::derive_head(
         &mgr,

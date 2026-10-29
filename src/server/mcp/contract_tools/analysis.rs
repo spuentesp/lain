@@ -182,6 +182,7 @@ async fn run_diff_contracts(
         Err(o) => return Err(o),
     };
     let cap = parse_cap(&args_map, 50, 500, started)?;
+    let max_hops = parse_max_hops(&args_map, started)?;
     // §12: `repo` and `service` narrow the reported changes; both
     // apply before `min_impact` and before `compatible_changes`
     // counting (a filtered-out change is not counted either).
@@ -432,6 +433,7 @@ async fn run_diff_contracts(
             &base_fed,
             &head_fed,
             cap,
+            max_hops,
             &head_label,
             started,
         )?;
@@ -641,12 +643,11 @@ fn find_field_node(
     // from the endpoint's provider nodes instead. A repo-wide name
     // scan would pick an arbitrary endpoint's field (the fixture's
     // `customer_id` appears in four schemas).
-    let edges = backend.all_edges().ok()?;
-    let mut targets: Vec<String> = edges
-        .iter()
-        .filter(|e| e.edge_type == crate::schema::EdgeType::HasField)
-        .filter(|e| e.source_id == schema.node_id.as_str())
-        .map(|e| e.target_id.clone())
+    let mut targets: Vec<String> = backend
+        .edges_from(schema.node_id.as_str(), crate::schema::EdgeType::HasField)
+        .ok()?
+        .into_iter()
+        .map(|e| e.target_id)
         .collect();
     targets.sort();
     for target in &targets {
@@ -676,6 +677,22 @@ fn parse_min_impact(args: &Map<String, Value>) -> Result<Option<Class>, ToolOutc
             });
         }
     }))
+}
+
+fn parse_max_hops(args: &Map<String, Value>, started: Instant) -> Result<u32, ToolOutcome> {
+    match args.get("max_hops") {
+        None => Ok(10),
+        Some(value) => match value.as_u64() {
+            Some(n @ 1..=100) => Ok(n as u32),
+            _ => Err(error_outcome(
+                "invalid_argument",
+                "max_hops must be an integer between 1 and 100",
+                Some(json!({"arg": "max_hops", "min": 1, "max": 100})),
+                "live",
+                started,
+            )),
+        },
+    }
 }
 
 fn parse_cap(
@@ -1347,6 +1364,7 @@ fn attach_change_paths(
     base_fed: &crate::federation::contracts::snapshots::SnapshotFederation,
     head_fed: &crate::federation::contracts::snapshots::SnapshotFederation,
     cap: usize,
+    max_hops: u32,
     label: &str,
     started: Instant,
 ) -> Result<(), ToolOutcome> {
@@ -1380,18 +1398,17 @@ fn attach_change_paths(
         &base_fed.backend
     };
     let start_refs: Vec<&str> = starts.iter().map(String::as_str).collect();
-    let outcome: ImpactResult =
-        backend
-            .traverse_impact(&start_refs, 10, cap, 0.0)
-            .map_err(|e| {
-                error_outcome(
-                    "invalid_argument",
-                    format!("traverse_impact failed: {e}"),
-                    None,
-                    label,
-                    started,
-                )
-            })?;
+    let outcome: ImpactResult = backend
+        .traverse_impact(&start_refs, max_hops, cap, 0.0)
+        .map_err(|e| {
+            error_outcome(
+                "invalid_argument",
+                format!("traverse_impact failed: {e}"),
+                None,
+                label,
+                started,
+            )
+        })?;
     let mut paths = outcome.paths;
     paths.sort_by(|a, b| {
         b.min_confidence
@@ -1525,27 +1542,32 @@ fn enclosing_sender(
     if call_ids.is_empty() {
         return None;
     }
-    let edges = backend.all_edges().ok()?;
+    // Indexed lookups by target: this used to clone every edge in the
+    // federation and scan it three times to answer a question about one
+    // call site.
+    let sources_into =
+        |ids: &[String], edge_type: crate::schema::EdgeType| -> Option<Vec<String>> {
+            let mut out = Vec::new();
+            for id in ids {
+                out.extend(
+                    backend
+                        .edges_to(id, edge_type.clone())
+                        .ok()?
+                        .into_iter()
+                        .map(|e| e.source_id),
+                );
+            }
+            Some(out)
+        };
     // FieldRefs that read from this call.
-    let field_refs: Vec<String> = edges
-        .iter()
-        .filter(|e| e.edge_type == crate::schema::EdgeType::ReadsFrom)
-        .filter(|e| call_ids.contains(&e.target_id))
-        .map(|e| e.source_id.clone())
-        .collect();
-    let mut readers: Vec<String> = edges
-        .iter()
-        .filter(|e| e.edge_type == crate::schema::EdgeType::ReadsField)
-        .filter(|e| field_refs.contains(&e.target_id))
-        .map(|e| e.source_id.clone())
-        .collect();
+    let mut field_refs = sources_into(&call_ids, crate::schema::EdgeType::ReadsFrom)?;
+    // Membership semantics, as before: a FieldRef that reads from two of
+    // these calls must still yield its readers once.
+    field_refs.sort();
+    field_refs.dedup();
+    let mut readers = sources_into(&field_refs, crate::schema::EdgeType::ReadsField)?;
     readers.sort();
-    let mut senders: Vec<String> = edges
-        .iter()
-        .filter(|e| e.edge_type == crate::schema::EdgeType::SendsHttp)
-        .filter(|e| call_ids.contains(&e.target_id))
-        .map(|e| e.source_id.clone())
-        .collect();
+    let mut senders = sources_into(&call_ids, crate::schema::EdgeType::SendsHttp)?;
     senders.sort();
     let sender = senders.first().cloned();
     // Candidate readers: functions other than the sending function
@@ -1898,18 +1920,21 @@ async fn run_trace_impact(
         // see its own schema, and the response would look complete.
         // The standing rule is never claim absent when unanalysed —
         // silently degrading the seed set is the same failure.
-        let edges = backend.all_edges().map_err(|e| ToolOutcome {
-            structured: json!({}),
-            text: format!("could not enumerate edges for the schema seed: {e}"),
-            is_error: true,
-        })?;
         {
-            let mut field_ids: Vec<String> = edges
-                .iter()
-                .filter(|e| e.edge_type == crate::schema::EdgeType::HasField)
-                .filter(|e| schema_ids.contains(&e.source_id))
-                .map(|e| e.target_id.clone())
-                .collect();
+            let mut field_ids: Vec<String> = Vec::new();
+            let mut seen_schemas: std::collections::HashSet<&String> =
+                std::collections::HashSet::new();
+            for schema_id in schema_ids.iter().filter(|id| seen_schemas.insert(id)) {
+                // Indexed by source: no clone of the whole edge set.
+                let fields = backend
+                    .edges_from(schema_id, crate::schema::EdgeType::HasField)
+                    .map_err(|e| ToolOutcome {
+                        structured: json!({}),
+                        text: format!("could not enumerate edges for the schema seed: {e}"),
+                        is_error: true,
+                    })?;
+                field_ids.extend(fields.into_iter().map(|e| e.target_id));
+            }
             field_ids.sort();
             starts.extend(field_ids);
         }
@@ -2383,6 +2408,19 @@ mod tests {
     };
     use crate::federation::contracts::model::{JsonPath, SymbolKey};
     use crate::federation::repo_id::RepoId;
+
+    #[test]
+    fn max_hops_defaults_and_rejects_invalid_values() {
+        let started = Instant::now();
+        let mut args = Map::new();
+        assert_eq!(parse_max_hops(&args, started).unwrap(), 10);
+        args.insert("max_hops".into(), json!(3));
+        assert_eq!(parse_max_hops(&args, started).unwrap(), 3);
+        for value in [json!(0), json!(101), json!(-1), json!("3"), Value::Null] {
+            args.insert("max_hops".into(), value);
+            assert!(parse_max_hops(&args, started).is_err());
+        }
+    }
 
     #[test]
     fn direction_of_change_extracts_field_kinds() {

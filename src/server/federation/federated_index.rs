@@ -640,13 +640,14 @@ impl FederatedIndex {
         // graph had dropped it. Scoped by the repo's global-id prefix, which is
         // unambiguous because `RepoId` forbids `:`.
         let prefix = format!("{}:", id.as_str());
-        let mut stale: Vec<String> = self
-            .backend
-            .list_nodes()?
-            .into_iter()
-            .map(|n| n.id)
-            .filter(|gid| gid.starts_with(&prefix) && !live.contains(gid))
-            .collect();
+        // Visit by reference: `list_nodes()` cloned every node of every repo
+        // (about 77 MB on Saleor) to keep the ids of this one repo's stale ones.
+        let mut stale: Vec<String> = Vec::new();
+        self.backend.visit_nodes(&mut |n| {
+            if n.id.starts_with(&prefix) && !live.contains(&n.id) {
+                stale.push(n.id.clone());
+            }
+        })?;
         if !stale.is_empty() {
             // Federation-only nodes the anchor miner materialized as
             // edge endpoints (config-only anchors whose files have no
@@ -659,12 +660,12 @@ impl FederatedIndex {
             // edges (its own reconcile) and the pass after that
             // retracts the node here.
             let mut anchored: std::collections::HashSet<String> = std::collections::HashSet::new();
-            for e in self.backend.all_edges()? {
-                if crate::federation::anchor_miner::is_minted_edge(&e) {
-                    anchored.insert(e.source_id);
-                    anchored.insert(e.target_id);
+            self.backend.visit_edges(&mut |e| {
+                if crate::federation::anchor_miner::is_minted_edge(e) {
+                    anchored.insert(e.source_id.clone());
+                    anchored.insert(e.target_id.clone());
                 }
-            }
+            })?;
             stale.retain(|gid| !anchored.contains(gid));
         }
         if !stale.is_empty() {
@@ -949,33 +950,35 @@ impl FederatedIndex {
         let prefix = format!("{}:", id.as_str());
         let new_keys: std::collections::HashSet<_> =
             batch.iter().map(crate::graph::edge_identity_key).collect();
-        let stale: Vec<crate::schema::GraphEdge> = self
-            .backend
-            .all_edges()?
-            .into_iter()
-            .filter(|e| e.source_id.starts_with(&prefix))
-            .filter(|e| {
-                !(e.edge_type == crate::schema::EdgeType::Calls
+        // Visit by reference and clone only the stale edges: `all_edges()`
+        // cloned every edge in the federation (about 44 MB plus strings on
+        // Saleor) on each repo's reconciliation to keep a handful.
+        let mut stale: Vec<crate::schema::GraphEdge> = Vec::new();
+        self.backend.visit_edges(&mut |e| {
+            let is_stale = e.source_id.starts_with(&prefix)
+                && !(e.edge_type == crate::schema::EdgeType::Calls
                     && !e.target_id.starts_with(&prefix))
-            })
-            // PR 7 (§5.3): `Binds` is federation-only. The
-            // joiner owns it; the per-repo projection never
-            // writes `Binds` edges, so its reconciliation
-            // must skip them by type. Skipping by
-            // cross-repo would let a same-repo `Binds`
-            // (legitimate when two services share a repo,
-            // §4.1) silently disappear.
-            .filter(|e| e.edge_type != crate::schema::EdgeType::Binds)
-            // The anchor miner's edges are federation-only too
-            // (`anchor:*` / `cochange` / `commit-ref` heuristic
-            // provenance). The per-repo projection never reproduces
-            // them, so reconciliation must not retract them as
-            // stale — a watcher-triggered reproject owns none of
-            // them. The mint pass reconciles its own set (adds and
-            // retracts) when it runs.
-            .filter(|e| !crate::federation::anchor_miner::is_minted_edge(e))
-            .filter(|e| !new_keys.contains(&crate::graph::edge_identity_key(e)))
-            .collect();
+                // PR 7 (§5.3): `Binds` is federation-only. The
+                // joiner owns it; the per-repo projection never
+                // writes `Binds` edges, so its reconciliation
+                // must skip them by type. Skipping by
+                // cross-repo would let a same-repo `Binds`
+                // (legitimate when two services share a repo,
+                // §4.1) silently disappear.
+                && e.edge_type != crate::schema::EdgeType::Binds
+                // The anchor miner's edges are federation-only too
+                // (`anchor:*` / `cochange` / `commit-ref` heuristic
+                // provenance). The per-repo projection never reproduces
+                // them, so reconciliation must not retract them as
+                // stale — a watcher-triggered reproject owns none of
+                // them. The mint pass reconciles its own set (adds and
+                // retracts) when it runs.
+                && !crate::federation::anchor_miner::is_minted_edge(e)
+                && !new_keys.contains(&crate::graph::edge_identity_key(e));
+            if is_stale {
+                stale.push(e.clone());
+            }
+        })?;
         if !stale.is_empty() {
             // `remove_edges` matches on `(source_id, target_id,
             // edge_type)`, so a stale site-variant sharing its triple
