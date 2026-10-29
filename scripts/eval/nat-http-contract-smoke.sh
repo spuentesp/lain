@@ -162,8 +162,27 @@ else
   echo "MISS http:ANY /api/mcp/clients"; fail=1
 fi
 
+echo "--- the UI proxy is attributed to the nat service ---"
+# The proxy's URL is built from a variable chain the analyzer cannot
+# follow, so it does not bind. With the host alias it is at least
+# attributed: known service, unknown route.
+if printf '%s' "$(items_of "$UNRES")" | python3 -c '
+import json, sys
+items = json.load(sys.stdin)
+proxy = [i for i in items if i["consumer"]["path"].endswith("proxy/server.js")]
+ok = any(i.get("reason") == "no_route_in_service" and i.get("target_service") == "nat"
+         for i in proxy)
+if not ok:
+    for i in proxy[:4]:
+        print("  ", i.get("reason"), "->", i.get("target_service"), i["consumer"]["path"])
+sys.exit(0 if ok else 1)'; then
+  echo "OK   proxy/server.js -> no_route_in_service (service nat)"
+else
+  echo "MISS the proxy is not attributed to the nat service"; fail=1
+fi
+
 if [[ "$fail" -ne 0 ]]; then
   echo "FAIL: one or more expectations missed" >&2
   exit 1
 fi
-echo "PASS: declared providers present, no garbage routes, Next.js API route found"
+echo "PASS: declared providers present, no garbage routes, Next.js API route found, proxy attributed"
