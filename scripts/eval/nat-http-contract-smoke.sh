@@ -104,6 +104,16 @@ json.dump(items, sys.stdout)
 }
 
 HTTP=$(items_of "$(call list_contracts '{"snapshot":"live","kind":"http","limit":1000}')")
+printf '%s' "$HTTP" | python3 -c '
+import json, sys
+items = json.load(sys.stdin)
+print("http endpoints:", len(items), "bound consumers:", sum(i["bound_consumers"] for i in items))'
+UNRES=$(call list_unresolved '{"snapshot":"live","limit":1000}')
+printf '%s' "$(items_of "$UNRES")" | python3 -c '
+import json, sys
+from collections import Counter
+items = json.load(sys.stdin)
+print("unresolved consumers:", len(items), dict(Counter(i.get("reason") for i in items)))'
 
 fail=0
 echo "--- declared providers present ---"

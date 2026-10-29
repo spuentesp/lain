@@ -70,6 +70,18 @@ each kind and are backlog, not silence.
   operator sees a `Coverage.unresolved_refs` entry they can act
   on (inline the schema or onboard the foreign file).
 - **Status.** Complete: detected, joined, confirmable, visible.
+- **Measured on real repositories** (2026-10-29, Lain `8e35456f`,
+  `scripts/eval/nat-http-contract-smoke.sh`, NVIDIA NeMo-Agent-Toolkit,
+  -UI and -Examples, three repos `ready`): 12 HTTP endpoints; 1 bound
+  consumer, a test client calling the declared `http:POST /chat/stream`;
+  43 unresolved (`no_match` 31, `no_route_in_service` 8, `graphql_no_op` 2,
+  `env_unmapped` 2). The garbage `ANY` routes went from 8 to 0. The UI's
+  Next.js `pages/api/mcp/clients.ts` is now `http:ANY /api/mcp/clients`.
+  The UI proxy (`proxy/server.js`) stays unresolved: its URL host comes
+  through a multi-step variable chain that the host recovery (not yet
+  built) would have to follow. Declared providers come from `provides:`
+  (or `apply_contract_context`), since NAT registers its routes from a
+  runtime config file.
 
 ## graphql
 
