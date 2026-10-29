@@ -155,9 +155,11 @@ each kind and are backlog, not silence.
   a gateway, so the bind is service-level, not a verified dial address.
   NeMo-Fabric's Rust provider is a cross-repo dependent through call
   edges: 42 of its functions call OpenShell's `parse_sandbox_policy`.
-  Its use of the proto client (`openshell_sdk::raw::proto`) is not a
-  contract consumer, because no Rust consumer sensor exists yet. Re-run
-  the script to reproduce.
+  That call-graph edge is the accepted result for this dependency. The
+  Rust provider calls OpenShell through the SDK wrapper
+  (`OpenShellClient`), not generated stubs, so it is not an RPC contract
+  consumer. A Rust gRPC consumer detector, with a wrapper-to-RPC mapping,
+  is not built. Re-run the script to reproduce.
 
 ## websocket
 
