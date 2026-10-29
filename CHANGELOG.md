@@ -7,6 +7,26 @@ All notable changes to LAIN are documented here. Versions follow
 
 ### Added
 
+- **GraphQL provider -> resolver edge** (`CallsGraphql`, appended last in
+  `EdgeType` so stored discriminants are unchanged). The resolver-link sensor
+  now links each SDL root field to the function that serves it, and learns
+  graphene (`resolve_<field>` on a `graphene.ObjectType`; the class name picks
+  Query, Mutation or Subscription; graphene mutation classes are not covered).
+  `get_call_chain`, `trace_dependency` and impact traversal cross the contract
+  boundary, `get_cross_runtime_callers` lists the SDL field a resolver serves,
+  and a resolver is an `http_handler` entry point in `used_by`. Existing graphs
+  gain the edges at the next `lain reindex`; `FEDERATION_GRAPH_VERSION` is
+  unchanged.
+- **Generated GraphQL documents link to their users.** A function that
+  references `<Operation>Document` (or `<Operation>Doc`) gets a `Calls` edge to
+  that operation's `graphql-call:` node, so a trace continues from the call
+  site into the code that runs it.
+- **`trace_flow`**: one read-only tool that returns a path across the contract
+  boundary from an endpoint, symbol or table, `downstream` toward the data or
+  `upstream` toward consumers. `strategy` is `breadth` (default) or `depth`
+  (follow one chain to its end). Each hop says whether it is an engine fact or
+  a heuristic, and `gaps` says where and why the chain stops, including
+  `consumers_pending` while repos are still indexing.
 - **Django ORM table sensor** (`django_orm_sensor`). Maps Django model classes
   to tables (`Meta.db_table`, else `<app_label>_<classname>`; abstract models
   have none, proxies use their parent's) and emits `ReadsTable` /
@@ -34,6 +54,11 @@ All notable changes to LAIN are documented here. Versions follow
 
 ### Changed
 
+- Indexing skips files no event idiom can match (a whole-file `RegexSet`
+  prefilter in front of the per-line walk; CRLF files and unbuildable sets fall
+  back to the full walk; `LAIN_IDIOM_GATE=0` turns it off). On Saleor in a
+  release build the event sensor drops from 8.5 s to 3.3 s with identical
+  output. Each sensor's wall time is now logged ("sensor finished").
 - Service references from prose (READMEs, docs, changelogs) are classified as
   `documentation`, not `production`. Test scripts named by their stem
   (`testcontainer.sh`) are `test`. `list_service_refs` accepts the new value.
@@ -44,6 +69,18 @@ All notable changes to LAIN are documented here. Versions follow
 
 ### Fixed
 
+- `get_service` returned an empty `used_by` for every consumer: it looked the
+  caller up in the per-repo graph with a global id, found nothing, and walked
+  the call-site node instead, silently. It now resolves callers and walks
+  `used_by` on the projected backend with indexed edge lookups (`edges_to`),
+  and logs when a caller is missing.
+- `diff_contracts` and snapshot-backed views hydrated a snapshot inside the
+  async handler and pinned runtime workers, so a few concurrent calls stopped
+  `/health` from answering. Hydration and diffing now run off the workers. A
+  single long call is not made faster.
+- Sensors looked up the enclosing function with 1-based lines against the
+  indexer's 0-based ranges, so a call on a function's last line missed it and
+  one on the line above hit it.
 - `lain schema dump` always uses the stub embedder, so the tool schema does not
   depend on which model is installed.
 - Embeddings use each model's declared pooling. Granite small r2 is trained

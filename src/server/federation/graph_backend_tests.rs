@@ -13,6 +13,9 @@ use std::sync::RwLock;
 pub struct HashMapBackend {
     nodes: RwLock<HashMap<String, GraphNode>>,
     edges: RwLock<Vec<GraphEdge>>,
+    /// How many times `all_edges` (a full clone) was called, so a test can
+    /// prove a per-item path stays on `edges_to`.
+    all_edges_calls: std::sync::atomic::AtomicUsize,
 }
 
 impl HashMapBackend {
@@ -20,7 +23,13 @@ impl HashMapBackend {
         Self {
             nodes: RwLock::new(HashMap::new()),
             edges: RwLock::new(Vec::new()),
+            all_edges_calls: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    fn all_edges_calls(&self) -> usize {
+        self.all_edges_calls
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -109,7 +118,20 @@ impl GraphBackend for HashMapBackend {
         Ok(self.nodes.read().unwrap().values().cloned().collect())
     }
     fn all_edges(&self) -> Result<Vec<GraphEdge>, LainError> {
+        self.all_edges_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(self.edges.read().unwrap().clone())
+    }
+    // Answers without `all_edges`, like the petgraph backend's index lookup.
+    fn edges_to(&self, target_id: &str, edge_type: EdgeType) -> Result<Vec<GraphEdge>, LainError> {
+        Ok(self
+            .edges
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|e| e.edge_type == edge_type && e.target_id == target_id)
+            .cloned()
+            .collect())
     }
     fn traverse(
         &self,
@@ -1065,6 +1087,138 @@ fn traverse_impact_paths_are_sorted_by_confidence_then_length_then_leaf() {
             "repo-a:Function:src/b.rs:b:0",
         ]
     );
+}
+
+// ─── edges_to: the per-node lookup that replaces clone-and-scan ──────
+
+/// `edges_to` filters by target AND edge type, on the indexed petgraph
+/// backend and on the default scan alike.
+#[test]
+fn edges_to_filters_by_target_and_type_on_both_backends() {
+    let tmp = tempfile::tempdir().unwrap();
+    let petgraph = PetgraphBackend::new(tmp.path()).unwrap();
+    let simple = HashMapBackend::new();
+    for b in [&petgraph as &dyn GraphBackend, &simple as &dyn GraphBackend] {
+        b.upsert_nodes_batch(&[
+            node("r:Function:a.py:a:0", "a", "a.py"),
+            node("r:Function:b.py:b:0", "b", "b.py"),
+            node("r:Function:t.py:t:0", "t", "t.py"),
+        ])
+        .unwrap();
+        b.upsert_edges_batch(&[
+            edge(
+                EdgeType::Calls,
+                "r:Function:a.py:a:0".into(),
+                "r:Function:t.py:t:0".into(),
+                1.0,
+            ),
+            edge(
+                EdgeType::Calls,
+                "r:Function:b.py:b:0".into(),
+                "r:Function:t.py:t:0".into(),
+                1.0,
+            ),
+            edge(
+                EdgeType::SendsHttp,
+                "r:Function:a.py:a:0".into(),
+                "r:Function:t.py:t:0".into(),
+                1.0,
+            ),
+            edge(
+                EdgeType::Calls,
+                "r:Function:t.py:t:0".into(),
+                "r:Function:a.py:a:0".into(),
+                1.0,
+            ),
+        ])
+        .unwrap();
+        let mut calls: Vec<String> = b
+            .edges_to("r:Function:t.py:t:0", EdgeType::Calls)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.source_id)
+            .collect();
+        calls.sort();
+        assert_eq!(
+            calls,
+            vec![
+                "r:Function:a.py:a:0".to_string(),
+                "r:Function:b.py:b:0".to_string()
+            ]
+        );
+        assert_eq!(
+            b.edges_to("r:Function:t.py:t:0", EdgeType::SendsHttp)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(b.edges_to("nope", EdgeType::Calls).unwrap().is_empty());
+    }
+}
+
+/// `get_service` runs `walk_backend` once per consumer row: it must stay
+/// on `edges_to` and never clone the whole edge set.
+#[test]
+fn used_by_walk_never_clones_the_edge_set() {
+    let b = HashMapBackend::new();
+    b.upsert_nodes_batch(&[
+        node("leaf", "leaf", "x.py"),
+        node("mid", "mid", "x.py"),
+        node("top", "top", "x.py"),
+    ])
+    .unwrap();
+    b.upsert_edges_batch(&[
+        edge(EdgeType::Calls, "mid".into(), "leaf".into(), 1.0),
+        edge(EdgeType::Calls, "top".into(), "mid".into(), 1.0),
+    ])
+    .unwrap();
+    let r = crate::server::mcp::contract_tools::used_by::walk_backend(&b, "leaf", 4);
+    assert_eq!(
+        r.entries.len(),
+        1,
+        "the unreferenced top of the chain: {:?}",
+        r.entries
+    );
+    assert_eq!(r.entries[0]["name"], serde_json::json!("top"));
+    assert_eq!(
+        b.all_edges_calls(),
+        0,
+        "walk_backend cloned the whole edge set"
+    );
+}
+
+/// The live path: `walk_backend` over the petgraph backend finds the entry
+/// point two hops up, through the indexed `edges_to`.
+#[test]
+fn used_by_walk_on_the_petgraph_backend_reaches_the_entry_point() {
+    let tmp = tempfile::tempdir().unwrap();
+    let b = PetgraphBackend::new(tmp.path()).unwrap();
+    let leaf = node("r:Function:x.py:leaf:0", "leaf", "x.py");
+    let mid = node("r:Function:x.py:mid:5", "mid", "x.py");
+    let mut top = node("r:Function:x.py:top:10", "top", "x.py");
+    top.entry = Some(crate::federation::contracts::model::EntryKind::HttpHandler);
+    b.upsert_nodes_batch(&[leaf, mid, top]).unwrap();
+    b.upsert_edges_batch(&[
+        edge(
+            EdgeType::Calls,
+            "r:Function:x.py:mid:5".into(),
+            "r:Function:x.py:leaf:0".into(),
+            1.0,
+        ),
+        edge(
+            EdgeType::Calls,
+            "r:Function:x.py:top:10".into(),
+            "r:Function:x.py:mid:5".into(),
+            1.0,
+        ),
+    ])
+    .unwrap();
+    let r =
+        crate::server::mcp::contract_tools::used_by::walk_backend(&b, "r:Function:x.py:leaf:0", 4);
+    assert_eq!(r.entries.len(), 1, "{:?}", r.entries);
+    assert_eq!(r.entries[0]["kind"], serde_json::json!("http_handler"));
+    assert_eq!(r.entries[0]["name"], serde_json::json!("top"));
+    assert!(!r.truncated);
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────

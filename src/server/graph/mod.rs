@@ -2387,6 +2387,21 @@ impl GraphDatabase {
         out
     }
 
+    /// All `CallsGraphql` edges in the graph: `(provider_id, resolver_id)`
+    /// pairs. Used by `entry_point_sensor` to tag resolver functions as
+    /// `EntryKind::HttpHandler`: a GraphQL resolver runs because a request
+    /// reached the schema's endpoint, exactly as an HTTP handler does.
+    pub fn calls_graphql_pairs(&self) -> Vec<(String, String)> {
+        let graph = self.graph.read();
+        let mut out: Vec<(String, String)> = graph
+            .edge_references()
+            .filter(|e| e.weight().edge_type == EdgeType::CallsGraphql)
+            .map(|e| (graph[e.source()].id.clone(), graph[e.target()].id.clone()))
+            .collect();
+        out.sort();
+        out
+    }
+
     pub fn insert_co_change_edges(
         &self,
         pairs: &[(String, String, usize)],

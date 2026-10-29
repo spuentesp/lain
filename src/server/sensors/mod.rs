@@ -344,6 +344,9 @@ pub fn run_all(
     counts
 }
 
+/// A sensor slower than this is logged at `info`; faster ones at `debug`.
+const SLOW_SENSOR_MS: u64 = 250;
+
 /// Shared inventory iteration behind [`run_all`] and the coverage
 /// ledger's `run_all_with_coverage`. Walks every registered
 /// [`Sensor`], sorts by `(phase, name)`, and asks each one for a
@@ -387,13 +390,26 @@ pub(crate) fn run_all_with_reports(
             // Per-sensor wall time: the protocol-sensor phase dominates
             // indexing on large repos, and without this the log cannot say
             // which sensor to look at.
-            tracing::info!(
-                sensor = sensor.name(),
-                phase = sensor.phase(),
-                elapsed_ms = started.elapsed().as_millis() as u64,
-                emitted = report.emitted,
-                "sensor finished"
-            );
+            let elapsed_ms = started.elapsed().as_millis() as u64;
+            // Quiet by default (about thirty sensors run per pass); a slow
+            // one is worth a line at `info`.
+            if elapsed_ms >= SLOW_SENSOR_MS {
+                tracing::info!(
+                    sensor = sensor.name(),
+                    phase = sensor.phase(),
+                    elapsed_ms,
+                    emitted = report.emitted,
+                    "sensor finished (slow)"
+                );
+            } else {
+                tracing::debug!(
+                    sensor = sensor.name(),
+                    phase = sensor.phase(),
+                    elapsed_ms,
+                    emitted = report.emitted,
+                    "sensor finished"
+                );
+            }
             counts.add(sensor.count_field(), report.emitted);
             reports.push((sensor.name(), report));
         }

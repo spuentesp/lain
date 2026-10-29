@@ -47,7 +47,12 @@
 use crate::error::LainError;
 use crate::federation::contracts::model::{ContractFact, GraphqlConsumerFact, GraphqlOp};
 use crate::graph::{graph_path, GraphDatabase, SensorOwner};
-use crate::schema::{EdgeProvenance, EdgeType, GraphEdge, GraphNode, RepoNamespace, StaticSource};
+use crate::schema::{EdgeProvenance, EdgeType, GraphEdge, GraphNode, RepoNamespace};
+
+/// Detector name and confidence for the generated-document -> user link
+/// (`<Operation>Document` / `<Operation>Doc` referenced in a function body).
+const DOCUMENT_LINK_DETECTOR: &str = "graphql_document_link";
+const DOCUMENT_LINK_CONFIDENCE: f32 = 0.8;
 use std::path::Path;
 
 // ─── Public sensor shape ───────────────────────────────────────────────
@@ -1108,10 +1113,14 @@ fn link_generated_documents(
                 }
                 let mut edge =
                     GraphEdge::new(EdgeType::Calls, user.id.clone(), consumer_id.clone());
-                edge.provenance = Some(EdgeProvenance::Static {
-                    source: StaticSource::Regex,
+                // A name match, not a followed reference: two operations
+                // with one name in a repo both link. Heuristic, so
+                // consumers of the graph can tell it from a resolved call.
+                edge.provenance = Some(EdgeProvenance::Heuristic {
+                    detector: DOCUMENT_LINK_DETECTOR.to_string(),
+                    confidence: DOCUMENT_LINK_CONFIDENCE,
                 });
-                edge.weight = Some(0.8);
+                edge.weight = Some(DOCUMENT_LINK_CONFIDENCE);
                 edges.push(edge);
             }
         }
@@ -1305,6 +1314,31 @@ const CREATE = gql`mutation { createOrder(input: {}) { id } }`;
             .filter_map(|e| g.get_node(&e.target_id).ok().flatten())
             .filter(|n| n.name.starts_with("graphql-call:"))
             .collect()
+    }
+
+    /// The link is a name match, so it must say so: `trace_flow` reports a
+    /// `Static` edge as an engine fact and a `Heuristic` one as asserted.
+    #[test]
+    fn the_document_link_is_labelled_heuristic_not_a_resolved_call() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+        std::fs::write(tmp.path().join("src/ProductDetails.graphql"), DOC).unwrap();
+        std::fs::write(tmp.path().join("src/user.ts"), USER_TS).unwrap();
+        let g = GraphDatabase::new(&tmp.path().join("db.bin")).unwrap();
+        let user = fn_node("getProductData", "src/user.ts", 2, 4);
+        g.insert_nodes_batch(std::slice::from_ref(&user)).unwrap();
+        scan_workspace_graphql_consumer(&g, tmp.path(), &RepoNamespace::for_test()).unwrap();
+        let linked: Vec<_> = g
+            .get_edges_from(&user.id)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.edge_type == EdgeType::Calls)
+            .collect();
+        assert_eq!(linked.len(), 1);
+        assert!(matches!(
+            &linked[0].provenance,
+            Some(EdgeProvenance::Heuristic { detector, .. }) if detector == "graphql_document_link"
+        ));
     }
 
     #[test]

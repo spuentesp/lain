@@ -39,11 +39,12 @@ pub fn get_cross_runtime_callers(
         .filter(|e| matches!(e.edge_type, EdgeType::Implements))
         .collect();
 
-    // Find incoming Uses edges from GraphQL nodes
+    // Find incoming Uses edges from GraphQL nodes, and the `CallsGraphql`
+    // edge from the SDL field that this function resolves.
     let gql_incoming: Vec<_> = graph
         .get_edges_to(node_id)?
         .into_iter()
-        .filter(|e| matches!(e.edge_type, EdgeType::Uses))
+        .filter(|e| matches!(e.edge_type, EdgeType::Uses | EdgeType::CallsGraphql))
         .collect();
 
     // HTTP routes
@@ -145,6 +146,40 @@ mod blind_spot_tests {
                 "must not assert an absence it cannot know: {out}"
             );
         }
+    }
+
+    /// The GraphQL section lists the SDL field a resolver serves: the
+    /// `CallsGraphql` edge is how `graphql_resolver_link_sensor` records it.
+    #[test]
+    fn a_resolver_lists_the_sdl_field_that_calls_it() {
+        let tmp = std::env::temp_dir().join("cross_runtime_calls_graphql");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let graph = GraphDatabase::new(&tmp).unwrap();
+        let overlay = VolatileOverlay::new();
+        let resolver = GraphNode::new(
+            NodeType::Function,
+            "resolve_product".into(),
+            "saleor/graphql/product/schema.py".into(),
+        );
+        let field = GraphNode::new(
+            NodeType::Module,
+            "query:product".into(),
+            "saleor/graphql/schema.graphql".into(),
+        );
+        let (resolver_id, field_id) = (resolver.id.clone(), field.id.clone());
+        graph.insert_nodes_batch(&[resolver, field]).unwrap();
+        graph
+            .insert_edges_batch(&[crate::schema::GraphEdge::new(
+                EdgeType::CallsGraphql,
+                field_id,
+                resolver_id,
+            )])
+            .unwrap();
+
+        let out = get_cross_runtime_callers(&graph, &overlay, "resolve_product").unwrap();
+        let gql = out.split("### GraphQL Resolvers").nth(1).expect("section");
+        assert!(gql.contains("query:product"), "SDL field missing: {out}");
+        assert!(!gql.contains("No GraphQL fields use this resolver"));
     }
 
     /// The GraphQL section reads `Uses`, which the indexer does produce,
