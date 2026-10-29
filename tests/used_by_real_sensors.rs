@@ -198,9 +198,6 @@ async fn used_by_is_populated_for_consumers_found_by_the_real_sensors() {
         .find(|c| c["service"] == "billing")
         .unwrap();
     let use_row = &billing["uses"][0];
-    assert_eq!(
-        use_row["used_by_status"], "caller_unavailable",
-        "{use_row:#}"
-    );
+    assert_eq!(use_row["used_by_status"], "caller_unavailable");
     assert!(use_row["used_by"].as_array().unwrap().is_empty());
 }
