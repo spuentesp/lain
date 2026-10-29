@@ -59,17 +59,22 @@ pub fn walk(graph: &GraphDatabase, start_id: &str, depth: u8) -> UsedByResult {
 /// Snapshot equivalent of [`walk`], operating on the immutable federated
 /// backend assembled from pinned per-repository cache entries.
 pub fn walk_backend(backend: &dyn GraphBackend, start_id: &str, depth: u8) -> UsedByResult {
-    let edges = backend.all_edges().unwrap_or_default();
     walk_impl(
         start_id,
         depth,
         |id| backend.get_node(id).ok().flatten(),
+        // Indexed per visited node; cloning every edge up front (and again
+        // per consumer) made `get_service` cost O(consumers x edges).
         |id| {
-            edges
-                .iter()
-                .filter(|edge| edge.edge_type == EdgeType::Calls && edge.target_id == id)
-                .map(|edge| edge.source_id.clone())
-                .collect()
+            let mut callers: Vec<String> = backend
+                .edges_to(id, EdgeType::Calls)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|e| e.source_id)
+                .collect();
+            callers.sort();
+            callers.dedup();
+            callers
         },
     )
 }

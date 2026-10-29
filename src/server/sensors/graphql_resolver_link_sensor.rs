@@ -51,9 +51,11 @@ use crate::federation::contracts::model::{
 };
 use crate::federation::repo_id::RepoId;
 use crate::graph::{graph_path as compute_graph_path, GraphDatabase, SensorOwner};
-use crate::schema::{
-    EdgeProvenance, EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace, StaticSource,
-};
+use crate::schema::{EdgeProvenance, EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace};
+
+/// Detector name and confidence for the SDL provider -> resolver edge.
+const RESOLVER_LINK_DETECTOR: &str = "graphql_resolver_link";
+const RESOLVER_LINK_CONFIDENCE: f32 = 0.9;
 use std::path::{Path, PathBuf};
 
 // ─── Public sensor shape ───────────────────────────────────────────────
@@ -203,12 +205,13 @@ fn push_resolver_edges(
             provider_id.clone(),
             handler.id.clone(),
         );
-        // Matched by framework naming convention, not by following a
-        // reference: static, regex-grade evidence.
-        edge.provenance = Some(EdgeProvenance::Static {
-            source: StaticSource::Regex,
+        // Matched by framework naming convention (`resolve_<field>`), not
+        // by following a reference: a convention detector, so Heuristic.
+        edge.provenance = Some(EdgeProvenance::Heuristic {
+            detector: RESOLVER_LINK_DETECTOR.to_string(),
+            confidence: RESOLVER_LINK_CONFIDENCE,
         });
-        edge.weight = Some(0.9);
+        edge.weight = Some(RESOLVER_LINK_CONFIDENCE);
         edges.push(edge);
     }
 }
@@ -1044,6 +1047,15 @@ class ProductQueries(graphene.ObjectType):
             .collect();
         assert_eq!(edges.len(), 1, "exactly one provider→resolver edge");
         assert_eq!(edges[0].target_id, resolver_id);
+        // A naming-convention match is an inference, not a resolved call.
+        assert!(
+            matches!(
+                &edges[0].provenance,
+                Some(EdgeProvenance::Heuristic { detector, .. }) if detector == "graphql_resolver_link"
+            ),
+            "resolver link must be labelled heuristic: {:?}",
+            edges[0].provenance
+        );
     }
 
     #[test]

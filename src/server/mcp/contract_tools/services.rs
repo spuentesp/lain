@@ -668,12 +668,15 @@ struct CallerNode {
 }
 
 fn call_caller_node_backend(backend: &dyn GraphBackend, call_id: &GlobalId) -> Option<CallerNode> {
+    // One indexed lookup. This runs once per consumer row, so it must not
+    // clone and scan every edge in the federation. Smallest source id wins:
+    // a deterministic pick when a call site has more than one sender.
     let sends_source_id = backend
-        .all_edges()
+        .edges_to(call_id.as_str(), EdgeType::SendsHttp)
         .ok()?
         .into_iter()
-        .find(|e| e.edge_type == EdgeType::SendsHttp && e.target_id == call_id.as_str())?
-        .source_id;
+        .map(|e| e.source_id)
+        .min()?;
     let caller = backend.get_node(&sends_source_id).ok().flatten()?;
     Some(CallerNode {
         id: caller.id,

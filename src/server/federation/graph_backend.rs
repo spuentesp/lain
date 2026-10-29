@@ -103,6 +103,20 @@ pub trait GraphBackend: Send + Sync {
     /// cross-repo graph view. Not a hot path (called once per dashboard
     /// render) so the per-call overhead is acceptable.
     fn all_edges(&self) -> Result<Vec<GraphEdge>, LainError>;
+    /// Edges of `edge_type` that end at `target_id`, in no particular order.
+    ///
+    /// The per-node lookup `all_edges` is the wrong tool for: callers that
+    /// ask this once per consumer or per visited node (`get_service`'s
+    /// `used_by` walk) must not clone and scan the whole edge set each
+    /// time. The default is that scan, so a simple backend stays correct;
+    /// [`PetgraphBackend`] overrides it with an index lookup.
+    fn edges_to(&self, target_id: &str, edge_type: EdgeType) -> Result<Vec<GraphEdge>, LainError> {
+        Ok(self
+            .all_edges()?
+            .into_iter()
+            .filter(|e| e.edge_type == edge_type && e.target_id == target_id)
+            .collect())
+    }
     /// BFS along edges of `edge` starting at `start`. `direction`
     /// controls whether we follow outgoing edges (the default — "what
     /// does X depend on") or incoming edges ("what depends on X" —
@@ -405,6 +419,15 @@ impl GraphBackend for PetgraphBackend {
 
     fn all_edges(&self) -> Result<Vec<GraphEdge>, LainError> {
         Ok(self.db.all_edges())
+    }
+
+    fn edges_to(&self, target_id: &str, edge_type: EdgeType) -> Result<Vec<GraphEdge>, LainError> {
+        Ok(self
+            .db
+            .get_edges_to(target_id)?
+            .into_iter()
+            .filter(|e| e.edge_type == edge_type)
+            .collect())
     }
 
     fn traverse(
