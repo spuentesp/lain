@@ -16,6 +16,7 @@ use crate::federation::contracts::clients::{
     build_client_def, detect_clients, ClientDef, ClientRegistry,
 };
 use crate::federation::contracts::config::ContractFederationConfig;
+use crate::federation::contracts::config::DECLARED_PROVIDER_PATH_PREFIX;
 use crate::federation::contracts::index::ContractIndex;
 use crate::federation::contracts::joiner::ContractJoiner;
 use crate::federation::graph_backend::GraphBackend;
@@ -1985,7 +1986,9 @@ impl crate::federation::cross_repo::CrossRepoResolver for FederatedIndex {
 /// A declared provider (`repos.yaml#provides`) has no graph node, so a bind
 /// to it stays in the contract index and is not written as a graph edge.
 fn is_declared_provider(provider: &GlobalId) -> bool {
-    provider.as_str().contains("repos.yaml#provides[")
+    provider
+        .path()
+        .is_some_and(|path| path.starts_with(DECLARED_PROVIDER_PATH_PREFIX))
 }
 
 /// Ends a repo index pass when dropped. See [`FederatedIndex::enter_index_pass`].

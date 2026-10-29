@@ -27,6 +27,14 @@ use std::str::FromStr;
 /// default to empty when the YAML is silent on them. The block lives
 /// inside the same `repos.yaml` as the existing `FederationConfig`,
 /// loaded via `ContractFederationConfig::load`.
+/// The path segment a declared provider's node id carries.
+///
+/// A declared provider (`repos.yaml#provides`) has no file behind it, so
+/// its node id names the section it came from instead of a path. Every
+/// consumer that has to tell a declared provider from a detected one
+/// matches on this prefix.
+pub const DECLARED_PROVIDER_PATH_PREFIX: &str = "repos.yaml#provides[";
+
 /// A provider the analyzer cannot see. The service's API surface often
 /// lives in a runtime configuration file (FastAPI's `add_api_route(path=…)`,
 /// a gateway route table, a mesh spec); the operator states it and the

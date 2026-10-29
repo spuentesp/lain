@@ -174,8 +174,25 @@ pub fn write_guarded(path: &Path, expected: &[u8], new: &[u8]) -> Result<(), Lai
 
 /// Put the original bytes back. Used when the re-join after a write fails,
 /// so the file does not claim a declaration the federation does not serve.
-pub fn restore(path: &Path, original: &[u8]) -> Result<(), LainError> {
+///
+/// The restore is guarded the same way the write is: the file is put back
+/// only while it still holds the bytes this process wrote. A file another
+/// writer has touched since is left alone — clobbering it would destroy
+/// that writer's change to cover up ours. The `.bak` is not rewritten
+/// here, so it keeps the original bytes.
+///
+/// `expected` is what the caller wrote; `original` is what the file
+/// held before.
+pub fn restore(path: &Path, expected: &[u8], original: &[u8]) -> Result<(), LainError> {
     let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let current = std::fs::read(path)
+        .map_err(|e| LainError::Config(format!("read {}: {e}", path.display())))?;
+    if current != expected {
+        return Err(LainError::Config(format!(
+            "{} changed since it was written; it was left alone",
+            path.display()
+        )));
+    }
     crate::cli::io::write_file_atomic(path, original)
         .map_err(|e| LainError::Config(format!("restore {}: {e}", path.display())))
 }

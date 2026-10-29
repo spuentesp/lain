@@ -13,7 +13,9 @@
 
 use std::collections::BTreeMap;
 
-use crate::federation::contracts::config::{ContractFederationConfig, ServiceDecl};
+use crate::federation::contracts::config::{
+    ContractFederationConfig, ServiceDecl, DECLARED_PROVIDER_PATH_PREFIX,
+};
 use crate::federation::contracts::index::EndpointId;
 use crate::federation::contracts::model::{
     ContractFact, ContractKey, HttpMethod, MethodSpec, ProviderFact, ServiceName,
@@ -247,7 +249,7 @@ pub(crate) fn build_endpoints(
         let id = GlobalId::new(
             &repo_id,
             crate::schema::NodeType::HttpRoute,
-            &format!("repos.yaml#provides[{i}]"),
+            &format!("{DECLARED_PROVIDER_PATH_PREFIX}{i}]"),
             &decl.key,
             Some(i as u32),
         );

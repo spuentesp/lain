@@ -20,7 +20,9 @@ use serde_json::{json, Map, Value};
 use super::envelope::{error_outcome, outcome, success_envelope};
 use super::view::snapshot_label;
 use super::{ContractToolEntry, ContractToolFuture, ToolOutcome};
-use crate::federation::contracts::config::{ContractFederationConfig, HostAliasDecl, ProviderDecl};
+use crate::federation::contracts::config::{
+    ContractFederationConfig, HostAliasDecl, ProviderDecl, DECLARED_PROVIDER_PATH_PREFIX,
+};
 use crate::federation::contracts::context::{
     merge_host_aliases, merge_provides, restore, write_guarded,
 };
@@ -181,15 +183,23 @@ fn run_apply(
         // declaration has nothing to be in effect.
         let requested = !incoming.is_empty() || !incoming_aliases.is_empty();
         let served = requested && declaration_served(fed, &incoming, &incoming_aliases);
-        let note = if !requested {
-            "no declaration in the request; nothing to write"
-        } else if served {
-            "every declaration is already present and served; nothing to write"
-        } else {
-            "every declaration is already present in the file, but the live index is not serving it"
-        };
-        let body = data(served, json!({"yaml": new_yaml, "note": note}));
-        return Ok(respond(body, started, note));
+        if !requested {
+            let note = "no declaration in the request; nothing to write";
+            let body = data(false, json!({"yaml": new_yaml, "note": note}));
+            return Ok(respond(body, started, note));
+        }
+        if served {
+            let note = "every declaration is already present and served; nothing to write";
+            let body = data(true, json!({"yaml": new_yaml, "note": note}));
+            return Ok(respond(body, started, note));
+        }
+        // The declaration is in the file but the live index does not
+        // serve it: the watcher has not reloaded it, or the reload
+        // failed. Fall through to the write and the re-join — the bytes
+        // on disk do not change, and the re-join is what makes the
+        // declaration live. Returning here would leave the operator
+        // with a declaration the federation never serves, and no way
+        // to make it serve from this tool.
     }
 
     write_guarded(&config_path, &original, new_yaml.as_bytes()).map_err(|e| {
@@ -206,7 +216,7 @@ fn run_apply(
     let served = declaration_served(fed, &incoming, &incoming_aliases);
     if rejoin.is_err() || !served {
         // Roll the file and the live config back. Nothing claims success.
-        let restored = restore(&config_path, &original);
+        let restored = restore(&config_path, new_yaml.as_bytes(), &original);
         fed.set_contract_config(current);
         let _ = fed.rejoin_contracts_if_dirty();
         let reason = match &rejoin {
@@ -242,39 +252,61 @@ fn run_apply(
     ))
 }
 
+/// Whether every declared provider in `incoming` is served by `index`.
+///
+/// A declaration is served when the index carries an endpoint for its
+/// service whose provider record is the declaration itself — the node
+/// id names the `repos.yaml#provides[i]` section it came from, and its
+/// name segment is the declared key. Matching on the key rather than
+/// on the endpoint's template keeps the check exact for every key kind
+/// (a `topic:` declaration has no path template to compare).
+///
+/// Every declaration must be served: a request that declares two
+/// providers and lands one is a partial application.
+fn declared_providers_served(
+    index: &crate::federation::contracts::index::ContractIndex,
+    incoming: &[ProviderDecl],
+) -> bool {
+    incoming.iter().all(|d| {
+        index.endpoints.values().any(|e| {
+            e.id.0 .0 == d.service
+                && e.providers.iter().any(|p| {
+                    p.node_id
+                        .path()
+                        .is_some_and(|path| path.starts_with(DECLARED_PROVIDER_PATH_PREFIX))
+                        && p.node_id.name().as_deref() == Some(d.key.as_str())
+                })
+        })
+    })
+}
+
 /// Whether the live contract index serves the declarations.
 ///
 /// The declaration must be *served* before the tool claims success: a
 /// declared provider must show up in the endpoint table, a declared host
 /// alias must be live in the contract config the joiner just ran
 /// against. Either way the contract index must exist.
+///
+/// *Every* declaration in the request must be served. A request that
+/// declares two providers and lands one is a partial application, and
+/// reporting it as applied would tell the operator that a provider the
+/// index does not serve is live.
 fn declaration_served(
     fed: &FederatedIndex,
     incoming: &[ProviderDecl],
     incoming_aliases: &[HostAliasDecl],
 ) -> bool {
     let index = fed.contract_index();
-    let providers_served = incoming.is_empty()
-        || index.as_ref().is_some_and(|index| {
-            index.endpoints.values().any(|e| {
-                e.providers
-                    .iter()
-                    .any(|p| p.node_id.as_str().contains("repos.yaml#provides["))
-                    && incoming.iter().any(|d| {
-                        declared_key_template(&d.key)
-                            .map(|t| t == e.template)
-                            .unwrap_or(true)
-                    })
-            })
-        });
-    let aliases_served = incoming_aliases.is_empty()
-        || fed.contract_config().is_some_and(|c| {
-            c.host_aliases.iter().any(|a| {
-                incoming_aliases
-                    .iter()
-                    .any(|d| a.host == d.host && a.file == d.file && a.service == d.service)
-            })
-        });
+    let providers_served = index
+        .as_ref()
+        .is_some_and(|index| declared_providers_served(index, incoming));
+    let aliases_served = incoming_aliases.iter().all(|d| {
+        fed.contract_config().is_some_and(|c| {
+            c.host_aliases
+                .iter()
+                .any(|a| a.host == d.host && a.file == d.file && a.service == d.service)
+        })
+    });
     index.is_some() && providers_served && aliases_served
 }
 
@@ -283,11 +315,129 @@ fn respond(data: Value, started: Instant, text: &str) -> ToolOutcome {
     outcome(envelope, &data, text.to_string())
 }
 
-/// The path template of an HTTP key: `http:POST /chat/stream` →
-/// `/chat/stream`. `None` for a key of another kind, which has no
-/// template to compare an endpoint against.
-fn declared_key_template(key: &str) -> Option<&str> {
-    let rest = key.strip_prefix("http:")?;
-    let (_, template) = rest.split_once(' ')?;
-    Some(template)
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::federation::contracts::index::{ContractIndex, Endpoint, EndpointProvider};
+    use crate::federation::contracts::model::{ContractKey, Direction, HttpMethod, ServiceName};
+    use crate::federation::repo_id::RepoId;
+    use crate::schema::NodeType;
+    use std::collections::BTreeMap;
+
+    fn decl(service: &str, key: &str) -> ProviderDecl {
+        ProviderDecl {
+            service: service.into(),
+            key: key.into(),
+            source: None,
+        }
+    }
+
+    /// An endpoint for `service` whose only provider is the declared
+    /// provider at `repos.yaml#provides[i]`, with `key` as its declared
+    /// key — the shape the joiner mints.
+    fn declared_endpoint(service: &str, key: &str, i: u32, template: &str) -> Endpoint {
+        let repo = RepoId::new("nat").expect("repo id");
+        let node_id = crate::federation::repo_id::GlobalId::new(
+            &repo,
+            NodeType::HttpRoute,
+            &format!("{DECLARED_PROVIDER_PATH_PREFIX}{i}]"),
+            key,
+            Some(i),
+        );
+        Endpoint {
+            id: (
+                ServiceName(service.into()),
+                ContractKey::Http {
+                    method: crate::federation::contracts::model::MethodSpec::Known(
+                        HttpMethod::Post,
+                    ),
+                    template: template.into(),
+                },
+            ),
+            method: HttpMethod::Post,
+            template: template.into(),
+            providers: vec![EndpointProvider {
+                node_id,
+                origin: crate::federation::contracts::model::ProviderOrigin::Code,
+                handler: None,
+                operation_id: None,
+            }],
+            schemas: BTreeMap::<Direction, _>::new(),
+        }
+    }
+
+    fn index_with(endpoints: Vec<Endpoint>) -> ContractIndex {
+        let mut index = ContractIndex::default();
+        for e in endpoints {
+            index.endpoints.insert(e.id.clone(), e);
+        }
+        index
+    }
+
+    /// Both declarations are served: the request is fully applied.
+    #[test]
+    fn every_declared_provider_served_is_true() {
+        let index = index_with(vec![
+            declared_endpoint("nat", "http:POST /chat", 0, "/chat"),
+            declared_endpoint("nat", "http:POST /stream", 1, "/stream"),
+        ]);
+        assert!(declared_providers_served(
+            &index,
+            &[
+                decl("nat", "http:POST /chat"),
+                decl("nat", "http:POST /stream")
+            ]
+        ));
+    }
+
+    /// Only one of the two declarations landed. The request is a
+    /// partial application, and the tool must not report it as served.
+    #[test]
+    fn a_partially_served_declaration_is_not_served() {
+        let index = index_with(vec![declared_endpoint(
+            "nat",
+            "http:POST /chat",
+            0,
+            "/chat",
+        )]);
+        assert!(!declared_providers_served(
+            &index,
+            &[
+                decl("nat", "http:POST /chat"),
+                decl("nat", "http:POST /stream")
+            ]
+        ));
+    }
+
+    /// A declaration of another service is not served by this one's
+    /// endpoint, even when the key is the same.
+    #[test]
+    fn a_declaration_of_another_service_is_not_served() {
+        let index = index_with(vec![declared_endpoint(
+            "nat",
+            "http:POST /chat",
+            0,
+            "/chat",
+        )]);
+        assert!(!declared_providers_served(
+            &index,
+            &[decl("other", "http:POST /chat")]
+        ));
+    }
+
+    /// A key of another kind matches only its own declaration: the
+    /// check compares the declared key, not the endpoint's template.
+    #[test]
+    fn a_declaration_matches_only_its_own_key() {
+        let index = index_with(vec![declared_endpoint(
+            "nat",
+            "http:POST /chat",
+            0,
+            "/chat",
+        )]);
+        assert!(!declared_providers_served(
+            &index,
+            &[decl("nat", "topic:kafka/orders.created")]
+        ));
+    }
 }

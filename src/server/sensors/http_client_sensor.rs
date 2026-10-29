@@ -407,7 +407,7 @@ fn process_outbound_match(
     } else {
         String::new()
     };
-    let enclosing_fn_line = enclosing_function_line(call);
+    let enclosing_scope = enclosing_scope_offset(call);
 
     // Library classification. The order matters: a bound client
     // wins over a known-library match (so `client = httpx.Client(...)`
@@ -441,7 +441,7 @@ fn process_outbound_match(
             src,
             ctx,
             base_url_opt,
-            enclosing_fn_line,
+            enclosing_scope,
             path,
             framework,
             &verb_text,
@@ -482,7 +482,7 @@ fn process_outbound_match(
             src,
             ctx,
             base_url_opt,
-            enclosing_fn_line,
+            enclosing_scope,
             path,
             framework,
             &verb_text,
@@ -539,7 +539,7 @@ fn process_outbound_match(
             src,
             ctx,
             base_url_opt,
-            enclosing_fn_line,
+            enclosing_scope,
             path,
             framework,
             &verb_text,
@@ -575,7 +575,7 @@ fn process_outbound_match(
             src,
             ctx,
             base_url_opt,
-            enclosing_fn_line,
+            enclosing_scope,
             path,
             framework,
             &verb_text,
@@ -638,14 +638,14 @@ fn build_call(
     src: &[u8],
     ctx: &FileContext,
     base_url_opt: Option<&str>,
-    enclosing_fn_line: Option<u32>,
+    enclosing_scope: Option<u32>,
     path: &str,
     _framework: &FrameworkDef,
     _verb_text: &str,
 ) -> Option<HttpClientCall> {
     let call_line = (call.start_position().row as u32) + 1;
     let raw_parts = match url {
-        Some(u) => parts_from_node(u, src, ctx, enclosing_fn_line, base_url_opt),
+        Some(u) => parts_from_node(u, src, ctx, enclosing_scope, base_url_opt),
         None => Vec::new(),
     };
     // The scope chain of the *use* site. A name assigned in an enclosing
@@ -991,7 +991,10 @@ struct FileContext {
     /// occurrences in the same walk so that two assignments to the
     /// same name leave the name unresolvable.
     module_assign_counts: BTreeMap<String, u32>,
-    /// Per-function assignments keyed by `(function_start_line, name)`.
+    /// Per-function assignments keyed by `(scope_offset, name)`, where
+    /// the offset is the enclosing scope's start byte. A byte offset
+    /// and not a line number: two scopes can start on the same line,
+    /// and one key must not stand for both.
     /// A name resolves at a call site when there is exactly one
     /// assignment with that name in the enclosing function.
     fn_assignments: BTreeMap<(u32, String), String>,
@@ -1039,13 +1042,21 @@ impl FileContext {
     fn resolve_identifier(&self, name: &str, scope_chain: &[u32]) -> Option<String> {
         // The scope chain is searched innermost first: a name assigned
         // in an enclosing scope is visible in a nested closure, which is
-        // the lexical rule every one of these languages follows. A
-        // name assigned twice in the same scope stays unresolved.
-        for line in scope_chain {
-            let key = (*line, name.to_string());
-            if self.fn_assign_counts.get(&key) == Some(&1) {
-                return self.fn_assignments.get(&key).cloned();
-            }
+        // the lexical rule every one of these languages follows.
+        for scope in scope_chain {
+            let key = (*scope, name.to_string());
+            let Some(count) = self.fn_assign_counts.get(&key) else {
+                continue; // not bound in this scope — look further out
+            };
+            // The name IS bound here, so it shadows every outer scope.
+            // A name assigned twice in this scope stays unresolved: it
+            // must not resolve to an outer scope's value, which would
+            // attribute the call to a host it never dials.
+            return if *count == 1 {
+                self.fn_assignments.get(&key).cloned()
+            } else {
+                None
+            };
         }
         // Module-level: single assignment only.
         if self.module_assign_counts.get(name) == Some(&1) {
@@ -1068,7 +1079,7 @@ fn collect_python_context(root: Node, src: &[u8], ctx: &mut FileContext) {
                     if is_module_level(node) {
                         ctx.module_assignments.insert(name.clone(), value.clone());
                         *ctx.module_assign_counts.entry(name).or_insert(0) += 1;
-                    } else if let Some(fn_line) = enclosing_function_line(node) {
+                    } else if let Some(fn_line) = enclosing_scope_offset(node) {
                         let key = (fn_line, name.clone());
                         ctx.fn_assignments
                             .entry(key.clone())
@@ -1314,7 +1325,7 @@ fn collect_java_context(root: Node, src: &[u8], ctx: &mut FileContext) {
             let value = find_builder_url_arg(child, src)
                 .and_then(|arg| text_of(arg, src))
                 .unwrap_or(value);
-            if let Some(fn_line) = enclosing_function_line(node) {
+            if let Some(fn_line) = enclosing_scope_offset(node) {
                 let key = (fn_line, name.clone());
                 ctx.fn_assignments
                     .entry(key.clone())
@@ -1375,6 +1386,9 @@ fn is_module_level(node: Node) -> bool {
 /// ancestor first, then outward. A name assigned in an enclosing
 /// scope is visible in a nested closure — the lexical rule.
 ///
+/// Each entry is the scope's start byte, so two scopes that begin on
+/// the same source line keep separate identities.
+///
 /// Python's `lambda` and Java's nested class are scopes here too, so
 /// the chain means the same thing in every language the sensor
 /// reads.
@@ -1383,7 +1397,7 @@ fn scope_chain(node: Node) -> Vec<u32> {
     let mut cur = node.parent();
     while let Some(p) = cur {
         if is_scope_kind(p.kind()) {
-            out.push(p.start_position().row as u32);
+            out.push(p.start_byte() as u32);
         }
         cur = p.parent();
     }
@@ -1413,6 +1427,7 @@ fn is_scope_kind(kind: &str) -> bool {
 /// enclosing function, or nowhere we track (a class body).
 enum AssignmentScope {
     Module,
+    /// The enclosing scope's start byte.
     Function(u32),
     Skip,
 }
@@ -1429,17 +1444,17 @@ fn assignment_scope(node: Node) -> AssignmentScope {
     }
 }
 
-fn enclosing_function_line(node: Node) -> Option<u32> {
+fn enclosing_scope_offset(node: Node) -> Option<u32> {
     let mut cur = node.parent();
     while let Some(p) = cur {
         match p.kind() {
             "function_definition" | "async_function_definition" => {
-                return Some(p.start_position().row as u32);
+                return Some(p.start_byte() as u32);
             }
             // Java: locals live inside a `method_declaration`; the
-            // per-function assignment table is keyed by this line.
+            // per-function assignment table is keyed by this scope.
             "method_declaration" => {
-                return Some(p.start_position().row as u32);
+                return Some(p.start_byte() as u32);
             }
             _ => {}
         }
@@ -1592,10 +1607,10 @@ fn parts_from_node(
     node: Node,
     src: &[u8],
     ctx: &FileContext,
-    enclosing_fn_line: Option<u32>,
+    enclosing_scope: Option<u32>,
     base_url: Option<&str>,
 ) -> Vec<UrlPart> {
-    let raw = parts_from_node_inner(node, src, ctx, enclosing_fn_line);
+    let raw = parts_from_node_inner(node, src, ctx, enclosing_scope);
     apply_base_url(raw, base_url)
 }
 
@@ -1603,7 +1618,7 @@ fn parts_from_node_inner(
     node: Node,
     src: &[u8],
     ctx: &FileContext,
-    enclosing_fn_line: Option<u32>,
+    enclosing_scope: Option<u32>,
 ) -> Vec<UrlPart> {
     match node.kind() {
         // Python string / TS string literal — strip them and produce a
@@ -1634,7 +1649,7 @@ fn parts_from_node_inner(
                             }
                         }
                         "interpolation" => {
-                            let inner = parts_from_node_inner(child, src, ctx, enclosing_fn_line);
+                            let inner = parts_from_node_inner(child, src, ctx, enclosing_scope);
                             if !inner.is_empty() {
                                 out.extend(inner);
                             }
@@ -1675,11 +1690,11 @@ fn parts_from_node_inner(
             let mut out = Vec::new();
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
-                out.extend(parts_from_node_inner(child, src, ctx, enclosing_fn_line));
+                out.extend(parts_from_node_inner(child, src, ctx, enclosing_scope));
             }
             out
         }
-        "template_string" => template_string_parts(node, src, ctx, enclosing_fn_line),
+        "template_string" => template_string_parts(node, src, ctx, enclosing_scope),
         "binary_expression" => {
             // Only the `+` operator concatenates. Any other binary op
             // yields a Hole with the full expression.
@@ -1691,10 +1706,10 @@ fn parts_from_node_inner(
             }
             let mut out = Vec::new();
             if let Some(lhs) = node.child_by_field_name("left") {
-                out.extend(parts_from_node_inner(lhs, src, ctx, enclosing_fn_line));
+                out.extend(parts_from_node_inner(lhs, src, ctx, enclosing_scope));
             }
             if let Some(rhs) = node.child_by_field_name("right") {
-                out.extend(parts_from_node_inner(rhs, src, ctx, enclosing_fn_line));
+                out.extend(parts_from_node_inner(rhs, src, ctx, enclosing_scope));
             }
             out
         }
@@ -1704,7 +1719,7 @@ fn parts_from_node_inner(
         "substitution" | "template_substitution" => {
             let mut cursor = node.walk();
             if let Some(child) = node.named_children(&mut cursor).next() {
-                return parts_from_node_inner(child, src, ctx, enclosing_fn_line);
+                return parts_from_node_inner(child, src, ctx, enclosing_scope);
             }
             Vec::new()
         }
@@ -1715,7 +1730,7 @@ fn parts_from_node_inner(
                 if matches!(child.kind(), "format_specifier") {
                     continue;
                 }
-                return parts_from_node_inner(child, src, ctx, enclosing_fn_line);
+                return parts_from_node_inner(child, src, ctx, enclosing_scope);
             }
             Vec::new()
         }
@@ -1727,12 +1742,12 @@ fn parts_from_node_inner(
             // exists, and never fall back to `node` itself (which
             // would recurse on the same kind → stack overflow).
             if let Some(value) = node.child_by_field_name("value") {
-                parts_from_node_inner(value, src, ctx, enclosing_fn_line)
+                parts_from_node_inner(value, src, ctx, enclosing_scope)
             } else {
                 let mut cursor = node.walk();
                 let next = node.named_children(&mut cursor).next();
                 match next {
-                    Some(child) => parts_from_node_inner(child, src, ctx, enclosing_fn_line),
+                    Some(child) => parts_from_node_inner(child, src, ctx, enclosing_scope),
                     None => Vec::new(),
                 }
             }
@@ -1741,7 +1756,7 @@ fn parts_from_node_inner(
         // base then "/p". Both Python stdlib `urljoin` and TS `URL`
         // ctor. We detect either form and split into base + path.
         "call" | "call_expression" | "new_expression" => {
-            call_urljoin_parts(node, src, ctx, enclosing_fn_line)
+            call_urljoin_parts(node, src, ctx, enclosing_scope)
         }
         // Identifier: resolve once if possible.
         "identifier" => identifier_parts(node, src, ctx),
@@ -1765,7 +1780,7 @@ fn parts_from_node_inner(
                 if key_text == "url" {
                     let value = child.child_by_field_name("value");
                     if let Some(v) = value {
-                        out.extend(parts_from_node_inner(v, src, ctx, enclosing_fn_line));
+                        out.extend(parts_from_node_inner(v, src, ctx, enclosing_scope));
                     }
                 }
             }
@@ -1782,7 +1797,7 @@ fn parts_from_node_inner(
         // and stays a hole carrying the whole text.
         "method_invocation" | "object_creation_expression" => {
             if let Some(arg) = find_builder_url_arg(node, src) {
-                return parts_from_node_inner(arg, src, ctx, enclosing_fn_line);
+                return parts_from_node_inner(arg, src, ctx, enclosing_scope);
             }
             vec![UrlPart::Hole(text_of(node, src).unwrap_or_default())]
         }
@@ -1795,7 +1810,7 @@ fn template_string_parts(
     node: Node,
     src: &[u8],
     ctx: &FileContext,
-    enclosing_fn_line: Option<u32>,
+    enclosing_scope: Option<u32>,
 ) -> Vec<UrlPart> {
     // JS grammar emits `template_string`'s named children as
     // `template_substitution` (one per `${…}`) and `string_fragment`
@@ -1805,7 +1820,7 @@ fn template_string_parts(
     for child in node.named_children(&mut cursor) {
         match child.kind() {
             "template_substitution" => {
-                let inner = parts_from_node_inner(child, src, ctx, enclosing_fn_line);
+                let inner = parts_from_node_inner(child, src, ctx, enclosing_scope);
                 if inner.is_empty() {
                     out.push(UrlPart::Hole(String::new()));
                 } else {
@@ -1839,7 +1854,7 @@ fn call_urljoin_parts(
     node: Node,
     src: &[u8],
     ctx: &FileContext,
-    enclosing_fn_line: Option<u32>,
+    enclosing_scope: Option<u32>,
 ) -> Vec<UrlPart> {
     // `new URL(...)` exposes the constructor under the `constructor`
     // field rather than `function`. `call` / `call_expression` use
@@ -1889,10 +1904,10 @@ fn call_urljoin_parts(
     let path_arg = args.get(path_idx).copied();
     let mut out = Vec::new();
     if let Some(b) = base_arg {
-        out.extend(parts_from_node_inner(b, src, ctx, enclosing_fn_line));
+        out.extend(parts_from_node_inner(b, src, ctx, enclosing_scope));
     }
     if let Some(p) = path_arg {
-        out.extend(parts_from_node_inner(p, src, ctx, enclosing_fn_line));
+        out.extend(parts_from_node_inner(p, src, ctx, enclosing_scope));
     }
     out
 }
@@ -2640,6 +2655,45 @@ const handler = async (req, res) => {
             Patterns::patterns(),
         )
     }
+    /// An ambiguous binding in an inner scope shadows the outer scope's
+    /// value: the name is assigned twice inside the handler, so the
+    /// identifier is unresolved. It must not fall through to the
+    /// module-level binding — that would attribute the call to a host
+    /// it never dials.
+    #[test]
+    fn ts_ambiguous_inner_binding_does_not_resolve_to_the_outer_scope() {
+        let src = "\
+const targetUrl = 'https://outer.example/one';
+const handler = async () => {
+  let targetUrl = 'https://a.example';
+  targetUrl = 'https://b.example';
+  const res = await fetch(targetUrl);
+};
+";
+        let calls = ts_calls(src);
+        assert_eq!(calls.len(), 1);
+        match &calls[0].url.host {
+            HostPart::Expr(expr) => assert_eq!(expr, "targetUrl"),
+            other => panic!("expected the unresolved identifier, got {other:?}"),
+        }
+    }
+
+    /// Two scopes that start on the same source line are two scopes: a
+    /// name bound in one is not visible in the other. The scope key is
+    /// the scope's start byte, not its line.
+    #[test]
+    fn ts_sibling_scopes_on_one_line_do_not_share_a_scope() {
+        let src = "\
+const a = () => { const targetUrl = 'https://a.example'; }; const b = () => { const res = fetch(targetUrl); };
+";
+        let calls = ts_calls(src);
+        assert_eq!(calls.len(), 1);
+        match &calls[0].url.host {
+            HostPart::Expr(expr) => assert_eq!(expr, "targetUrl"),
+            other => panic!("expected the unresolved identifier, got {other:?}"),
+        }
+    }
+
     fn ts_calls(src: &str) -> Vec<HttpClientCall> {
         detect_calls(
             std::path::Path::new("test.ts"),
