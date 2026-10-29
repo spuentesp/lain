@@ -7,6 +7,16 @@ All notable changes to LAIN are documented here. Versions follow
 
 ### Added
 
+- **Django ORM table sensor** (`django_orm_sensor`). Maps Django model classes
+  to tables (`Meta.db_table`, else `<app_label>_<classname>`; abstract models
+  have none, proxies use their parent's) and emits `ReadsTable` /
+  `WritesTable` edges from the function that runs `Model.objects…` chains,
+  `get_object_or_404`, or saves a model instance. A chain with only custom
+  manager methods is a heuristic read (confidence 0.6). Anything it cannot
+  resolve (bare `Model.objects`, dynamic receivers, ambiguous model names,
+  non-literal `db_table`) goes on the coverage ledger as `OrmDynamicQuery`.
+  The app label is a path heuristic: a custom `AppConfig.label` is not read.
+  No schema change: `FEDERATION_GRAPH_VERSION` is unchanged.
 - Embedding models are declared in `models.toml` (built in; a user file at
   `~/.config/lain/models.toml` can add models or change the default). The
   default, granite-embedding-small-english-r2 (Apache-2.0, about 195 MB), is

@@ -235,20 +235,34 @@ async fn run_diff_contracts(
             started,
         ));
     }
-    let (base_index, base_fed, _base_hold) =
-        snapshot_contract_index(ctx, &base_record, &args_map, started)?;
-    let (head_index, head_fed, _head_hold) =
-        snapshot_contract_index(ctx, &head_record, &args_map, started)?;
+    // Hydrating two snapshots can take minutes on a large federation;
+    // keep it off the runtime workers (see `run_blocking`).
+    let ((base_index, base_fed, _base_hold), (head_index, head_fed, _head_hold)) =
+        super::run_blocking(|| {
+            let base = snapshot_contract_index(ctx, &base_record, &args_map, started)?;
+            let head = snapshot_contract_index(ctx, &head_record, &args_map, started)?;
+            Ok::<_, ToolOutcome>((base, head))
+        })?;
     let data_dir = ctx
         .snapshots
         .map(|m| m.data_dir().to_path_buf())
         .unwrap_or_else(|| std::path::PathBuf::from("."));
-    let changed_source = build_changed_source(&data_dir, &base_record, &head_record);
-    let base_surface = ContractSurface::from_index(&base_index);
-    let head_surface = ContractSurface::from_index(&head_index);
-
-    let provider_changes = diff_contracts(&base_surface, &head_surface, &changed_source);
-    let consumer_changes = diff_consumers(&base_surface, &head_surface);
+    // git-mirror diffs plus the surface diff: blocking IO and CPU.
+    let (changed_source, base_surface, head_surface, provider_changes, consumer_changes) =
+        super::run_blocking(|| {
+            let changed_source = build_changed_source(&data_dir, &base_record, &head_record);
+            let base_surface = ContractSurface::from_index(&base_index);
+            let head_surface = ContractSurface::from_index(&head_index);
+            let provider_changes = diff_contracts(&base_surface, &head_surface, &changed_source);
+            let consumer_changes = diff_consumers(&base_surface, &head_surface);
+            (
+                changed_source,
+                base_surface,
+                head_surface,
+                provider_changes,
+                consumer_changes,
+            )
+        });
     let mut all_changes = provider_changes;
     all_changes.extend(consumer_changes);
 
@@ -2097,7 +2111,7 @@ fn graph_path_to_value(p: &GraphImpactPath) -> Value {
     })
 }
 
-fn provenance_label(p: Option<&EdgeProvenance>) -> Value {
+pub(super) fn provenance_label(p: Option<&EdgeProvenance>) -> Value {
     let Some(p) = p else {
         // A legacy edge with no recorded provenance. Treated as 0.0
         // here and in `traverse_impact`, because confidence must be

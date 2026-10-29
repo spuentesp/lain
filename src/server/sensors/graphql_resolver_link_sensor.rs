@@ -30,6 +30,14 @@
 //!   SDL root field name and it lives in a class that inherits
 //!   from `strawberry.type`.
 //!
+//! - **graphene** (Python): a class deriving from
+//!   `graphene.ObjectType` with `def resolve_<field>(...)` methods
+//!   (Saleor's shape). The snake_case method suffix is the camelCase
+//!   SDL field; the class name picks the root operation
+//!   (`*Mutations` → Mutation, `*Subscription(s)` → Subscription,
+//!   otherwise Query). Mutation *classes* (`class FooCreate(BaseMutation)`)
+//!   are not covered — they resolve through `perform_mutation`.
+//!
 //! The emitted `GraphqlHandler` is what
 //! `ContractKey::Graphql { op, field }` providers get a
 //! `handler` link from. The joiner wires the handler
@@ -43,7 +51,9 @@ use crate::federation::contracts::model::{
 };
 use crate::federation::repo_id::RepoId;
 use crate::graph::{graph_path as compute_graph_path, GraphDatabase, SensorOwner};
-use crate::schema::{GraphEdge, GraphNode, NodeType, RepoNamespace};
+use crate::schema::{
+    EdgeProvenance, EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace, StaticSource,
+};
 use std::path::{Path, PathBuf};
 
 // ─── Public sensor shape ───────────────────────────────────────────────
@@ -92,6 +102,8 @@ pub fn scan_workspace_resolver_link(
     };
     let mut total = 0usize;
     let mut all_nodes: Vec<GraphNode> = Vec::new();
+    let mut all_edges: Vec<GraphEdge> = Vec::new();
+    let providers = graphql_provider_ids(graph);
     let detectors = default_resolver_detectors(root, &repo_id);
     for (path, content, ext) in crate::server::sensors::util::scan_files(root, code_ext) {
         for detector in &detectors {
@@ -127,6 +139,7 @@ pub fn scan_workspace_resolver_link(
                 })];
                 all_nodes.push(node);
                 total += 1;
+                push_resolver_edges(graph, &providers, &link, &graph_path_str, &mut all_edges);
             }
         }
     }
@@ -138,9 +151,66 @@ pub fn scan_workspace_resolver_link(
     graph.replace_sensor_output(
         SensorOwner::GraphqlResolverLinkSensor,
         &all_nodes,
-        &[] as &[GraphEdge],
+        &all_edges,
     )?;
     Ok(total)
+}
+
+/// `(op, field)` → ids of the SDL provider nodes that declare it.
+fn graphql_provider_ids(
+    graph: &GraphDatabase,
+) -> std::collections::BTreeMap<(GraphqlOp, String), Vec<String>> {
+    let mut out: std::collections::BTreeMap<(GraphqlOp, String), Vec<String>> =
+        std::collections::BTreeMap::new();
+    for n in graph
+        .get_nodes_by_type(NodeType::Module)
+        .unwrap_or_default()
+    {
+        for fact in &n.contract {
+            if let ContractFact::GraphqlProvider(p) = fact {
+                out.entry((p.op, p.field.clone()))
+                    .or_default()
+                    .push(n.id.clone());
+            }
+        }
+    }
+    out
+}
+
+/// Emit `CallsGraphql` from every SDL provider of `link`'s root field to
+/// the resolver function the detector found. The resolver is the
+/// function/method enclosing the detector's `site_line`; when the
+/// indexer has no such symbol, or the SDL isn't indexed in this repo,
+/// no edge is emitted (the fact stays on the handler-link node).
+fn push_resolver_edges(
+    graph: &GraphDatabase,
+    providers: &std::collections::BTreeMap<(GraphqlOp, String), Vec<String>>,
+    link: &GraphqlHandlerLink,
+    graph_path: &str,
+    edges: &mut Vec<GraphEdge>,
+) {
+    let Some(provider_ids) = providers.get(&(link.op, link.field.clone())) else {
+        return;
+    };
+    let Some(handler) =
+        crate::server::sensors::util::enclosing_symbol(graph, graph_path, link.site_line)
+    else {
+        return;
+    };
+    for provider_id in provider_ids {
+        let mut edge = GraphEdge::new(
+            EdgeType::CallsGraphql,
+            provider_id.clone(),
+            handler.id.clone(),
+        );
+        // Matched by framework naming convention, not by following a
+        // reference: static, regex-grade evidence.
+        edge.provenance = Some(EdgeProvenance::Static {
+            source: StaticSource::Regex,
+        });
+        edge.weight = Some(0.9);
+        edges.push(edge);
+    }
 }
 
 // ─── Detection ─────────────────────────────────────────────────────────
@@ -174,6 +244,7 @@ fn default_resolver_detectors(root: &Path, repo_id: &RepoId) -> Vec<Box<dyn Reso
         Box::new(ApolloDetector::new(root.to_path_buf(), repo_id.clone())),
         Box::new(GqlgenDetector::new(root.to_path_buf(), repo_id.clone())),
         Box::new(StrawberryDetector::new(root.to_path_buf(), repo_id.clone())),
+        Box::new(GrapheneDetector::new(root.to_path_buf(), repo_id.clone())),
         Box::new(GraphqlJavaDetector::new(
             root.to_path_buf(),
             repo_id.clone(),
@@ -197,10 +268,10 @@ pub fn detect_resolver_links(
             vec![Box::new(ApolloDetector::new(workspace, repo_id.clone()))]
         }
         "go" => vec![Box::new(GqlgenDetector::new(workspace, repo_id.clone()))],
-        "py" => vec![Box::new(StrawberryDetector::new(
-            workspace,
-            repo_id.clone(),
-        ))],
+        "py" => vec![
+            Box::new(StrawberryDetector::new(workspace.clone(), repo_id.clone())),
+            Box::new(GrapheneDetector::new(workspace, repo_id.clone())),
+        ],
         "java" => vec![Box::new(GraphqlJavaDetector::new(
             workspace,
             repo_id.clone(),
@@ -553,6 +624,104 @@ impl ResolverLinkDetector for StrawberryDetector {
     }
 }
 
+/// graphene resolver detector (Python). A `resolve_<field>` method on a
+/// class that derives from `graphene.ObjectType` (directly or through
+/// `graphene.ObjectType`-named bases) handles root field `<field>`.
+struct GrapheneDetector {
+    workspace: PathBuf,
+    repo_id: RepoId,
+}
+
+impl GrapheneDetector {
+    fn new(workspace: PathBuf, repo_id: RepoId) -> Self {
+        Self { workspace, repo_id }
+    }
+}
+
+fn graphene_op_for_class(class: &str) -> GraphqlOp {
+    if class.ends_with("Mutations") || class == "Mutation" {
+        GraphqlOp::Mutation
+    } else if class.ends_with("Subscription") || class.ends_with("Subscriptions") {
+        GraphqlOp::Subscription
+    } else {
+        GraphqlOp::Query
+    }
+}
+
+impl ResolverLinkDetector for GrapheneDetector {
+    fn framework_name(&self) -> &'static str {
+        "graphene"
+    }
+    fn handles_ext(&self, ext: &str) -> bool {
+        ext == "py"
+    }
+    fn detect(&self, content: &str, src_path: &Path) -> Vec<GraphqlHandlerLink> {
+        let graph_path = compute_graph_path(&self.workspace, src_path);
+        let mut out: Vec<GraphqlHandlerLink> = Vec::new();
+        // (class name, class indent) while inside a graphene ObjectType body.
+        let mut current: Option<(String, usize)> = None;
+        for (idx, line) in content.lines().enumerate() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            let indent = line.len() - line.trim_start().len();
+            if let Some((_, class_indent)) = &current {
+                if indent <= *class_indent {
+                    current = None;
+                }
+            }
+            if let Some(rest) = trimmed.strip_prefix("class ") {
+                let name: String = rest
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                    .collect();
+                let bases = rest[name.len()..].split(':').next().unwrap_or("");
+                if !name.is_empty() && bases.contains("graphene.ObjectType") {
+                    current = Some((name, indent));
+                }
+                continue;
+            }
+            let Some((class, class_indent)) = &current else {
+                continue;
+            };
+            if indent <= *class_indent {
+                continue;
+            }
+            let after_def = trimmed
+                .strip_prefix("def ")
+                .or_else(|| trimmed.strip_prefix("async def "));
+            let Some(after_def) = after_def else { continue };
+            let method: String = after_def
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            let Some(field) = method.strip_prefix("resolve_") else {
+                continue;
+            };
+            if !is_valid_field_name(field) {
+                continue;
+            }
+            out.push(GraphqlHandlerLink {
+                op: graphene_op_for_class(class),
+                field: crate::server::sensors::util::to_camel_case(field),
+                handler_function: SymbolKey {
+                    repo: self.repo_id.clone(),
+                    path: graph_path.clone(),
+                    container: Some(class.clone()),
+                    name: method,
+                },
+                origin: GraphqlHandlerOrigin::Graphene,
+                site_line: (idx as u32) + 1,
+            });
+        }
+        out
+    }
+    fn graph_path_for(&self, src_path: &Path) -> String {
+        compute_graph_path(&self.workspace, src_path)
+    }
+}
+
 /// graphql-java `DataFetcher` detector.
 struct GraphqlJavaDetector {
     workspace: PathBuf,
@@ -716,6 +885,196 @@ func (r *mutationResolver) CreateOrder(ctx context.Context, input CreateOrderInp
             create[0].handler_function.container.as_deref(),
             Some("mutationResolver")
         );
+    }
+
+    #[test]
+    fn graphene_resolve_methods_link_to_camel_case_fields() {
+        let src = "\
+import graphene
+
+class ProductQueries(graphene.ObjectType):
+    product = graphene.Field(Product)
+    product_variants = graphene.Field(ProductVariant)
+
+    @staticmethod
+    def resolve_product(_root, info, *, id=None):
+        return None
+
+    @staticmethod
+    async def resolve_product_variants(_root, info):
+        return []
+
+    def helper(self):
+        pass
+
+class Unrelated:
+    def resolve_ignored(self):
+        pass
+";
+        let links = detect_resolver_links(src, "py", "schema.py", &repo());
+        let fields: Vec<_> = links
+            .iter()
+            .map(|l| (l.field.as_str(), l.site_line))
+            .collect();
+        assert_eq!(fields, vec![("product", 8), ("productVariants", 12)]);
+        assert!(links.iter().all(|l| l.op == GraphqlOp::Query));
+        assert!(links
+            .iter()
+            .all(|l| matches!(l.origin, GraphqlHandlerOrigin::Graphene)));
+        assert_eq!(links[0].handler_function.name, "resolve_product");
+        assert_eq!(
+            links[0].handler_function.container.as_deref(),
+            Some("ProductQueries")
+        );
+    }
+
+    #[test]
+    fn graphene_class_name_picks_root_operation() {
+        let src = "\
+class OrderMutations(graphene.ObjectType):
+    def resolve_x(root, info):
+        pass
+
+class OrderSubscription(graphene.ObjectType):
+    def resolve_y_z(root, info):
+        pass
+";
+        let links = detect_resolver_links(src, "py", "s.py", &repo());
+        assert_eq!(links.len(), 2);
+        assert_eq!(
+            (links[0].op, links[0].field.as_str()),
+            (GraphqlOp::Mutation, "x")
+        );
+        assert_eq!(
+            (links[1].op, links[1].field.as_str()),
+            (GraphqlOp::Subscription, "yZ")
+        );
+    }
+
+    #[test]
+    fn graphene_ignores_non_objecttype_classes_and_plain_resolve_prefix() {
+        let src = "\
+class Helper(graphene.InputObjectType):
+    def resolve_a(self):
+        pass
+
+class Q(graphene.ObjectType):
+    def resolve_(self):
+        pass
+";
+        assert!(detect_resolver_links(src, "py", "s.py", &repo()).is_empty());
+    }
+
+    // ─── CallsGraphql edge emission ─────────────────────────────────
+
+    const GRAPHENE_SRC: &str = "\
+import graphene
+
+class ProductQueries(graphene.ObjectType):
+    @staticmethod
+    def resolve_product(_root, info):
+        return None
+";
+
+    fn graph_with_provider_and_resolver(
+        tmp: &tempfile::TempDir,
+        resolver_line: u32,
+    ) -> (GraphDatabase, String, String) {
+        use crate::federation::contracts::model::GraphqlProviderFact;
+        let g = GraphDatabase::new(&tmp.path().join("db.bin")).expect("db");
+        let ns = RepoNamespace::for_test();
+        let mut provider = GraphNode::new_in(
+            NodeType::Module,
+            "query:product".into(),
+            "schema.graphql".into(),
+            &ns,
+        );
+        provider.line_start = Some(3);
+        provider.line_end = Some(3);
+        provider.id = GraphNode::generate_id(
+            &NodeType::Module,
+            "schema.graphql",
+            "query:product",
+            Some(3),
+            &ns,
+        );
+        provider.contract = vec![ContractFact::GraphqlProvider(GraphqlProviderFact {
+            op: GraphqlOp::Query,
+            field: "product".into(),
+            return_type: "Product".into(),
+        })];
+        let mut resolver = GraphNode::new_in(
+            NodeType::Method,
+            "resolve_product".into(),
+            "schema.py".into(),
+            &ns,
+        );
+        // The indexer stores 0-based rows; `resolver_line` is the 1-based
+        // source line of the `def`.
+        resolver.line_start = Some(resolver_line - 1);
+        resolver.line_end = Some(resolver_line);
+        resolver.id = GraphNode::generate_id(
+            &NodeType::Method,
+            "schema.py",
+            "resolve_product",
+            Some(resolver_line - 1),
+            &ns,
+        );
+        g.insert_nodes_batch(&[provider.clone(), resolver.clone()])
+            .unwrap();
+        (g, provider.id, resolver.id)
+    }
+
+    #[test]
+    fn graphene_resolver_gets_a_calls_graphql_edge_from_the_sdl_provider() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("schema.py"), GRAPHENE_SRC).unwrap();
+        let (g, provider_id, resolver_id) = graph_with_provider_and_resolver(&tmp, 5);
+        let ns = RepoNamespace::for_test();
+
+        scan_workspace_resolver_link(&g, tmp.path(), &ns).unwrap();
+        // A rescan must not duplicate the edge.
+        scan_workspace_resolver_link(&g, tmp.path(), &ns).unwrap();
+
+        let edges: Vec<_> = g
+            .get_edges_from(&provider_id)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.edge_type == EdgeType::CallsGraphql)
+            .collect();
+        assert_eq!(edges.len(), 1, "exactly one provider→resolver edge");
+        assert_eq!(edges[0].target_id, resolver_id);
+    }
+
+    #[test]
+    fn no_edge_when_the_sdl_field_is_not_indexed() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("schema.py"),
+            GRAPHENE_SRC.replace("resolve_product", "resolve_other"),
+        )
+        .unwrap();
+        let (g, provider_id, _) = graph_with_provider_and_resolver(&tmp, 5);
+        scan_workspace_resolver_link(&g, tmp.path(), &RepoNamespace::for_test()).unwrap();
+        assert!(g
+            .get_edges_from(&provider_id)
+            .unwrap()
+            .iter()
+            .all(|e| e.edge_type != EdgeType::CallsGraphql));
+    }
+
+    #[test]
+    fn no_edge_when_the_indexer_has_no_resolver_symbol() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("schema.py"), GRAPHENE_SRC).unwrap();
+        // Resolver node sits far from the detected `def` line.
+        let (g, provider_id, _) = graph_with_provider_and_resolver(&tmp, 100);
+        scan_workspace_resolver_link(&g, tmp.path(), &RepoNamespace::for_test()).unwrap();
+        assert!(g
+            .get_edges_from(&provider_id)
+            .unwrap()
+            .iter()
+            .all(|e| e.edge_type != EdgeType::CallsGraphql));
     }
 
     #[test]

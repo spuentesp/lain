@@ -1,0 +1,69 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "trace_flow input",
+  "description": "Input for `trace_flow`. `from` takes exactly one of endpoint / symbol / table. `direction` defaults to `upstream` for a table and `downstream` otherwise.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "snapshot": {
+      "type": "string"
+    },
+    "from": {
+      "type": "object",
+      "description": "Exactly one of `endpoint`, `symbol`, `table` must be set.",
+      "properties": {
+        "endpoint": {
+          "type": "object",
+          "properties": {
+            "service": {
+              "type": "string"
+            },
+            "key": {
+              "type": "string"
+            }
+          }
+        },
+        "symbol": {
+          "type": "string",
+          "description": "A node id, or a symbol name (ambiguous names are rejected with candidates)."
+        },
+        "repo_id": {
+          "type": "string",
+          "description": "Restrict a symbol name to one repository."
+        },
+        "table": {
+          "type": "string",
+          "description": "A table name, with or without the `table:` prefix."
+        }
+      }
+    },
+    "direction": {
+      "type": "string",
+      "enum": [
+        "downstream",
+        "upstream"
+      ]
+    },
+    "strategy": {
+      "type": "string",
+      "enum": [
+        "breadth",
+        "depth"
+      ],
+      "description": "`breadth` (default): everything one hop at a time, nearest first, each node reached once. `depth`: follow each chain to its end (leaf, data sink or depth limit) before backtracking, so chains that share a node are all reported."
+    },
+    "depth": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 12
+    },
+    "cap": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 500
+    }
+  },
+  "required": [
+    "from"
+  ]
+}

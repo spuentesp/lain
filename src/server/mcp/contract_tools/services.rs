@@ -27,7 +27,7 @@ use super::envelope::{
 };
 use super::paging::{apply_limit, decode_cursor, fingerprint};
 use super::scope::provider_is_reviewed;
-use super::used_by::{walk as walk_used_by, walk_backend as walk_used_by_backend};
+use super::used_by::walk_backend as walk_used_by_backend;
 use super::view::resolve_view;
 use super::{ContractToolEntry, ToolOutcome, DEFAULT_DEPTH, DEFAULT_LIMIT, MAX_DEPTH, MAX_LIMIT};
 use crate::federation::contracts::config::RoutePrefix;
@@ -36,10 +36,9 @@ use crate::federation::contracts::index::{
 };
 use crate::federation::contracts::model::ProviderOrigin;
 use crate::federation::contracts::snapshots::RepoSnapshotState;
-use crate::federation::federated_index::FederatedIndex;
 use crate::federation::graph_backend::GraphBackend;
 use crate::federation::health::RepoHealth;
-use crate::federation::repo_id::{GlobalId, RepoId};
+use crate::federation::repo_id::GlobalId;
 use crate::schema::EdgeType;
 use crate::server::mcp::handler::McpContext;
 use crate::server::sensors::codeowners_sensor::codeowners_for;
@@ -403,15 +402,8 @@ async fn run_get_service(
         .map(|(_, k)| k.to_string())
         .collect();
     let backend = resolved.backend();
-    let snapshot_backend = (fed_opt.is_none()).then_some(backend.as_ref());
-    let consumers = build_consumer_rows(
-        fed_opt,
-        snapshot_backend,
-        &idx,
-        info.clone(),
-        depth,
-        &commit_by_repo,
-    );
+    let consumers =
+        build_consumer_rows(backend.as_ref(), &idx, info.clone(), depth, &commit_by_repo);
 
     let unresolved_candidates = build_unresolved_candidates(&idx, info, &commit_by_repo);
 
@@ -482,9 +474,13 @@ struct ConsumerRow {
     uses: Vec<Value>,
 }
 
+/// `backend` is the view's graph backend — the projected, global-id graph
+/// for both live and snapshot views. Callers must be resolved against it,
+/// never against a per-repo graph: the contract index keys consumers by
+/// global id, which a per-repo graph does not contain, so a per-repo lookup
+/// silently found nothing and every `used_by` came back empty.
 fn build_consumer_rows(
-    fed: Option<&FederatedIndex>,
-    snapshot_backend: Option<&dyn GraphBackend>,
+    backend: &dyn GraphBackend,
     idx: &ContractIndex,
     info: ServiceInfo,
     depth: u8,
@@ -520,9 +516,7 @@ fn build_consumer_rows(
         };
 
         let consumer_service = resolution.service.0.clone();
-        let caller_node = fed
-            .and_then(|f| call_caller_node(f, call_id))
-            .or_else(|| snapshot_backend.and_then(|b| call_caller_node_backend(b, call_id)))
+        let caller_node = call_caller_node_backend(backend, call_id)
             .unwrap_or_else(|| default_caller_node(call_id));
         let caller_repo = caller_node
             .id
@@ -535,16 +529,13 @@ fn build_consumer_rows(
             .unwrap_or("");
         let site = call_site_meta(call_id, &caller_node, commit);
 
-        let used_by = if let Some((_, db)) = fed.and_then(|f| caller_graph(f, call_id)) {
-            walk_used_by(&db, &caller_node.id, depth)
-        } else if let Some(backend) = snapshot_backend {
-            walk_used_by_backend(backend, &caller_node.id, depth)
-        } else {
-            super::used_by::UsedByResult {
-                entries: Vec::new(),
-                truncated: false,
-            }
-        };
+        if backend.get_node(&caller_node.id).ok().flatten().is_none() {
+            tracing::warn!(
+                caller = %caller_node.id,
+                "get_service: consumer caller is not in the graph; used_by will be empty"
+            );
+        }
+        let used_by = walk_used_by_backend(backend, &caller_node.id, depth);
         let used_by_truncated = used_by.truncated;
         let mut used_by_entries = used_by.entries.clone();
         enrich_used_by_with_owners(&mut used_by_entries);
@@ -674,31 +665,6 @@ struct CallerNode {
     name: String,
     path: String,
     line: u32,
-}
-
-fn caller_graph(
-    fed: &FederatedIndex,
-    call_id: &GlobalId,
-) -> Option<(RepoId, crate::graph::GraphDatabase)> {
-    let repo_id = RepoId::new(call_id.repo_id()).ok()?;
-    let repo = fed.get_repo(&repo_id)?;
-    Some((repo_id, repo.db().clone()))
-}
-
-fn call_caller_node(fed: &FederatedIndex, call_id: &GlobalId) -> Option<CallerNode> {
-    let (_, db) = caller_graph(fed, call_id)?;
-    let sends_source_id = db
-        .all_edges()
-        .into_iter()
-        .find(|e| e.edge_type == EdgeType::SendsHttp && e.target_id == call_id.as_str())
-        .map(|e| e.source_id)?;
-    let caller = db.get_node(&sends_source_id).ok().flatten()?;
-    Some(CallerNode {
-        id: caller.id,
-        path: caller.path,
-        line: caller.line_start.unwrap_or(0),
-        name: caller.name,
-    })
 }
 
 fn call_caller_node_backend(backend: &dyn GraphBackend, call_id: &GlobalId) -> Option<CallerNode> {

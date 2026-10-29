@@ -68,8 +68,8 @@ registry the server filters with.
 | `ops` | 9 | Server health, reload, LSP install, re-enrichment |
 | `federation` | 5 | Org-wide queries (shown automatically in federation mode) |
 | `workspace` | 4 | Workspace groups (shown automatically when configured) |
-| `contracts` | 14 | Service view across the federation (`list_services`, `get_service`); snapshot pinning (`prepare_snapshot`, `get_snapshot`); contract view (`list_contracts`, `get_contract`, `list_unresolved`, `check_binding`); service references (`list_service_refs`); analysis (`diff_contracts`, `trace_impact`, `get_coverage`); evidence (`resolve_evidence`, `read_source`) |
-| `full` | 98 | Every registered tool |
+| `contracts` | 15 | Service view across the federation (`list_services`, `get_service`); snapshot pinning (`prepare_snapshot`, `get_snapshot`); contract view (`list_contracts`, `get_contract`, `list_unresolved`, `check_binding`); service references (`list_service_refs`); analysis (`diff_contracts`, `trace_impact`, `trace_flow`, `get_coverage`); evidence (`resolve_evidence`, `read_source`) |
+| `full` | 99 | Every registered tool |
 
 ### Role recipes
 

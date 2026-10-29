@@ -47,7 +47,7 @@
 use crate::error::LainError;
 use crate::federation::contracts::model::{ContractFact, GraphqlConsumerFact, GraphqlOp};
 use crate::graph::{graph_path, GraphDatabase, SensorOwner};
-use crate::schema::{GraphEdge, GraphNode, RepoNamespace};
+use crate::schema::{EdgeProvenance, EdgeType, GraphEdge, GraphNode, RepoNamespace, StaticSource};
 use std::path::Path;
 
 // ─── Public sensor shape ───────────────────────────────────────────────
@@ -70,6 +70,11 @@ pub struct GraphqlConsumerField {
     pub site_path: String,
     /// 1-based line number of the call site.
     pub site_line: u32,
+    /// The operation's declared name (`query ProductDetails { … }` →
+    /// `ProductDetails`); `None` for anonymous operations. Codegen names
+    /// its document / hook identifiers after it, which is how
+    /// [`link_generated_documents`] finds the code that runs the call.
+    pub operation_name: Option<String>,
 }
 
 pub struct GraphqlConsumerSensor;
@@ -100,6 +105,9 @@ pub fn scan_workspace_graphql_consumer(
     let mut total = 0usize;
     let mut all_nodes: Vec<GraphNode> = Vec::new();
     let mut all_edges: Vec<GraphEdge> = Vec::new();
+    // `<Operation>Document` identifier → consumer node ids of that operation.
+    let mut documents: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
     // The consumer sensor covers two surfaces:
     //   1. .graphql / .gql document files (read as
     //      standalone documents; emit one consumer per
@@ -144,6 +152,11 @@ pub fn scan_workspace_graphql_consumer(
             let id = node.id.clone();
             all_nodes.push(node);
             total += 1;
+            if let Some(name) = &c.operation_name {
+                for ident in document_identifiers(name) {
+                    documents.entry(ident).or_default().push(id.clone());
+                }
+            }
 
             crate::server::sensors::util::emit_graphql_field_refs(
                 crate::server::sensors::util::GraphqlFieldRefs {
@@ -196,6 +209,11 @@ pub fn scan_workspace_graphql_consumer(
             let id = node.id.clone();
             all_nodes.push(node);
             total += 1;
+            if let Some(name) = &c.operation_name {
+                for ident in document_identifiers(name) {
+                    documents.entry(ident).or_default().push(id.clone());
+                }
+            }
 
             crate::server::sensors::util::emit_graphql_field_refs(
                 crate::server::sensors::util::GraphqlFieldRefs {
@@ -212,6 +230,7 @@ pub fn scan_workspace_graphql_consumer(
             );
         }
     }
+    link_generated_documents(graph, root, &documents, &mut all_edges);
     graph.replace_sensor_output(SensorOwner::GraphqlConsumerSensor, &all_nodes, &all_edges)?;
     Ok(total)
 }
@@ -280,6 +299,7 @@ pub fn parse_document(content: &str, graph_path: &str) -> Vec<GraphqlConsumerFie
             dynamic: true,
             site_path: graph_path.to_string(),
             site_line: 1,
+            operation_name: None,
         }];
     }
     let mut out: Vec<GraphqlConsumerField> = Vec::new();
@@ -300,6 +320,7 @@ pub fn parse_document(content: &str, graph_path: &str) -> Vec<GraphqlConsumerFie
                 dynamic: true,
                 site_path: graph_path.to_string(),
                 site_line: line_no,
+                operation_name: decl.name.clone(),
             });
             continue;
         }
@@ -311,6 +332,7 @@ pub fn parse_document(content: &str, graph_path: &str) -> Vec<GraphqlConsumerFie
                 dynamic: false,
                 site_path: graph_path.to_string(),
                 site_line: line_no,
+                operation_name: decl.name.clone(),
             });
         }
     }
@@ -323,6 +345,7 @@ pub fn parse_document(content: &str, graph_path: &str) -> Vec<GraphqlConsumerFie
             dynamic: true,
             site_path: graph_path.to_string(),
             site_line: 1,
+            operation_name: None,
         });
     }
     out
@@ -357,10 +380,11 @@ fn has_interpolation(content: &str) -> bool {
     false
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct OpDecl {
     op: GraphqlOp,
     line: u32,
+    name: Option<String>,
 }
 
 /// Find every top-level `query|mutation|subscription`
@@ -403,6 +427,7 @@ fn find_top_level_operations(content: &str) -> Vec<OpDecl> {
             i += 1;
         }
         // Optional name (e.g. `query GetOrders { ... }`).
+        let name = leading_identifier(&content[i..]);
         // We just skip identifiers / words / parens until
         // we hit `{`.
         while i < bytes.len() && bytes[i] != b'{' && bytes[i] != b'\n' {
@@ -425,6 +450,7 @@ fn find_top_level_operations(content: &str) -> Vec<OpDecl> {
         out.push(OpDecl {
             op,
             line: start_line,
+            name,
         });
     }
     out
@@ -912,6 +938,7 @@ fn parse_operation_body(body: &str, graph_path: &str, line_no: u32) -> Vec<Graph
             dynamic: true,
             site_path: graph_path.to_string(),
             site_line: line_no,
+            operation_name: None,
         });
         return out;
     }
@@ -920,6 +947,7 @@ fn parse_operation_body(body: &str, graph_path: &str, line_no: u32) -> Vec<Graph
     // the first `{` below is the operation's, whatever order they come in.
     let body = without_non_root_fragments(body);
     let body = body.as_str();
+    let operation_name = first_operation_name(body);
     let op = if body.contains("mutation") {
         GraphqlOp::Mutation
     } else if body.contains("subscription") {
@@ -962,6 +990,7 @@ fn parse_operation_body(body: &str, graph_path: &str, line_no: u32) -> Vec<Graph
             dynamic: false,
             site_path: graph_path.to_string(),
             site_line: line_no,
+            operation_name: operation_name.clone(),
         });
     }
     if out.is_empty() {
@@ -972,9 +1001,121 @@ fn parse_operation_body(body: &str, graph_path: &str, line_no: u32) -> Vec<Graph
             dynamic: true,
             site_path: graph_path.to_string(),
             site_line: line_no,
+            operation_name: None,
         });
     }
     out
+}
+
+/// The identifier at the very start of `s`, if any (`GetOrders($id: ID)` →
+/// `GetOrders`). `None` when `s` starts with `{`, `(` or `@`.
+fn leading_identifier(s: &str) -> Option<String> {
+    let name: String = s
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect();
+    (!name.is_empty() && !name.starts_with(|c: char| c.is_ascii_digit())).then_some(name)
+}
+
+/// Name of the first `query|mutation|subscription <Name>` in `body`.
+fn first_operation_name(body: &str) -> Option<String> {
+    let bytes = body.as_bytes();
+    (0..bytes.len())
+        .filter_map(|i| operation_keyword(bytes, i).map(|op| (i, op)))
+        .find_map(|(i, op)| {
+            let kw_len = match op {
+                GraphqlOp::Query => 5,
+                GraphqlOp::Mutation => 8,
+                GraphqlOp::Subscription => 12,
+            };
+            leading_identifier(body[i + kw_len..].trim_start())
+        })
+}
+
+/// Codegen spells a document constant `<Operation>Document`
+/// (typed-document-node / apollo) or `<Operation>Doc`.
+fn document_identifiers(operation_name: &str) -> [String; 2] {
+    [
+        format!("{operation_name}Document"),
+        format!("{operation_name}Doc"),
+    ]
+}
+
+/// Whole-identifier occurrences of any key of `wanted` in `content`, as
+/// `(1-based line, key)`. A longer identifier that merely contains a key
+/// (`MyProductDetailsDocument`) is not a match.
+fn find_identifier_refs<'a>(
+    content: &str,
+    wanted: &'a std::collections::BTreeMap<String, Vec<String>>,
+) -> Vec<(u32, &'a str)> {
+    let bytes = content.as_bytes();
+    let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$';
+    let mut out = Vec::new();
+    let (mut i, mut line) = (0usize, 1u32);
+    while i < bytes.len() {
+        if bytes[i] == b'\n' {
+            line += 1;
+            i += 1;
+        } else if is_ident(bytes[i]) {
+            let start = i;
+            while i < bytes.len() && is_ident(bytes[i]) {
+                i += 1;
+            }
+            if let Some((k, _)) = wanted.get_key_value(&content[start..i]) {
+                out.push((line, k.as_str()));
+            }
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Link the functions that use a generated document to the consumer nodes
+/// of that document: every function/method whose body names
+/// `<Operation>Document` (or `<Operation>Doc`) gets a `Calls` edge to the
+/// `graphql-call:` node(s) of the operation. Generated hooks reference the
+/// document in their body, so component → hook → consumer chains follow
+/// from the hook's existing `Calls` edges. Name-matched, hence `Regex`
+/// provenance and weight 0.8.
+fn link_generated_documents(
+    graph: &GraphDatabase,
+    root: &Path,
+    documents: &std::collections::BTreeMap<String, Vec<String>>,
+    edges: &mut Vec<GraphEdge>,
+) {
+    if documents.is_empty() {
+        return;
+    }
+    let js_ext = |p: &Path| {
+        p.extension()
+            .and_then(|e| e.to_str())
+            .filter(|e| matches!(*e, "ts" | "tsx" | "js" | "jsx"))
+            .map(|e| e.to_string())
+    };
+    let mut seen: std::collections::BTreeSet<(String, String)> = std::collections::BTreeSet::new();
+    for (path, content, _ext) in crate::server::sensors::util::scan_files(root, js_ext) {
+        let graph_path_str = graph_path(root, &path);
+        for (line, ident) in find_identifier_refs(&content, documents) {
+            let Some(user) =
+                crate::server::sensors::util::enclosing_symbol(graph, &graph_path_str, line)
+            else {
+                continue;
+            };
+            for consumer_id in &documents[ident] {
+                if !seen.insert((user.id.clone(), consumer_id.clone())) {
+                    continue;
+                }
+                let mut edge =
+                    GraphEdge::new(EdgeType::Calls, user.id.clone(), consumer_id.clone());
+                edge.provenance = Some(EdgeProvenance::Static {
+                    source: StaticSource::Regex,
+                });
+                edge.weight = Some(0.8);
+                edges.push(edge);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1103,5 +1244,132 @@ const CREATE = gql`mutation { createOrder(input: {}) { id } }`;
         assert_eq!(consumers.len(), 1);
         assert_eq!(consumers[0].op, GraphqlOp::Mutation);
         assert_eq!(consumers[0].field, "createOrder");
+    }
+
+    // ─── operation names + generated-document links ─────────────────
+
+    #[test]
+    fn operation_name_is_captured_from_documents_and_templates() {
+        let doc = parse_document(
+            "query ProductDetails($id: ID!) {\n  product(id: $id) { id }\n}\n",
+            "ProductDetails.graphql",
+        );
+        assert_eq!(doc[0].operation_name.as_deref(), Some("ProductDetails"));
+        let tpl = detect_in_code(
+            "const Q = gql`mutation CreateOrder { createOrder(input: {}) { id } }`;\n",
+            "orders.ts",
+        );
+        assert_eq!(tpl[0].operation_name.as_deref(), Some("CreateOrder"));
+        let anon = parse_document("query { orders { id } }", "a.graphql");
+        assert_eq!(anon[0].operation_name, None);
+    }
+
+    #[test]
+    fn identifier_refs_match_whole_identifiers_only() {
+        let mut wanted = std::collections::BTreeMap::new();
+        wanted.insert("ProductDetailsDocument".to_string(), vec!["c".to_string()]);
+        let src = "a(ProductDetailsDocument)\nMyProductDetailsDocument\nProductDetailsDocumentX\n  ProductDetailsDocument,";
+        let refs = find_identifier_refs(src, &wanted);
+        assert_eq!(refs.iter().map(|(l, _)| *l).collect::<Vec<_>>(), vec![1, 4]);
+    }
+
+    /// `start`/`end` are 0-based, as the indexer stores them.
+    fn fn_node(name: &str, path: &str, start: u32, end: u32) -> GraphNode {
+        let ns = RepoNamespace::for_test();
+        let mut n = GraphNode::new_in(
+            crate::schema::NodeType::Function,
+            name.into(),
+            path.into(),
+            &ns,
+        );
+        n.line_start = Some(start);
+        n.line_end = Some(end);
+        n.id = GraphNode::generate_id(
+            &crate::schema::NodeType::Function,
+            path,
+            name,
+            Some(start),
+            &ns,
+        );
+        n
+    }
+
+    const DOC: &str = "query ProductDetails($id: ID!) {\n  product(id: $id) { id name }\n}\n";
+    const USER_TS: &str = "import { ProductDetailsDocument } from './generated';\n\nexport async function getProductData(id: string) {\n  return run(ProductDetailsDocument, { id });\n}\n\nexport function unrelated() {\n  return MyProductDetailsDocument;\n}\n";
+
+    fn calls_to_consumer(g: &GraphDatabase, from: &GraphNode) -> Vec<GraphNode> {
+        g.get_edges_from(&from.id)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.edge_type == EdgeType::Calls)
+            .filter_map(|e| g.get_node(&e.target_id).ok().flatten())
+            .filter(|n| n.name.starts_with("graphql-call:"))
+            .collect()
+    }
+
+    #[test]
+    fn function_using_the_generated_document_calls_the_consumer_node() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+        std::fs::write(tmp.path().join("src/ProductDetails.graphql"), DOC).unwrap();
+        std::fs::write(tmp.path().join("src/user.ts"), USER_TS).unwrap();
+        let g = GraphDatabase::new(&tmp.path().join("db.bin")).unwrap();
+        let user = fn_node("getProductData", "src/user.ts", 2, 4);
+        let other = fn_node("unrelated", "src/user.ts", 6, 8);
+        g.insert_nodes_batch(&[user.clone(), other.clone()])
+            .unwrap();
+        let ns = RepoNamespace::for_test();
+
+        scan_workspace_graphql_consumer(&g, tmp.path(), &ns).unwrap();
+        // Rescan: still exactly one edge.
+        scan_workspace_graphql_consumer(&g, tmp.path(), &ns).unwrap();
+
+        let edges = calls_to_consumer(&g, &user);
+        assert_eq!(
+            edges.len(),
+            1,
+            "getProductData → graphql-call:query:product"
+        );
+        assert_eq!(edges[0].name, "graphql-call:query:product");
+        assert!(
+            calls_to_consumer(&g, &other).is_empty(),
+            "a longer identifier containing the document name must not link"
+        );
+    }
+
+    #[test]
+    fn no_document_reference_means_no_edge() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("ProductDetails.graphql"), DOC).unwrap();
+        std::fs::write(
+            tmp.path().join("user.ts"),
+            "export function f() {\n  return 1;\n}\n",
+        )
+        .unwrap();
+        let g = GraphDatabase::new(&tmp.path().join("db.bin")).unwrap();
+        let f = fn_node("f", "user.ts", 0, 2);
+        g.insert_nodes_batch(std::slice::from_ref(&f)).unwrap();
+        scan_workspace_graphql_consumer(&g, tmp.path(), &RepoNamespace::for_test()).unwrap();
+        assert!(calls_to_consumer(&g, &f).is_empty());
+    }
+
+    #[test]
+    fn anonymous_operations_are_never_linked() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("a.graphql"),
+            "query { product(id: 1) { id } }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("user.ts"),
+            "export function f() {\n  return Document;\n}\n",
+        )
+        .unwrap();
+        let g = GraphDatabase::new(&tmp.path().join("db.bin")).unwrap();
+        let f = fn_node("f", "user.ts", 0, 2);
+        g.insert_nodes_batch(std::slice::from_ref(&f)).unwrap();
+        scan_workspace_graphql_consumer(&g, tmp.path(), &RepoNamespace::for_test()).unwrap();
+        assert!(calls_to_consumer(&g, &f).is_empty());
     }
 }

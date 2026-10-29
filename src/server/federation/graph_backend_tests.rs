@@ -455,6 +455,7 @@ fn impact_propagation_table_pr9_state() {
     let cases: &[EdgeType] = &[
         EdgeType::Calls,
         EdgeType::CallsHttp,
+        EdgeType::CallsGraphql,
         EdgeType::SendsHttp,
         EdgeType::Binds,
         EdgeType::Consumes,
@@ -483,6 +484,7 @@ fn impact_propagation_table_pr9_state() {
         let expected = match e {
             EdgeType::Calls
             | EdgeType::CallsHttp
+            | EdgeType::CallsGraphql
             | EdgeType::SendsHttp
             | EdgeType::Binds
             | EdgeType::RequestSchema
@@ -501,12 +503,12 @@ fn impact_propagation_table_pr9_state() {
     }
     // PR 9 actual state, plus the BusTopic/RouteMatches anchor-miner
     // flip: 10 Incoming, 0 Outgoing, 14 Stop.
-    assert_eq!(cases.len(), 24, "every EdgeType variant must be listed");
+    assert_eq!(cases.len(), 25, "every EdgeType variant must be listed");
     let incoming_count = cases
         .iter()
         .filter(|e| impact_propagation(e) == Propagation::Incoming)
         .count();
-    assert_eq!(incoming_count, 10);
+    assert_eq!(incoming_count, 11);
     let outgoing_count = cases
         .iter()
         .filter(|e| impact_propagation(e) == Propagation::Outgoing)

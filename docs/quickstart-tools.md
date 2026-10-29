@@ -429,7 +429,7 @@ automatically. Relative paths resolve against that repo's checkout, so
 
 ## Tools documented elsewhere
 
-This page covers 38 of the 84 tools in the canonical surface
+This page covers 38 of the 85 tools in the canonical surface
 (`docs/tool-schema.json`, the `lain schema dump` snapshot). The rest
 are documented where they are central to the workflow they belong to:
 
@@ -438,11 +438,14 @@ are documented where they are central to the workflow they belong to:
   `get_cross_repo_blast_radius` (pass `repo_id` to disambiguate; the
   old `_for_repo` variant remains as a dispatch alias).
 - **Contract federation** ([`superpowers/specs/2026-10-02-contract-coverage-and-protocols-design.md`](superpowers/specs/2026-10-02-contract-coverage-and-protocols-design.md)):
-  the `contracts` package adds 13 read-only tools in five groups
+  the `contracts` package adds 14 read-only tools in five groups
   (§12): `list_services`, `get_service`, `prepare_snapshot`,
   `get_snapshot`, `list_contracts`, `get_contract`,
   `list_unresolved`, `check_binding`, `diff_contracts`,
-  `trace_impact`, `get_coverage`, `resolve_evidence`, `read_source`.
+  `trace_impact`, `trace_flow`, `get_coverage`, `resolve_evidence`, `read_source`.
+  `trace_flow` returns one path from an endpoint, symbol or table across the
+  contract boundary (`direction`: `downstream` toward the data, `upstream` toward
+  consumers) with per-hop provenance and explicit `gaps` where the chain stops.
   Load it with `LAIN_TOOL_PROFILE=contracts` or
   `load_package("contracts")`. PR 13 is the release surface; see
   the migration note in `CHANGELOG.md` for the recovery order

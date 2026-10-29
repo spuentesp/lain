@@ -300,7 +300,7 @@ pub struct GraphqlConsumerFact {
 /// Phase E (spec §8.3): one resolver-link from a GraphQL root
 /// field to its implementing handler. The sensor emits one per
 /// detected naming-convention match (Apollo resolver maps /
-/// graphql-java `DataFetcher` / gqlgen / Strawberry). The
+/// graphql-java `DataFetcher` / gqlgen / Strawberry / graphene). The
 /// joiner records the link on the corresponding
 /// `GraphqlProvider` so typed traversal `handler → function →
 /// graphql` is reachable.
@@ -322,6 +322,7 @@ pub enum GraphqlHandlerOrigin {
     GraphqlJava,
     Gqlgen,
     Strawberry,
+    Graphene,
 }
 
 // ─── WebSocket provider / consumer / handler (Phase F, Gap 19) ─────────

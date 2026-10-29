@@ -99,6 +99,12 @@ pub enum SensorOwner {
     /// `WritesTable` edges. A rescan replaces only its own previous
     /// output.
     SqlSensor,
+    /// The Django ORM sensor owns the `Table` nodes it mints (marked by
+    /// `util::DJANGO_TABLE_MARK` in `signature`), its synthetic
+    /// `orm-read:` consumer nodes, and the `ReadsTable` / `WritesTable`
+    /// edges it emits. Kept apart from [`Self::SqlSensor`] so neither
+    /// sensor's rescan retracts the other's tables.
+    DjangoOrmSensor,
     /// Phase E (spec §8.2): the legacy `proto_sensor` emits bare
     /// `Module` nodes with no contract fact. Those are owned here and
     /// retracted on every `scan_workspace`, so a service renamed away
@@ -254,6 +260,22 @@ fn derive_owner(
         // guard keeps pre-fix graphs working: their `TableConsumer`
         // facts ride real symbol nodes, which this sensor no longer
         // re-emits — retracting those would delete the symbol.
+        // The Django ORM sensor's tables carry a marker in `signature`;
+        // this arm must precede the catch-all below or `sql_sensor`
+        // would claim (and on every rescan retract) them.
+        (NodeType::Table, _)
+            if node.signature.as_deref()
+                == Some(crate::server::sensors::util::DJANGO_TABLE_MARK) =>
+        {
+            Some(SensorOwner::DjangoOrmSensor)
+        }
+        (_, Some(ContractFact::TableConsumer(_)))
+            if node
+                .name
+                .starts_with(crate::server::sensors::util::ORM_READ_PREFIX) =>
+        {
+            Some(SensorOwner::DjangoOrmSensor)
+        }
         (NodeType::Table, _) | (_, Some(ContractFact::Table(_))) => Some(SensorOwner::SqlSensor),
         (_, Some(ContractFact::TableConsumer(_)))
             if node

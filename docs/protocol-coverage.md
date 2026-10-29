@@ -27,7 +27,7 @@ HTTP+GraphQL to all six kinds (Task 3).
 | `topic` | `event_sensor` | `resolve_topic_consumer` | yes | `Produces`, `Consumes`, `PayloadSchema` |
 | `rpc` | `grpc_provider_sensor`, `grpc_consumer_sensor`, `grpc_handler_link_sensor`, `proto_sensor` | `resolve_rpc_consumer` | yes | — (nodes only) |
 | `websocket` | `websocket_sensor` | `resolve_websocket_consumer` | yes | — (nodes only) |
-| `table` | `sql_sensor` | `resolve_table_consumer` | yes | — (nodes only) |
+| `table` | `sql_sensor`, `django_orm_sensor` | `resolve_table_consumer` | yes | — (nodes only) |
 
 "Dashboard view edges" lists the workspace-graph edge types
 (`WORKSPACE_GRAPH_EDGE_TYPES` — `Calls`, `Imports`,
@@ -169,6 +169,15 @@ each kind and are backlog, not silence.
 - **Sensors.** `sql_sensor` — literal SQL and ORM call sites, one
   `TableConsumer` fact per site listing every table the statement
   touches (SELECT, CTEs, subselects, joins, and the DML verbs).
+  `django_orm_sensor` — Django models: it maps each model class to its
+  table (`Meta.db_table`, else `<app_label>_<classname>`) and emits
+  `ReadsTable` / `WritesTable` edges from the functions that run
+  `Model.objects…` chains, `get_object_or_404`, or save an instance it
+  can bind in the same function. Its `Table` nodes sit at the model's
+  file and share the contract key with raw SQL on the same table name.
+  A chain with only custom manager methods is a heuristic read
+  (confidence 0.6); what it cannot resolve lands on the ledger as
+  `OrmDynamicQuery`. SQLAlchemy and Prisma are not covered.
 - **Resolver.** `resolve_table_consumer` — tables are identified by
   name alone; ownership (which service's endpoint table a `Table`
   lands in) comes from `databases[]` in `repos.yaml`, widened by

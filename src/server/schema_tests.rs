@@ -217,6 +217,7 @@ fn test_graph_edge_all_types() {
         EdgeType::CoChangedWith,
         EdgeType::Pattern,
         EdgeType::CallsHttp,
+        EdgeType::CallsGraphql,
         EdgeType::Produces,
         EdgeType::Consumes,
         EdgeType::DeployedTo,
@@ -616,4 +617,47 @@ fn test_graph_node_bincode_roundtrips_with_contract_field() {
     assert_eq!(decoded.line_start, original.line_start);
     assert_eq!(decoded.contract, original.contract);
     assert_eq!(decoded.entry, original.entry);
+}
+
+#[test]
+fn test_edge_type_bincode_discriminants_are_append_only() {
+    let expected = [
+        EdgeType::Contains,
+        EdgeType::Calls,
+        EdgeType::Uses,
+        EdgeType::Implements,
+        EdgeType::Imports,
+        EdgeType::CoChangedWith,
+        EdgeType::Pattern,
+        EdgeType::CallsHttp,
+        EdgeType::Produces,
+        EdgeType::Consumes,
+        EdgeType::DeployedTo,
+        EdgeType::CrossRepoSameSymbol,
+        EdgeType::DynamicDispatch,
+        EdgeType::BusTopic,
+        EdgeType::RouteMatches,
+        EdgeType::RuntimeCall,
+        EdgeType::SendsHttp,
+        EdgeType::RequestSchema,
+        EdgeType::ResponseSchema,
+        EdgeType::PayloadSchema,
+        EdgeType::HasField,
+        EdgeType::ReadsField,
+        EdgeType::ReadsFrom,
+        EdgeType::Binds,
+        EdgeType::ReadsTable,
+        EdgeType::WritesTable,
+        EdgeType::CallsGraphql,
+    ];
+    assert_eq!(EdgeType::all(), &expected);
+    for (idx, variant) in expected.iter().enumerate() {
+        let bytes =
+            bincode::serde::encode_to_vec(variant, bincode::config::legacy()).expect("encode");
+        assert_eq!(
+            bytes,
+            (idx as u32).to_le_bytes(),
+            "bincode discriminant for {variant:?} shifted"
+        );
+    }
 }

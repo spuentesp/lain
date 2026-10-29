@@ -538,6 +538,166 @@ async fn scenario_17_get_service_billing_lists_reports_with_both_used_by() {
     );
 }
 
+async fn call_trace_flow(fed: Arc<FederatedIndex>, args: Value) -> Value {
+    let status = lain::server::mcp::handler::HandlerStatus::for_test();
+    let ctx = McpContext {
+        server: None,
+        federation: Some(fed.as_ref()),
+        workspaces: None,
+        status: &status,
+        reload_bus: None,
+        snapshots: None,
+    };
+    lain::server::mcp::contract_tools::trace_flow::trace_flow_handle(&ctx, args)
+        .await
+        .unwrap()
+        .structured
+}
+
+/// `trace_flow` through the real handler on the three-repo fixture:
+/// billing's route runs downstream to its handler and helper, and
+/// upstream across the `Binds` edge to the reports consumer, its
+/// enclosing function and the two entry points that call it.
+#[tokio::test]
+async fn trace_flow_crosses_the_contract_boundary_both_ways() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fed = build_three_repo_federation(tmp.path(), RepoHealth::Ready).await;
+    let endpoint = json!({"service": "billing", "key": "http:GET /invoices/{}"});
+
+    let down = call_trace_flow(
+        fed.clone(),
+        json!({"from": {"endpoint": endpoint}, "direction": "downstream"}),
+    )
+    .await;
+    let data = &down["data"];
+    assert_eq!(data["direction"], json!("downstream"));
+    let chain: Vec<&str> = data["paths"][0]["hops"]
+        .as_array()
+        .expect("hops")
+        .iter()
+        .map(|h| h["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        chain,
+        vec!["GET /invoices/{}", "build_invoice", "fetch_order"],
+        "{data:#}"
+    );
+    assert_eq!(data["paths"][0]["hops"][1]["edge_type"], json!("CallsHttp"));
+    assert_eq!(data["paths"][0]["hops"][1]["engine_fact"], json!(true));
+    assert!(
+        data["gaps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|g| g["kind"] == json!("no_data_sink")),
+        "no table on this chain: the gap must say so: {data:#}"
+    );
+
+    let up = call_trace_flow(
+        fed.clone(),
+        json!({"from": {"endpoint": endpoint}, "direction": "upstream"}),
+    )
+    .await;
+    let paths = up["data"]["paths"].as_array().expect("paths");
+    let leaves: std::collections::BTreeSet<&str> = paths
+        .iter()
+        .map(|p| {
+            p["hops"].as_array().unwrap().last().unwrap()["name"]
+                .as_str()
+                .unwrap()
+        })
+        .collect();
+    assert!(
+        leaves.contains("getMonthlyReport") && leaves.contains("scheduledMonthlyReport"),
+        "upstream must reach both entry points: {leaves:?}"
+    );
+    let edge_types: Vec<&str> = paths[0]["hops"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|h| h["edge_type"].as_str())
+        .collect();
+    assert_eq!(edge_types, vec!["Binds", "SendsHttp", "Calls"]);
+
+    // Errors keep the existing codes.
+    let missing = call_trace_flow(
+        fed.clone(),
+        json!({"from": {"endpoint": {"service": "billing", "key": "http:GET /nope"}}}),
+    )
+    .await;
+    assert_eq!(missing["error"]["code"], json!("contract_not_found"));
+    let both = call_trace_flow(fed, json!({"from": {"symbol": "a", "table": "b"}})).await;
+    assert_eq!(both["error"]["code"], json!("invalid_argument"));
+}
+
+/// `strategy: depth` through the real handler returns the same full chain
+/// and says which strategy ran; the default call omits the field; an
+/// unknown value is an `invalid_argument` that lists the allowed ones.
+#[tokio::test]
+async fn trace_flow_strategy_switch_through_the_handler() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fed = build_three_repo_federation(tmp.path(), RepoHealth::Ready).await;
+    let endpoint = json!({"service": "billing", "key": "http:GET /invoices/{}"});
+
+    let default = call_trace_flow(
+        fed.clone(),
+        json!({"from": {"endpoint": endpoint}, "direction": "downstream"}),
+    )
+    .await;
+    assert!(default["data"].get("strategy").is_none());
+
+    let depth = call_trace_flow(
+        fed.clone(),
+        json!({"from": {"endpoint": endpoint}, "direction": "downstream", "strategy": "depth"}),
+    )
+    .await;
+    assert_eq!(depth["data"]["strategy"], json!("depth"));
+    assert_eq!(depth["data"]["paths"], default["data"]["paths"]);
+
+    let bad = call_trace_flow(
+        fed,
+        json!({"from": {"endpoint": endpoint}, "strategy": "sideways"}),
+    )
+    .await;
+    assert_eq!(bad["error"]["code"], json!("invalid_argument"));
+    assert_eq!(
+        bad["error"]["details"]["expected"],
+        json!(["breadth", "depth"])
+    );
+}
+
+/// While a repo is still indexing, an upstream trace names it instead of
+/// claiming no consumer exists.
+#[tokio::test]
+async fn trace_flow_names_repos_that_are_still_indexing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fed = build_three_repo_federation(tmp.path(), RepoHealth::Indexing).await;
+    let up = call_trace_flow(
+        fed,
+        json!({
+            "from": {"endpoint": {"service": "billing", "key": "http:GET /invoices/{}"}},
+            "direction": "upstream"
+        }),
+    )
+    .await;
+    let data = &up["data"];
+    let pending = data["repos_not_ready"].as_array().expect("repos_not_ready");
+    assert!(
+        pending
+            .iter()
+            .any(|r| r.as_str().unwrap_or("").starts_with("reports")),
+        "{data:#}"
+    );
+    assert!(
+        data["gaps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|g| g["kind"] != json!("no_consumers")),
+        "a missing consumer while repos index must not read as 'none exist': {data:#}"
+    );
+}
+
 #[tokio::test]
 async fn scenario_18_get_service_orders_unreviewed_when_indexing() {
     let tmp = tempfile::tempdir().unwrap();

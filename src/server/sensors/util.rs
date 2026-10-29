@@ -406,7 +406,7 @@ pub fn to_camel_case(name: &str) -> String {
     let mut capitalize = false;
     for c in name.chars() {
         if c == '_' {
-            capitalize = true;
+            capitalize = !result.is_empty();
         } else if capitalize {
             result.push(c.to_ascii_uppercase());
             capitalize = false;
@@ -579,7 +579,8 @@ pub fn find_handler_in_graph(graph: &GraphDatabase, name: &str) -> Option<GraphN
 }
 
 /// The `Function` or `Method` in `path` with the smallest range
-/// `line_start..=line_end` that contains `line` (§6.1).
+/// `line_start..=line_end` that contains `line` (§6.1). `line` is
+/// 1-based; the stored range is 0-based (see the comparison below).
 ///
 /// Ties (two symbols span the same number of lines) go to the
 /// symbol whose `line_start` is later — a nested function is more
@@ -599,7 +600,11 @@ pub fn enclosing_symbol(graph: &GraphDatabase, path: &str, line: u32) -> Option<
             )
         })
         .filter_map(|n| match (n.line_start, n.line_end) {
-            (Some(s), Some(e)) if s <= line && e >= line => Some((n, e.saturating_sub(s))),
+            // The indexer stores tree-sitter rows (0-based); `line` is the
+            // 1-based line a sensor reports. Compare in the same base, or
+            // a call on a function's last line misses it and one on the
+            // line above it hits.
+            (Some(s), Some(e)) if s + 1 <= line && e + 1 >= line => Some((n, e.saturating_sub(s))),
             _ => None,
         })
         .min_by(|a, b| {
@@ -621,6 +626,12 @@ pub fn enclosing_symbol(graph: &GraphDatabase, path: &str, line: u32) -> Option<
 /// protocol that annotates a source site gets its own synthetic node
 /// named `<prefix><path>:<line>`.
 pub const SQL_READ_PREFIX: &str = "sql-read:";
+/// See [`SQL_READ_PREFIX`]. The Django ORM sensor's `TableConsumerFact`
+/// node, kept apart from `sql-read:` so the two sensors never share one.
+pub const ORM_READ_PREFIX: &str = "orm-read:";
+/// `GraphNode.signature` marker on a `Table` node minted by the Django
+/// ORM sensor; `sensor_owner_of` keys ownership on it.
+pub const DJANGO_TABLE_MARK: &str = "orm:django";
 /// See [`SQL_READ_PREFIX`]. Carries `TopicConsumerFact`.
 pub const TOPIC_READ_PREFIX: &str = "topic-read:";
 /// Sentinel for a topic name that the extractor could not resolve to
@@ -935,6 +946,66 @@ where
         .collect()
 }
 
+/// Whole-file prefilter over a group of idioms: one `RegexSet` pass that says
+/// whether *any* idiom could match *somewhere* in a file, so the per-line walk
+/// (every idiom regex against every line) is skipped for the many files that
+/// cannot contain a site.
+///
+/// It may only err toward "yes". Each pattern is compiled `multi_line`, so a
+/// match on a single line is also a match inside the whole file with `^`/`$`
+/// at the same line boundaries; the file-wide form is strictly more permissive
+/// (`\s` and negated classes can cross lines), never less. Two cases fall back
+/// to "yes" because that guarantee does not hold: a file containing `\r` (`$`
+/// stops before `\n`, not `\r\n`) and a set the regex engine refuses to
+/// build. `LAIN_IDIOM_GATE=0` turns the gate off for A/B checks.
+pub struct IdiomGate {
+    set: Option<regex::RegexSet>,
+}
+
+impl IdiomGate {
+    /// Gate over every idiom in `groups`. An empty group list gates
+    /// everything out (no idiom can match).
+    pub fn new(groups: &[&[CompiledIdiom]]) -> Self {
+        let patterns: Vec<&str> = groups
+            .iter()
+            .flat_map(|g| g.iter())
+            .map(|i| i.regex.as_str())
+            .collect();
+        Self::from_patterns(&patterns)
+    }
+
+    /// Gate over literal strings (wrapper names), matched anywhere.
+    pub fn for_literals<'a>(names: impl IntoIterator<Item = &'a str>) -> Self {
+        let patterns: Vec<String> = names.into_iter().map(regex::escape).collect();
+        let refs: Vec<&str> = patterns.iter().map(String::as_str).collect();
+        Self::from_patterns(&refs)
+    }
+
+    fn from_patterns(patterns: &[&str]) -> Self {
+        let set = regex::RegexSetBuilder::new(patterns)
+            .multi_line(true)
+            .build()
+            .ok();
+        Self { set }
+    }
+
+    /// `false` only when no idiom can match anywhere in `content`.
+    pub fn may_match(&self, content: &str) -> bool {
+        if !idiom_gate_enabled() || content.contains('\r') {
+            return true;
+        }
+        match &self.set {
+            Some(set) => set.is_match(content),
+            None => true,
+        }
+    }
+}
+
+fn idiom_gate_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("LAIN_IDIOM_GATE").map_or(true, |v| v != "0"))
+}
+
 /// Build the full per-`Lang` idiom set in one shot: every
 /// Tier-1 entry in the registry, partitioned by the call site
 /// (the caller iterates lines and calls [`walk_idioms`] with
@@ -1136,6 +1207,36 @@ mod tests {
     /// surrounding one for a line inside both — otherwise the
     /// joiner (PR 7) would attach every `SendsHttp` to the
     /// outermost symbol.
+    /// The indexer stores 0-based rows; sensors query with 1-based
+    /// lines. A function on source lines 10..=14 is stored as 9..=13.
+    #[test]
+    fn enclosing_symbol_maps_one_based_lines_onto_zero_based_ranges() {
+        let g = db("enclosing_line_base");
+        let f = fn_with_range("f", "src/x.py", 9, 13);
+        g.insert_nodes_batch(std::slice::from_ref(&f)).unwrap();
+        assert_eq!(
+            enclosing_symbol(&g, "src/x.py", 10).unwrap().id,
+            f.id,
+            "first line"
+        );
+        assert_eq!(
+            enclosing_symbol(&g, "src/x.py", 14).unwrap().id,
+            f.id,
+            "last line"
+        );
+        assert!(enclosing_symbol(&g, "src/x.py", 9).is_none(), "line above");
+        assert!(enclosing_symbol(&g, "src/x.py", 15).is_none(), "line below");
+    }
+
+    #[test]
+    fn enclosing_symbol_finds_a_one_line_function() {
+        let g = db("enclosing_one_liner");
+        let f = fn_with_range("f", "src/x.py", 4, 4); // source line 5
+        g.insert_nodes_batch(std::slice::from_ref(&f)).unwrap();
+        assert_eq!(enclosing_symbol(&g, "src/x.py", 5).unwrap().id, f.id);
+        assert!(enclosing_symbol(&g, "src/x.py", 4).is_none());
+    }
+
     #[test]
     fn enclosing_symbol_returns_the_smallest_range() {
         let g = db("enclosing_smallest");
