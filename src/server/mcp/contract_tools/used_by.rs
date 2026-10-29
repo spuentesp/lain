@@ -31,6 +31,8 @@ pub struct UsedByResult {
     pub entries: Vec<Value>,
     /// `true` when `depth` ran out before any entry-point was found.
     pub truncated: bool,
+    /// The starting node could not be read from the selected graph.
+    pub start_unavailable: bool,
 }
 
 /// Walk incoming `Calls` from `start_id` (a consumer's calling
@@ -92,6 +94,7 @@ where
     let mut entries: Vec<Value> = Vec::new();
     let mut visited: BTreeSet<String> = BTreeSet::new();
     let mut truncated = false;
+    let mut start_unavailable = false;
 
     let mut frontier: Vec<(String, u8, bool)> = vec![(start_id.to_string(), 0, true)];
     while let Some((id, d, is_self)) = frontier.pop() {
@@ -99,6 +102,9 @@ where
             continue;
         }
         let Some(node) = get_node(&id) else {
+            if is_self {
+                start_unavailable = true;
+            }
             continue;
         };
         let name = node.name.clone();
@@ -174,6 +180,7 @@ where
     UsedByResult {
         entries,
         truncated: truncated && !has_entry,
+        start_unavailable,
     }
 }
 
@@ -238,6 +245,7 @@ mod tests {
         let r = walk(&g, "missing", 4);
         assert!(r.entries.is_empty());
         assert!(!r.truncated);
+        assert!(r.start_unavailable);
     }
 
     #[test]
@@ -246,6 +254,7 @@ mod tests {
         let start = make_fn(&g, "caller", "src/x.py", 1);
         g.insert_nodes_batch(std::slice::from_ref(&start)).unwrap();
         let r = walk(&g, &start.id, 4);
+        assert!(!r.start_unavailable);
         assert_eq!(r.entries.len(), 1);
         assert_eq!(r.entries[0]["kind"], json!("unreferenced"));
         assert_eq!(r.entries[0]["name"], json!("caller"));
