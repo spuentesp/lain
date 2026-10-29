@@ -466,16 +466,12 @@ pub(crate) fn resolve_field_refs(
                 schemaless_endpoints.insert(endpoint.clone());
                 continue;
             }
-            // §7.5 step 2 — exact match on JSON path. The join is
-            // `Binds(f → that Field)`, capped by the endpoint bind
-            // (§4.6: min of both, `Heuristic` if either).
-            let exact: Vec<&ResponseField> = response_fields
-                .iter()
-                .filter(|f| f.path == read.chain)
-                .collect();
-            if let Some(field) = exact.first() {
-                let (provenance, confidence) =
-                    cap_field_bind(&read_provenance(read.exact), ep_bind);
+            // Bind a response field to this read. Its confidence is the read's
+            // provenance capped by the endpoint bind (§4.6). Every bound field
+            // goes through here, so the bound-field and field-bind records
+            // cannot drift apart.
+            let mut bind = |field: &ResponseField, read_prov: &EdgeProvenance| {
+                let (provenance, confidence) = cap_field_bind(read_prov, ep_bind);
                 bound_fields.push(BoundField {
                     field: field.node_id.clone(),
                     field_path: field.path.clone(),
@@ -485,6 +481,16 @@ pub(crate) fn resolve_field_refs(
                 field_binds.push(make_field_bind(
                     &fid, field, endpoint, ep_bind, provenance, confidence,
                 ));
+            };
+            // §7.5 step 2 — exact match on JSON path. The join is
+            // `Binds(f → that Field)`, capped by the endpoint bind
+            // (§4.6: min of both, `Heuristic` if either).
+            let exact: Vec<&ResponseField> = response_fields
+                .iter()
+                .filter(|f| f.path == read.chain)
+                .collect();
+            if let Some(field) = exact.first() {
+                bind(field, &read_provenance(read.exact));
                 bound_any = true;
                 continue;
             }
@@ -494,40 +500,21 @@ pub(crate) fn resolve_field_refs(
                 .filter(|f| is_suffix(&f.path, &read.chain))
                 .collect();
             if suffix_matches.len() == 1 {
-                let field = suffix_matches[0];
                 let read_prov = EdgeProvenance::Heuristic {
                     detector: "field_suffix".into(),
                     confidence: 0.6,
                 };
-                let (provenance, confidence) = cap_field_bind(&read_prov, ep_bind);
-                bound_fields.push(BoundField {
-                    field: field.node_id.clone(),
-                    field_path: field.path.clone(),
-                    endpoint: endpoint.clone(),
-                    confidence,
-                });
-                field_binds.push(make_field_bind(
-                    &fid, field, endpoint, ep_bind, provenance, confidence,
-                ));
+                bind(suffix_matches[0], &read_prov);
                 bound_any = true;
                 continue;
             }
             if suffix_matches.len() > 1 {
+                let read_prov = EdgeProvenance::Heuristic {
+                    detector: "ambiguous_field".into(),
+                    confidence: 0.3,
+                };
                 for field in suffix_matches {
-                    let read_prov = EdgeProvenance::Heuristic {
-                        detector: "ambiguous_field".into(),
-                        confidence: 0.3,
-                    };
-                    let (provenance, confidence) = cap_field_bind(&read_prov, ep_bind);
-                    bound_fields.push(BoundField {
-                        field: field.node_id.clone(),
-                        field_path: field.path.clone(),
-                        endpoint: endpoint.clone(),
-                        confidence,
-                    });
-                    field_binds.push(make_field_bind(
-                        &fid, field, endpoint, ep_bind, provenance, confidence,
-                    ));
+                    bind(field, &read_prov);
                 }
                 bound_any = true;
                 continue;

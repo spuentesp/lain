@@ -1,0 +1,151 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "list_service_refs data",
+  "description": "`data` field of the `list_service_refs` envelope. Items sorted by (repo, path, line, value). A reference is evidence of a target, not of a call; `linked_to_call` says whether a sensor also saw a call at that line.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "repo": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string",
+            "description": "Repo-relative path."
+          },
+          "line": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "value": {
+            "type": "string",
+            "description": "The URL literal as written."
+          },
+          "host": {
+            "type": "string"
+          },
+          "outcome": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "resolved",
+                  "ambiguous",
+                  "unknown"
+                ]
+              },
+              "service": {
+                "type": "string"
+              },
+              "services": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "usage": {
+            "type": "string",
+            "enum": [
+              "production",
+              "test",
+              "configuration",
+              "documentation"
+            ]
+          },
+          "self_reference": {
+            "type": "boolean"
+          },
+          "linked_to_call": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "repo",
+          "path",
+          "line",
+          "value",
+          "host",
+          "outcome",
+          "usage",
+          "self_reference",
+          "linked_to_call"
+        ]
+      }
+    },
+    "cursor": {
+      "type": "string"
+    },
+    "scope": {
+      "type": "object"
+    },
+    "suggestions": {
+      "type": "array",
+      "description": "Only when `suggestions` is true. Proposals, never links.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "repo": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "line": {
+            "type": "integer"
+          },
+          "url": {
+            "type": "string"
+          },
+          "service": {
+            "type": "string"
+          },
+          "route": {
+            "type": "string"
+          },
+          "score": {
+            "type": "number"
+          },
+          "suggested": {
+            "type": "boolean",
+            "const": true
+          }
+        },
+        "required": [
+          "repo",
+          "path",
+          "line",
+          "url",
+          "service",
+          "route",
+          "score",
+          "suggested"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "suggestions_status": {
+      "type": "string",
+      "enum": [
+        "ok",
+        "no_server_context",
+        "no_contract_index",
+        "no_embedding_model"
+      ]
+    }
+  },
+  "required": [
+    "items",
+    "scope"
+  ]
+}

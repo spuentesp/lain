@@ -719,7 +719,7 @@ impl CompiledHttpClients {
             .map(|e| CompiledHttpClient {
                 pattern: e.call.clone(),
                 service: ServiceName(e.service.clone()),
-                method: e.method.as_ref().and_then(|m| parse_method(m)),
+                method: e.method.as_ref().and_then(|m| HttpMethod::parse(m)),
                 path_arg: e.path_arg,
             })
             .collect();
@@ -769,25 +769,11 @@ fn compile_http_clients(config: &ContractFederationConfig) -> CompiledHttpClient
         .map(|e| CompiledHttpClient {
             pattern: e.call.clone(),
             service: ServiceName(e.service.clone()),
-            method: e.method.as_ref().and_then(|m| parse_method(m)),
+            method: e.method.as_ref().and_then(|m| HttpMethod::parse(m)),
             path_arg: e.path_arg,
         })
         .collect();
     CompiledHttpClients { entries }
-}
-
-pub(super) fn parse_method(s: &str) -> Option<HttpMethod> {
-    Some(match s {
-        "GET" => HttpMethod::Get,
-        "POST" => HttpMethod::Post,
-        "PUT" => HttpMethod::Put,
-        "PATCH" => HttpMethod::Patch,
-        "DELETE" => HttpMethod::Delete,
-        "HEAD" => HttpMethod::Head,
-        "OPTIONS" => HttpMethod::Options,
-        "ANY" => HttpMethod::Any,
-        _ => return None,
-    })
 }
 
 /// `ContractKey::from_str` lives on the type, but the joiner

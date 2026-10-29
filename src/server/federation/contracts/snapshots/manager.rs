@@ -52,13 +52,7 @@ use super::record::{
 /// `diff_contracts` (`diff_contracts` is PR 13 territory); PR 11
 /// only needs one.
 pub fn snapshot_resident_cap() -> usize {
-    match std::env::var("LAIN_SNAPSHOT_RESIDENT") {
-        Ok(s) if !s.trim().is_empty() => match s.trim().parse::<usize>() {
-            Ok(v) if v > 0 => v,
-            _ => DEFAULT_SNAPSHOT_RESIDENT,
-        },
-        _ => DEFAULT_SNAPSHOT_RESIDENT,
-    }
+    crate::server::env_util::positive_env("LAIN_SNAPSHOT_RESIDENT", DEFAULT_SNAPSHOT_RESIDENT)
 }
 
 pub const DEFAULT_SNAPSHOT_RESIDENT: usize = 2;
@@ -66,13 +60,10 @@ pub const DEFAULT_SNAPSHOT_RESIDENT: usize = 2;
 /// `LAIN_SNAPSHOT_RETENTION_DAYS` (`§8.4`): records older than 7
 /// days after their last access are deleted.
 pub fn snapshot_retention_days() -> u64 {
-    match std::env::var("LAIN_SNAPSHOT_RETENTION_DAYS") {
-        Ok(s) if !s.trim().is_empty() => match s.trim().parse::<u64>() {
-            Ok(v) if v > 0 => v,
-            _ => DEFAULT_SNAPSHOT_RETENTION_DAYS,
-        },
-        _ => DEFAULT_SNAPSHOT_RETENTION_DAYS,
-    }
+    crate::server::env_util::positive_env(
+        "LAIN_SNAPSHOT_RETENTION_DAYS",
+        DEFAULT_SNAPSHOT_RETENTION_DAYS,
+    )
 }
 
 pub const DEFAULT_SNAPSHOT_RETENTION_DAYS: u64 = 7;
@@ -210,7 +201,16 @@ pub struct SnapshotManager {
 impl SnapshotManager {
     pub fn new(data_dir: &Path, cache: IndexCache) -> Arc<Self> {
         let cap = snapshot_resident_cap();
-        Self::with_cap(data_dir, cache, cap)
+        let mgr = Self::with_cap(data_dir, cache, cap);
+        // §8.4: records not accessed within the retention window are deleted.
+        // Run once when the manager is built, so the window is enforced for
+        // every server start and every workspace handoff that builds one.
+        match mgr.apply_retention() {
+            Ok(0) => {}
+            Ok(n) => info!("snapshot retention removed {n} expired record(s)"),
+            Err(e) => warn!("snapshot retention could not run: {e}"),
+        }
+        mgr
     }
 
     /// Constructor with an explicit residency cap. The MCP server
@@ -437,7 +437,7 @@ impl SnapshotManager {
         if let Ok(Some(record)) = read_record(&self.data_dir, &id) {
             if matches!(record.state, SnapshotState::Ready | SnapshotState::Failed) {
                 let _ = touch_last_access(&self.data_dir, &id, now_unix());
-                let snapshot = self.build_view(&record).await;
+                let snapshot = build_view_sync(&record);
                 return Ok(PrepareOutcome {
                     record,
                     view: snapshot,
@@ -531,7 +531,7 @@ impl SnapshotManager {
                     write_record(&self.data_dir, &record)
                         .map_err(|e| PrepareError::Other(e.to_string()))?;
                     let _ = touch_last_access(&self.data_dir, &id, now_unix());
-                    let view = self.build_view(&record).await;
+                    let view = build_view_sync(&record);
                     return Ok(PrepareOutcome { record, view });
                 }
                 _ => {}
@@ -541,7 +541,7 @@ impl SnapshotManager {
                 // state and return what we have.
                 write_record(&self.data_dir, &record)
                     .map_err(|e| PrepareError::Other(e.to_string()))?;
-                let view = self.build_view(&record).await;
+                let view = build_view_sync(&record);
                 return Ok(PrepareOutcome { record, view });
             }
             // Sleep briefly then re-check. The wait/notify pair
@@ -604,13 +604,13 @@ impl SnapshotManager {
             match record.state {
                 SnapshotState::Ready | SnapshotState::Failed => {
                     let _ = touch_last_access(&self.data_dir, snapshot_id, now_unix());
-                    let view = self.build_view(&record).await;
+                    let view = build_view_sync(&record);
                     return Ok(PrepareOutcome { record, view });
                 }
                 _ => {}
             }
             if Instant::now() >= deadline {
-                let view = self.build_view(&record).await;
+                let view = build_view_sync(&record);
                 return Ok(PrepareOutcome { record, view });
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -678,40 +678,6 @@ impl SnapshotManager {
         };
         let view = build_view_sync(&record);
         PrepareOutcome { record, view }
-    }
-
-    /// Build the JSON-shaped view the tool returns. Wraps the
-    /// record + per-repo state + readiness in a stable shape
-    /// (`§12`).
-    async fn build_view(self: &Arc<Self>, record: &SnapshotRecord) -> serde_json::Value {
-        let repos_view: Vec<serde_json::Value> = record
-            .repo_states
-            .iter()
-            .map(|(repo, state)| match state {
-                RepoSnapshotState::Cached { commit } => {
-                    serde_json::json!({"repo": repo, "commit": commit, "state": "cached"})
-                }
-                RepoSnapshotState::Queued { commit } => {
-                    serde_json::json!({"repo": repo, "commit": commit, "state": "queued"})
-                }
-                RepoSnapshotState::Indexing { commit } => {
-                    serde_json::json!({"repo": repo, "commit": commit, "state": "indexing"})
-                }
-                RepoSnapshotState::Failed { commit, error } => {
-                    serde_json::json!({"repo": repo, "commit": commit, "state": "failed", "error": error})
-                }
-                RepoSnapshotState::Excluded => {
-                    serde_json::json!({"repo": repo, "state": "excluded"})
-                }
-            })
-            .collect();
-        serde_json::json!({
-            "snapshot": record.id,
-            "state": record.state.as_str(),
-            "repos": repos_view,
-            "created_unix": record.created_unix,
-            "last_access_unix": record.last_access_unix,
-        })
     }
 
     /// Read each job's status and roll it up into the snapshot's
@@ -2004,6 +1970,37 @@ const _: fn() = || {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn building_the_manager_removes_records_past_the_retention_window() {
+        use super::super::record::{snapshot_path, write_record, SnapshotRecord, SnapshotState};
+        let dir = tempfile::tempdir().unwrap();
+        let mk = |id: &str, last_access_unix: i64| SnapshotRecord {
+            id: id.into(),
+            repos: BTreeMap::new(),
+            excluded: vec![],
+            refs_: BTreeMap::new(),
+            join_config: serde_json::json!({}),
+            config_hash: "h".into(),
+            analyzer_version: "0.9.0+c1".into(),
+            state: SnapshotState::Pending,
+            repo_states: BTreeMap::new(),
+            created_unix: last_access_unix,
+            last_access_unix,
+        };
+        let now = now_unix();
+        write_record(dir.path(), &mk("snap_old", 100)).unwrap();
+        write_record(dir.path(), &mk("snap_recent", now)).unwrap();
+        let _mgr = SnapshotManager::new(dir.path(), IndexCache::new(dir.path()));
+        assert!(
+            !snapshot_path(dir.path(), "snap_old").exists(),
+            "expired record is deleted"
+        );
+        assert!(
+            snapshot_path(dir.path(), "snap_recent").exists(),
+            "recent record is kept"
+        );
+    }
 
     #[test]
     fn env_defaults() {

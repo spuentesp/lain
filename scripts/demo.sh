@@ -303,10 +303,10 @@ TOOL_COUNT=$(_parse_mcp_resp "import json,sys; print(len(json.load(sys.stdin)['r
 # the embedding model: present when MODEL_ARGS is set, absent when
 # it is not.
 if [ -n "${MODEL_ARGS[*]:-}" ]; then
-  check "tools/list advertises the full surface" "94" "$TOOL_COUNT"
+  check "tools/list advertises the full surface" "95" "$TOOL_COUNT"
 else
   # Wishlist #9: a tool that cannot answer is not offered.
-  check "tools/list hides semantic_search with no model" "93" "$TOOL_COUNT"
+  check "tools/list hides semantic_search with no model" "94" "$TOOL_COUNT"
 fi
 
 # get_capabilities (AGENT_UX_ROADMAP M4): graph-independent, always
@@ -990,6 +990,7 @@ except Exception:
 check_absent "list_services answers JSON-RPC"   "__RPC_ERROR__" "$(call list_services   "{\"snapshot\":\"$DEMO_SNAP\"}" || true)"
 check_absent "get_service answers JSON-RPC"     "__RPC_ERROR__" "$(call get_service     "{\"snapshot\":\"$DEMO_SNAP\"}" || true)"
 check_absent "list_contracts answers JSON-RPC"  "__RPC_ERROR__" "$(call list_contracts  "{\"snapshot\":\"$DEMO_SNAP\"}" || true)"
+check_absent "list_service_refs answers JSON-RPC" "__RPC_ERROR__" "$(call list_service_refs '{"snapshot":"live","limit":5}' || true)"
 check_absent "get_contract answers JSON-RPC"    "__RPC_ERROR__" "$(call get_contract    "{\"snapshot\":\"$DEMO_SNAP\"}" || true)"
 check_absent "list_unresolved answers JSON-RPC" "__RPC_ERROR__" "$(call list_unresolved "{\"snapshot\":\"$DEMO_SNAP\"}" || true)"
 check_absent "check_binding answers JSON-RPC"   "__RPC_ERROR__" "$(call check_binding   "{\"snapshot\":\"$DEMO_SNAP\",\"consumer\":\"x\",\"endpoint\":\"y\"}" || true)"
