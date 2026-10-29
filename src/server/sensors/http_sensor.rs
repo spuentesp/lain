@@ -279,6 +279,53 @@ pub fn nextjs_app_routes(path: &std::path::Path, content: &str) -> Vec<HttpRoute
     routes
 }
 
+/// Next.js pages-router API routes: `pages/api/x/y.ts` serves `/api/x/y`
+/// and `pages/api/x/index.ts` serves `/api/x`. The file's default export is
+/// the handler; a module under `pages/api` without one is a helper, not an
+/// endpoint. Dynamic segments reuse the App Router's `nextjs_segment`.
+pub fn nextjs_pages_routes(path: &std::path::Path, content: &str) -> Vec<HttpRoute> {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    let rest = normalized
+        .rsplit_once("/pages/api/")
+        .map(|(_, r)| r)
+        .or_else(|| normalized.strip_prefix("pages/api/"));
+    let Some(rest) = rest else {
+        return Vec::new();
+    };
+    let Some((stem, ext)) = rest.rsplit_once('.') else {
+        return Vec::new();
+    };
+    if !matches!(ext, "ts" | "tsx" | "js" | "jsx") {
+        return Vec::new();
+    }
+    let Some(line) = content
+        .lines()
+        .position(|l| l.trim_start().starts_with("export default"))
+    else {
+        return Vec::new();
+    };
+    let stem = if stem == "index" {
+        ""
+    } else {
+        stem.strip_suffix("/index").unwrap_or(stem)
+    };
+    let url_path = std::iter::once("/api".to_string())
+        .chain(
+            stem.split('/')
+                .filter(|seg| !seg.is_empty())
+                .map(nextjs_segment),
+        )
+        .collect::<Vec<_>>()
+        .join("/");
+    vec![HttpRoute {
+        method: HttpMethod::Any,
+        path: url_path,
+        handler_path: path.to_string_lossy().to_string(),
+        handler_name: "default".to_string(),
+        line: line as u32 + 1,
+    }]
+}
+
 /// The directory between `app/` and the `route.<ext>` file, or `None` for any
 /// other file. `app/route.ts` gives the empty directory (the site root).
 fn nextjs_route_dir(normalized: &str) -> Option<&str> {
@@ -328,6 +375,7 @@ fn scan_file_for_routes_with_queries(
     queries: &RouteQueries,
 ) -> Vec<HttpRoute> {
     let mut routes = nextjs_app_routes(path, content);
+    routes.extend(nextjs_pages_routes(path, content));
     routes.extend(decorator_routes_with_queries(
         path, content, patterns, queries,
     ));
@@ -997,6 +1045,56 @@ response.headers.set('x-session-id', sessionId);
             Patterns::patterns(),
         );
         assert!(r.is_empty(), "non-route calls captured as routes: {r:?}");
+    }
+
+    /// Next.js pages-router API routes: `pages/api/mcp/clients.ts` serves
+    /// `/api/mcp/clients`. The live NAT UI has `pages/api/mcp/clients.ts`,
+    /// and its handler is the default export.
+    #[test]
+    fn nextjs_pages_api_files_are_routes() {
+        let src = "export default async function handler(req, res) { res.json({}); }\n";
+        let r = scan_file_for_routes(
+            std::path::Path::new("pages/api/mcp/clients.ts"),
+            src,
+            Patterns::patterns(),
+        );
+        assert_eq!(r.len(), 1, "pages/api file should be a route: {r:?}");
+        assert_eq!(r[0].path, "/api/mcp/clients");
+        assert_eq!(r[0].method, HttpMethod::Any);
+    }
+
+    /// Dynamic segments and the `src/` prefix: `src/pages/api/[id].ts`
+    /// serves `/api/:id`.
+    #[test]
+    fn nextjs_pages_api_dynamic_segments_and_src_prefix() {
+        let src = "export default function handler(req, res) {}\n";
+        let r = scan_file_for_routes(
+            std::path::Path::new("src/pages/api/[id].ts"),
+            src,
+            Patterns::patterns(),
+        );
+        assert_eq!(r.len(), 1, "{r:?}");
+        assert_eq!(r[0].path, "/api/:id");
+    }
+
+    /// Pages outside `pages/api` are not endpoints, and a helper module
+    /// under `pages/api` without a default export is not one either.
+    #[test]
+    fn nextjs_non_api_pages_and_helpers_are_not_routes() {
+        let page = "export default function Home() { return null; }\n";
+        assert!(scan_file_for_routes(
+            std::path::Path::new("pages/index.tsx"),
+            page,
+            Patterns::patterns()
+        )
+        .is_empty());
+        let helper = "export function parse(x) { return x; }\n";
+        assert!(scan_file_for_routes(
+            std::path::Path::new("pages/api/util.ts"),
+            helper,
+            Patterns::patterns()
+        )
+        .is_empty());
     }
 
     /// A real Express route still is one after the verb whitelist.
