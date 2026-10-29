@@ -47,7 +47,7 @@ use crate::federation::contracts::model::{
 use crate::graph::{graph_path, GraphDatabase, SensorOwner};
 use crate::schema::{GraphEdge, GraphNode, RepoNamespace};
 use crate::server::sensors::util::compose_service_name;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 // ─── Public sensor shape ───────────────────────────────────────────────
@@ -240,9 +240,24 @@ fn detect_channel_env(content: &str, ext: &str) -> Option<String> {
             if let Some(var) = env_locals.get(arg) {
                 return Some(var.clone());
             }
+            // The argument is a parameter, not an env-get local (an
+            // SDK that takes the gateway address in its constructor).
+            // Fall back to the file's sole env read.
+            return sole_file_env_var(&env_locals);
         }
     }
     None
+}
+
+/// The one env var a file reads, when the file reads exactly one.
+/// Used for a channel whose address arrives as a constructor parameter:
+/// with a single env source the file's own gateway setting is the
+/// best candidate. With two or more the sensor refuses to guess.
+fn sole_file_env_var(env_locals: &BTreeMap<String, String>) -> Option<String> {
+    let vars: BTreeSet<&String> = env_locals.values().collect();
+    (vars.len() == 1)
+        .then(|| vars.into_iter().next().cloned())
+        .flatten()
 }
 
 fn detect_channel_host(content: &str, ext: &str) -> Option<String> {
@@ -667,6 +682,83 @@ class Client:
 ";
         let calls = detect_stub_calls(src, "py", "client.py");
         assert!(calls.is_empty());
+    }
+
+    /// OpenShell's Python SDK takes the gateway address as a
+    /// constructor parameter and reads the gateway name from the
+    /// environment elsewhere in the file. With one env read in the
+    /// file, the channel resolves to that variable.
+    #[test]
+    fn python_stub_call_resolves_channel_from_file_env() {
+        let src = "\
+import os
+import grpc
+import openshell_pb2_grpc
+
+def _resolve_active_cluster() -> str:
+    env_gateway = os.environ.get(\"OPENSHELL_GATEWAY\")
+    return env_gateway
+
+class SandboxClient:
+    def __init__(self, endpoint):
+        self._channel = grpc.insecure_channel(endpoint)
+        self._stub = openshell_pb2_grpc.OpenShellStub(self._channel)
+
+    def health(self):
+        return self._stub.Health(request)
+";
+        let calls = detect_stub_calls(src, "py", "sandbox.py");
+        assert_eq!(calls.len(), 1);
+        assert!(matches!(&calls[0].channel_host_part,
+            HostPart::Env(ref vars) if vars == &["OPENSHELL_GATEWAY".to_string()]));
+    }
+
+    /// Two env reads in one file: the channel must not guess.
+    #[test]
+    fn python_stub_call_with_two_env_reads_stays_unknown() {
+        let src = "\
+import os
+import grpc
+import openshell_pb2_grpc
+
+a = os.environ.get(\"OPENSHELL_GATEWAY\")
+b = os.environ.get(\"XDG_CONFIG_HOME\")
+
+class SandboxClient:
+    def __init__(self, endpoint):
+        self._channel = grpc.insecure_channel(endpoint)
+        self._stub = openshell_pb2_grpc.OpenShellStub(self._channel)
+
+    def health(self):
+        return self._stub.Health(request)
+";
+        let calls = detect_stub_calls(src, "py", "sandbox.py");
+        assert_eq!(calls.len(), 1);
+        assert!(matches!(calls[0].channel_host_part, HostPart::None));
+    }
+
+    /// Two locals reading the same variable are still one env read.
+    #[test]
+    fn python_stub_call_with_repeated_env_var_resolves() {
+        let src = "\
+import os
+import grpc
+import openshell_pb2_grpc
+
+a = os.environ.get(\"OPENSHELL_GATEWAY\")
+b = os.getenv(\"OPENSHELL_GATEWAY\")
+
+class SandboxClient:
+    def __init__(self, endpoint):
+        self._channel = grpc.insecure_channel(endpoint)
+        self._stub = openshell_pb2_grpc.OpenShellStub(self._channel)
+
+    def health(self):
+        return self._stub.Health(request)
+";
+        let calls = detect_stub_calls(src, "py", "sandbox.py");
+        assert!(matches!(&calls[0].channel_host_part,
+            HostPart::Env(ref vars) if vars == &["OPENSHELL_GATEWAY".to_string()]));
     }
 
     #[test]
