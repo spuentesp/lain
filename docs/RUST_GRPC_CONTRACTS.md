@@ -2,8 +2,9 @@
 
 Federation indexing can identify selected Rust calls to generated tonic-style
 clients and match them to protobuf provider facts from other repositories.
-This is syntax-based discovery; it does not establish Rust name resolution,
-trait dispatch, or complete RPC coverage.
+Live indexing also queries method definitions through the existing LSP pool.
+Syntax-only discovery remains available for snapshots and unavailable language
+servers. Neither path establishes complete RPC coverage.
 
 ## Mapping configuration
 
@@ -50,3 +51,35 @@ repositories regenerate the anchors on reindex. This discovery does not trace
 arbitrary wrappers, closures, dynamic dispatch, destination dataflow, or LSP
 definitions; review coverage evidence before treating an empty result as proof
 of no RPC calls.
+
+## Live LSP identity
+
+After protocol discovery, live indexing uses `textDocument/definition` through
+Lain's existing local or remote LSP bridge. It probes method calls, including
+closure receivers the syntax detector cannot type. A concrete definition must
+identify a generated client module/type and a tonic RPC method with transport
+dispatch and a literal `PathAndQuery` RPC path. The path narrows protobuf catalog
+matching to the actual package/service and method. Names alone do not supply this
+evidence. The bridge also supports `textDocument/typeDefinition` for identity
+queries; RPC enrichment currently uses method definitions.
+
+`list_unresolved` exposes `rpc.semantic` with definition source locations,
+content hashes, the extracted RPC key and the evidence status. A current LSP
+answer without a unique generated tonic definition suppresses syntax identity
+for that site (`unproven_definition`). Empty/error/unavailable responses retain
+the conservative syntax path, with no semantic evidence claimed.
+
+The pass is serial and bounded: at most 32 probes per file, 256 per repository,
+and 15 seconds including lock waits and requests. It uses the existing LSP pool;
+it does not create another pool. Sites outside those limits retain syntax
+coverage and do not acquire an LSP claim. Cancellation stops the pass.
+
+Semantic evidence is held only in memory and checked against caller, mapping and
+definition contents before reuse. It is cleared/replaced on enrichment and never
+serialized into graphs. Restart/reindex is needed to repopulate it. Snapshots
+never consume live LSP evidence: they rebuild from their exact source/mapping
+revision. A call proven only through a live definition may therefore remain a
+snapshot coverage gap, explicitly reported as missing evidence.
+
+This enriches method identity, not deployment destination. Use the existing
+operator-confirmed mapping workflow for a destination that cannot be inferred.

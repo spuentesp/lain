@@ -388,8 +388,8 @@ fn declaration_served(
     index.is_some() && providers_served && aliases_served && bindings_served(fed, incoming_bindings)
 }
 
-/// Match the legacy selector exactly as the confirmed joiner does. The selector
-/// carries no line/id, so a request must never imply per-site precision.
+/// Match symbol/key scope and, when supplied, the exact consumer GlobalId.
+/// Legacy selectors still require a unique current match during apply.
 fn matching_consumers(
     backend: &dyn crate::federation::graph_backend::GraphBackend,
     index: &ContractIndex,
@@ -404,7 +404,12 @@ fn matching_consumers(
     {
         let node = backend.get_node(id.as_str()).map_err(|e| e.to_string())?;
         let Some(node) = node else { continue };
-        if node.path == binding.consumer.path
+        if binding
+            .consumer
+            .site
+            .as_ref()
+            .is_none_or(|site| site == id.as_str())
+            && node.path == binding.consumer.path
             && node.container.as_ref().unwrap_or(&node.name) == &binding.consumer.symbol
             && node
                 .contract
@@ -471,7 +476,7 @@ fn validate_bindings(
             if matches.len() != 1 {
                 return Err((
                     "ambiguous_binding",
-                    "consumer selector matches multiple sites; repos.yaml bindings cannot select one site".into(),
+                    "consumer selector matches multiple sites; use the site returned by check_binding".into(),
                     json!({
                         "binding": binding,
                         "matched_consumers": matches.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(),

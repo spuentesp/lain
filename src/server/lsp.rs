@@ -1226,6 +1226,84 @@ impl LspMultiplexer {
         Ok(results)
     }
 
+    /// Resolve symbol identity using the existing local or remote language
+    /// server. Coordinates are zero-based LSP UTF-16 positions. Requests,
+    /// including document synchronization, are bounded by the normal budget.
+    pub async fn get_definitions(
+        &mut self,
+        path: &Path,
+        line: u32,
+        col: u32,
+        type_definition: bool,
+    ) -> Result<Vec<ReferenceLocation>, LainError> {
+        use lsp_types::request::{GotoDefinition, GotoTypeDefinition};
+        let server_id = self.ensure_server(path).await?;
+        let uri = file_uri(path);
+        let content = tokio::fs::read_to_string(path).await?;
+        let params = serde_json::json!({
+            "textDocument": {"uri": uri},
+            "position": {"line": line, "character": col}
+        });
+        let method = if type_definition {
+            "textDocument/typeDefinition"
+        } else {
+            "textDocument/definition"
+        };
+        let response = tokio::time::timeout(LSP_REQUEST_TIMEOUT, async {
+            if let Some(remote) = self.remote.as_ref() {
+                remote
+                    .notify(
+                        "textDocument/didOpen",
+                        serde_json::json!({
+                            "textDocument": {"uri": uri, "languageId": language_id_for(path),
+                                "version": 1, "text": content}
+                        }),
+                    )
+                    .await?;
+                return remote.request(method, params).await;
+            }
+            self.bridge
+                .open_document(&server_id, &uri, &content)
+                .await
+                .map_err(|e| LainError::Lsp(e.to_string()))?;
+            let value = if type_definition {
+                let params =
+                    serde_json::from_value(params).map_err(|e| LainError::Lsp(e.to_string()))?;
+                let result = self
+                    .bridge
+                    .request::<GotoTypeDefinition>(&server_id, params)
+                    .await
+                    .map_err(|e| LainError::Lsp(e.to_string()))?;
+                serde_json::to_value(result)
+            } else {
+                let params =
+                    serde_json::from_value(params).map_err(|e| LainError::Lsp(e.to_string()))?;
+                let result = self
+                    .bridge
+                    .request::<GotoDefinition>(&server_id, params)
+                    .await
+                    .map_err(|e| LainError::Lsp(e.to_string()))?;
+                serde_json::to_value(result)
+            };
+            value.map_err(|e| LainError::Lsp(e.to_string()))
+        })
+        .await
+        .map_err(|_| LainError::Lsp(format!("{method} timed out")))??;
+        Ok(parse_locations(response)
+            .into_iter()
+            .filter_map(|loc| {
+                // parse_locations retains percent escapes; decode local file paths.
+                let path = decode_file_path(&loc.path)?;
+                Some(ReferenceLocation {
+                    path,
+                    line: loc.line,
+                    col: loc.col,
+                    context: String::new(),
+                })
+            })
+            .collect())
+    }
+
     pub async fn install_server(&mut self, ext: &str) -> Result<String, LainError> {
         // Accept either a file extension ("rs", "py") or a language name
         // ("rust", "python"). When given a name, resolve to the canonical ext.
@@ -1781,6 +1859,14 @@ pub struct LspPool {
 }
 
 impl LspPool {
+    #[cfg(test)]
+    pub(crate) fn from_test_multiplexer(mux: LspMultiplexer) -> Self {
+        Self {
+            multiplexers: vec![Arc::new(AsyncMutex::new(mux))],
+            next: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
     pub fn new(
         workspace: &Path,
         size: usize,
@@ -2957,6 +3043,51 @@ fn parse_document_symbols(value: serde_json::Value) -> Vec<DocumentSymbol> {
         .unwrap_or_default()
 }
 
+pub(crate) fn file_uri(path: &Path) -> String {
+    let path = path.to_string_lossy().replace('\\', "/");
+    let mut uri = if path.starts_with('/') {
+        "file://".to_string()
+    } else {
+        "file:///".to_string()
+    };
+    for b in path.bytes() {
+        if b.is_ascii_alphanumeric() || b"/-._~:".contains(&b) {
+            uri.push(b as char);
+        } else {
+            uri.push_str(&format!("%{b:02X}"));
+        }
+    }
+    uri
+}
+
+fn decode_file_path(path: &str) -> Option<PathBuf> {
+    // Reject virtual/remote documents: identity inspection reads local sources.
+    if path.contains("://") {
+        return None;
+    }
+    let mut out = Vec::new();
+    let bytes = path.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = std::str::from_utf8(bytes.get(i + 1..i + 3)?).ok()?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    let path = String::from_utf8(out).ok()?;
+    #[cfg(windows)]
+    let path = path
+        .strip_prefix('/')
+        .filter(|p| p.as_bytes().get(1) == Some(&b':'))
+        .unwrap_or(&path)
+        .to_string();
+    Some(PathBuf::from(path))
+}
+
 struct ParsedLocation {
     path: String,
     line: u32,
@@ -3030,6 +3161,8 @@ pub mod test_support {
         pub did_close: std::sync::Mutex<Vec<serde_json::Value>>,
         pub document_symbol: std::sync::Mutex<Vec<serde_json::Value>>,
         pub references: std::sync::Mutex<Vec<serde_json::Value>>,
+        pub definitions: std::sync::Mutex<Vec<serde_json::Value>>,
+        pub type_definitions: std::sync::Mutex<Vec<serde_json::Value>>,
         pub shutdown: std::sync::Mutex<u32>,
         pub exit: std::sync::Mutex<u32>,
     }
@@ -3207,8 +3340,20 @@ pub mod test_support {
                     let result = canned.unwrap_or_else(|| serde_json::json!([]));
                     send_response(&write, id, result).await?;
                 }
-                "textDocument/references" => {
-                    received.references.lock().unwrap().push(value.clone());
+                "textDocument/references"
+                | "textDocument/definition"
+                | "textDocument/typeDefinition" => {
+                    match method.as_str() {
+                        "textDocument/definition" => {
+                            received.definitions.lock().unwrap().push(value.clone())
+                        }
+                        "textDocument/typeDefinition" => received
+                            .type_definitions
+                            .lock()
+                            .unwrap()
+                            .push(value.clone()),
+                        _ => received.references.lock().unwrap().push(value.clone()),
+                    }
                     let uri = params
                         .get("textDocument")
                         .and_then(|td| td.get("uri"))
@@ -3277,3 +3422,48 @@ pub mod test_support {
 #[cfg(test)]
 #[path = "lsp_verification.rs"]
 mod verification;
+
+#[cfg(test)]
+mod definition_wire_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn definition_and_type_definition_use_the_existing_wire_transport() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("caller with spaces.rs");
+        tokio::fs::write(&path, "fn caller() {}\n").await.unwrap();
+        let server = test_support::FakeLspServer::bind().await.unwrap();
+        let target = dir.path().join("generated with spaces.rs");
+        server.set_references(&file_uri(&path), 0, 3, json!({
+            "uri": file_uri(&target),
+            "range": {"start": {"line": 7, "character": 11}, "end": {"line": 7, "character": 17}}
+        })).await;
+        let mut mux = LspMultiplexer::with_server_url(
+            dir.path(),
+            &server.host(),
+            server.port(),
+            &crate::tuning::RuntimeConfig::default(),
+        )
+        .await
+        .unwrap();
+        let handle = server.spawn();
+        for type_definition in [false, true] {
+            let locations = mux
+                .get_definitions(&path, 0, 3, type_definition)
+                .await
+                .unwrap();
+            assert_eq!(locations.len(), 1);
+            assert_eq!(locations[0].path, target);
+            assert_eq!((locations[0].line, locations[0].col), (7, 11));
+        }
+        assert_eq!(handle.received().definitions.lock().unwrap().len(), 1);
+        assert_eq!(handle.received().type_definitions.lock().unwrap().len(), 1);
+        assert!(mux
+            .get_definitions(&path, 0, 99, false)
+            .await
+            .unwrap()
+            .is_empty());
+        handle.shutdown().await;
+    }
+}

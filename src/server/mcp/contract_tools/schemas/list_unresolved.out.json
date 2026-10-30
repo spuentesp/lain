@@ -217,7 +217,8 @@
             "resolved",
             "unknown_identity",
             "ambiguous_identity",
-            "missing_evidence"
+            "missing_evidence",
+            "unproven_definition"
           ]
         },
         "candidate": {
@@ -264,6 +265,89 @@
           "type": [
             "string",
             "null"
+          ]
+        },
+        "semantic": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "source_hash": {
+                  "type": "string"
+                },
+                "config_hash": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "resolved_definition",
+                    "unproven_definition"
+                  ]
+                },
+                "definitions": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "path": {
+                        "type": "string"
+                      },
+                      "line": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "column": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "source_hash": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "path",
+                      "line",
+                      "column",
+                      "source_hash"
+                    ]
+                  }
+                },
+                "candidate": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/RustRpcCandidate"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "site_name": {
+                  "type": "string"
+                },
+                "rpc_key": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "source_hash",
+                "config_hash",
+                "status",
+                "definitions",
+                "candidate",
+                "site_name",
+                "rpc_key"
+              ]
+            },
+            {
+              "type": "null"
+            }
           ]
         }
       },

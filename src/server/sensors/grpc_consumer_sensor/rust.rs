@@ -49,7 +49,7 @@ pub struct RustGrpcConfig {
     pub deny_methods: Vec<String>,
     pub accessors: Vec<Accessor>,
     #[serde(skip)]
-    query: String,
+    pub(super) query: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]

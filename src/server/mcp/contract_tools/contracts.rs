@@ -1392,6 +1392,7 @@ fn render_bindings_entry(
     };
     let binding = ConfirmedBinding {
         consumer: ConfirmedBindingConsumer {
+            site: Some(consumer_id.to_string()),
             repo: consumer_id.repo_id().to_string(),
             path: node.path,
             symbol: node.container.unwrap_or(node.name),

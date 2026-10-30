@@ -199,6 +199,10 @@ pub struct ConfirmedBindingConsumer {
     pub path: String,
     pub symbol: String,
     pub key: String,
+    /// Optional exact consumer GlobalId, as returned by check_binding. Omitted
+    /// selectors retain their existing symbol/key scope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub site: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -531,6 +535,16 @@ impl ContractFederationConfig {
         // survive normalization.
         for b in &self.bindings {
             validate_key("bindings.consumer.key", &b.consumer.key)?;
+            if let Some(site) = &b.consumer.site {
+                let id = crate::federation::repo_id::GlobalId::parse(site)?;
+                if id.repo_id() != b.consumer.repo
+                    || id.path().as_deref() != Some(b.consumer.path.as_str())
+                {
+                    return Err(LainError::Config(
+                        "binding site must belong to its consumer repo/path".into(),
+                    ));
+                }
+            }
             validate_key("bindings.provider.key", &b.provider.key)?;
         }
         // A confirmed binding may only join a consumer to an

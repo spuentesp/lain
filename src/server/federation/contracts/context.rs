@@ -183,6 +183,7 @@ pub fn merge_bindings(
                 || prior.consumer.path != binding.consumer.path
                 || prior.consumer.symbol != binding.consumer.symbol
                 || parse(&prior.consumer.key)? != consumer_key
+                || matches!((&prior.consumer.site, &binding.consumer.site), (Some(a), Some(b)) if a != b)
             {
                 continue;
             }
@@ -195,7 +196,8 @@ pub fn merge_bindings(
                     binding.consumer.key, prior.provider.service, prior.provider.key
                 )));
             }
-            present = true;
+            present |=
+                prior.consumer.site.is_none() || prior.consumer.site == binding.consumer.site;
         }
         if !present {
             sequence.push(
@@ -411,6 +413,7 @@ contract:
         };
         ConfirmedBinding {
             consumer: ConfirmedBindingConsumer {
+                site: None,
                 repo: "client".into(),
                 path: "src/client.rs".into(),
                 symbol: "call".into(),

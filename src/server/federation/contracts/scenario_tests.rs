@@ -258,6 +258,7 @@ fn scenario_15_confirmed_binding_survives_line_insertion() {
     let mut cfg = orders_config();
     cfg.bindings.push(ConfirmedBinding {
         consumer: ConfirmedBindingConsumer {
+            site: None,
             repo: "billing".into(),
             path: "src/orders_api.py".into(),
             symbol: "create_order".into(),

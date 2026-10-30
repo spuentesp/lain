@@ -2561,12 +2561,96 @@
               },
               "type": "array"
             },
+            "semantic": {
+              "anyOf": [
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "candidate": {
+                      "anyOf": [
+                        {
+                          "$ref": "#/$defs/RustRpcCandidate"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "config_hash": {
+                      "type": "string"
+                    },
+                    "definitions": {
+                      "items": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "column": {
+                            "minimum": 0,
+                            "type": "integer"
+                          },
+                          "line": {
+                            "minimum": 0,
+                            "type": "integer"
+                          },
+                          "path": {
+                            "type": "string"
+                          },
+                          "source_hash": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "path",
+                          "line",
+                          "column",
+                          "source_hash"
+                        ],
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    "rpc_key": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "site_name": {
+                      "type": "string"
+                    },
+                    "source_hash": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "enum": [
+                        "resolved_definition",
+                        "unproven_definition"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "source_hash",
+                    "config_hash",
+                    "status",
+                    "definitions",
+                    "candidate",
+                    "site_name",
+                    "rpc_key"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "status": {
               "enum": [
                 "resolved",
                 "unknown_identity",
                 "ambiguous_identity",
-                "missing_evidence"
+                "missing_evidence",
+                "unproven_definition"
               ],
               "type": "string"
             }
@@ -2925,6 +3009,11 @@
                     "minLength": 1,
                     "type": "string"
                   },
+                  "site": {
+                    "description": "Optional exact consumer GlobalId returned by check_binding. Without site, apply requires a unique match for repo/path/symbol/key.",
+                    "minLength": 1,
+                    "type": "string"
+                  },
                   "symbol": {
                     "minLength": 1,
                     "type": "string"
@@ -3073,6 +3162,11 @@
                     "type": "string"
                   },
                   "repo": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "site": {
+                    "description": "Optional exact consumer GlobalId returned by check_binding. Without site, apply requires a unique match for repo/path/symbol/key.",
                     "minLength": 1,
                     "type": "string"
                   },

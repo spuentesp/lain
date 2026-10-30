@@ -94,6 +94,11 @@
               "key": {
                 "type": "string",
                 "minLength": 1
+              },
+              "site": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Optional exact consumer GlobalId returned by check_binding. Without site, apply requires a unique match for repo/path/symbol/key."
               }
             },
             "required": [

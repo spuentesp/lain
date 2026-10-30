@@ -59,11 +59,19 @@ fields.
 
 ## Selector limits and rejected mappings
 
-The legacy consumer selector is `(repo, path, symbol, key)`. It has no line or
-site identifier, so two calls with that same selector cannot receive independent
-mappings. Apply refuses an ambiguous selector that matches several sites; inspect
-the reported matches and resolve the declaration manually if broader scope is
-intentional. It never promises precision that this config format cannot express.
+The consumer selector is `(repo, path, symbol, key)` with an optional `site`
+containing the exact consumer GlobalId. `check_binding` now includes `site` in its
+returned YAML. Keep that field when converting the entry to an apply request.
+Two calls in the same function can then map the same RPC key to different
+services, including Rust calls on the same source line.
+
+Existing entries without `site` keep their original symbol/key scope. Apply still
+refuses an ambiguous legacy selector matching multiple sites; obtain an exact
+entry through `check_binding` instead. The site must belong to the selector's
+repo/path and match the current facts. Source edits that change the indexed site
+identity can make a mapping stale; recheck and replace the declaration explicitly.
+A broad legacy declaration and an overlapping site declaration cannot silently
+assign conflicting destinations.
 
 Apply also refuses missing or stale consumers and endpoints, incompatible keys,
 same-service assignments, and a conflicting destination for an already assigned
