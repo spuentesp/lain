@@ -490,7 +490,11 @@ async fn same_line_clients_have_caller_paths_and_same_service_validation_is_reje
     let fixture = Fixture::new();
     let sdk = fixture.root.join("openshell");
     let local_path = "crates/openshell-sdk/src/calls.rs";
-    write(&sdk, local_path, "use openshell_core::proto::open_shell_client::OpenShellClient as C; fn first() { let a = C::new(ch); let b = C::new(ch); a.get_sandbox(req); b.create_sandbox(req); }\nfn entry() { first(); }");
+    write(
+        &sdk,
+        local_path,
+        "use openshell_core::proto::open_shell_client::OpenShellClient as C;\nfn first() { let a = C::new(ch); let b = C::new(ch); a.get_sandbox(req); b.create_sandbox(req); }\nfn entry() { first(); }\n",
+    );
     write(
         &sdk,
         "crates/openshell-sdk/internal.proto",
@@ -544,7 +548,7 @@ async fn same_line_clients_have_caller_paths_and_same_service_validation_is_reje
         edges.iter().any(|e| e.edge_type == EdgeType::Calls
             && e.source_id == entry.id
             && e.target_id == first.id),
-        "no upstream Calls path: {edges:#?}"
+        "multiline existing call resolution did not reach the RPC enclosing function: {edges:#?}"
     );
     let initial_edges = edges
         .iter()

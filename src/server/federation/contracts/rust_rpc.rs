@@ -153,10 +153,12 @@ pub fn resolve(
     }
     // Calls anchors are materialized by the sensor before projection. This is
     // the actual enclosing symbol, not an impl-name service guess.
-    for edge in backend.all_edges()? {
-        if edge.edge_type == crate::schema::EdgeType::Calls {
-            if let Some(detail) = details.get_mut(&GlobalId::from_canonical(&edge.target_id)) {
-                detail.enclosing_symbol = Some(edge.source_id);
+    for node in &markers {
+        let id = GlobalId::from_canonical(&node.id);
+        let callers = backend.edges_to(&node.id, crate::schema::EdgeType::Calls)?;
+        if let [caller] = callers.as_slice() {
+            if let Some(detail) = details.get_mut(&id) {
+                detail.enclosing_symbol = Some(caller.source_id.clone());
             }
         }
     }
