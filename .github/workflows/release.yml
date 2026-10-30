@@ -244,6 +244,7 @@ jobs:
         env:
           CARGO_INCREMENTAL: '0'
           MACOSX_DEPLOYMENT_TARGET: '14.5'
+          SDKROOT: /Applications/Xcode_15.4.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX14.5.sdk
         run: cargo build --release --target aarch64-apple-darwin
       - name: Verify built version before publishing
         shell: bash
