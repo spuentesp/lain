@@ -12,9 +12,8 @@ use regex::Regex;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-use streaming_iterator::StreamingIterator;
 use tokio_util::sync::CancellationToken;
-use tree_sitter::{Node, Query, QueryCursor};
+use tree_sitter::{Node, Query, QueryCursor, StreamingIterator};
 
 const MAX_PROBES: usize = 256;
 const MAX_FILE_PROBES: usize = 32;

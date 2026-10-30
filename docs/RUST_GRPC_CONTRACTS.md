@@ -74,6 +74,14 @@ and 15 seconds including lock waits and requests. It uses the existing LSP pool;
 it does not create another pool. Sites outside those limits retain syntax
 coverage and do not acquire an LSP claim. Cancellation stops the pass.
 
+Each probed file is opened in the language server once and re-announced only
+when its content changes, so a file with many call sites does not pay a
+document open per probe. The multiplexer tracks what it announced; that record,
+not the bridge's own document map, decides between opening and changing. A
+change notification reaches only a server that was told about the document, so
+a language server that died and was restarted gets the file opened again rather
+than changed.
+
 Semantic evidence is held only in memory and checked against caller, mapping and
 definition contents before reuse. It is cleared/replaced on enrichment and never
 serialized into graphs. Restart/reindex is needed to repopulate it. Snapshots

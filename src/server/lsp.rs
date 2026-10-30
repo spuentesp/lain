@@ -388,6 +388,43 @@ pub struct HierarchicalSymbol {
     pub children: Vec<HierarchicalSymbol>,
 }
 
+/// What the identity path must send to make the language server's view of a
+/// document current.
+///
+/// The distinction is not cosmetic: `didChange` is only meaningful for a
+/// document the server was already told about. Sending it for a document the
+/// server never opened is silently dropped by the server, so the identity
+/// answer never arrives. The server's own document state is *not* a reliable
+/// oracle for this — the local bridge keeps its document map across a server
+/// restart, so it still holds a URI whose new process never received the
+/// matching `didOpen`. The multiplexer's own record is the oracle, and it is
+/// cleared whenever the server dies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IdentitySync {
+    /// The server's view is already current — send nothing.
+    Current,
+    /// The server has never been told about this document: send `didOpen`.
+    Open { version: i32 },
+    /// The server already has the document open: send `didChange`.
+    Change { version: i32 },
+}
+
+/// Decide how to bring the server's view of a document up to date.
+///
+/// `prior` is the multiplexer's record of the last content it announced for
+/// this URI: `(content hash, version)`. `None` means the server has not been
+/// told about the document — either it is the first sight of the URI, or the
+/// server died and the record was cleared.
+fn identity_sync(prior: Option<&(String, i32)>, hash: &str) -> IdentitySync {
+    match prior {
+        None => IdentitySync::Open { version: 1 },
+        Some((old, version)) if old == hash => IdentitySync::Current,
+        Some((_, version)) => IdentitySync::Change {
+            version: version.saturating_add(1),
+        },
+    }
+}
+
 pub struct LspMultiplexer {
     bridge: LspBridge,
     /// How long to keep asking the language server for document symbols
@@ -432,6 +469,7 @@ pub struct LspMultiplexer {
     /// which languages got warm before scanning started.
     prewarm_state: HashMap<String, PrewarmOutcome>,
     workspace: PathBuf,
+    identity_documents: HashMap<String, (String, i32)>,
     /// When `Some`, the multiplexer routes LSP requests through a JSON-RPC
     /// client connected to a real server at this address instead of
     /// spawning a child process via `lsp_bridge`. Set by
@@ -606,6 +644,7 @@ impl LspMultiplexer {
             restart_budget: HashMap::new(),
             prewarm_state: HashMap::new(),
             workspace: workspace.to_path_buf(),
+            identity_documents: HashMap::new(),
             remote: None,
             #[cfg(test)]
             test_overrides: None,
@@ -640,6 +679,7 @@ impl LspMultiplexer {
             restart_budget: HashMap::new(),
             prewarm_state: HashMap::new(),
             workspace: workspace.to_path_buf(),
+            identity_documents: HashMap::new(),
             remote: Some(Arc::new(client)),
             #[cfg(test)]
             test_overrides: None,
@@ -1010,6 +1050,10 @@ impl LspMultiplexer {
                 )
                 .await?;
 
+            self.identity_documents.insert(
+                uri.clone(),
+                (blake3::hash(content.as_bytes()).to_hex().to_string(), 1),
+            );
             let response = remote
                 .request(
                     "textDocument/documentSymbol",
@@ -1030,6 +1074,11 @@ impl LspMultiplexer {
             self.record_lsp_failure(&server_id, kind);
             return Err(LainError::Lsp(e.to_string()));
         }
+
+        self.identity_documents.insert(
+            uri.clone(),
+            (blake3::hash(content.as_bytes()).to_hex().to_string(), 1),
+        );
 
         // Wait for LSP to analyze (intelligent polling). Track the
         // outcome so the circuit-breaker bookkeeping at the end of
@@ -1226,6 +1275,68 @@ impl LspMultiplexer {
         Ok(results)
     }
 
+    async fn sync_identity_document(
+        &mut self,
+        server_id: &str,
+        uri: &str,
+        content: &str,
+        path: &Path,
+    ) -> Result<(), LainError> {
+        let hash = blake3::hash(content.as_bytes()).to_hex().to_string();
+        let prior = self
+            .identity_documents
+            .get(uri)
+            .map(|(h, v)| (h.clone(), *v));
+        let version = match identity_sync(prior.as_ref(), &hash) {
+            IdentitySync::Current => return Ok(()),
+            IdentitySync::Open { version } => {
+                if let Some(remote) = &self.remote {
+                    remote
+                        .notify(
+                            "textDocument/didOpen",
+                            serde_json::json!({
+                                "textDocument": {
+                                    "uri": uri,
+                                    "languageId": language_id_for(path),
+                                    "version": version,
+                                    "text": content
+                                }
+                            }),
+                        )
+                        .await?;
+                } else {
+                    self.bridge
+                        .open_document(server_id, uri, content)
+                        .await
+                        .map_err(|e| LainError::Lsp(e.to_string()))?;
+                }
+                version
+            }
+            IdentitySync::Change { version } => {
+                if let Some(remote) = &self.remote {
+                    remote
+                        .notify(
+                            "textDocument/didChange",
+                            serde_json::json!({
+                                "textDocument": {"uri": uri, "version": version},
+                                "contentChanges": [{"text": content}]
+                            }),
+                        )
+                        .await?;
+                } else {
+                    self.bridge
+                        .update_document(server_id, uri, content)
+                        .await
+                        .map_err(|e| LainError::Lsp(e.to_string()))?;
+                }
+                version
+            }
+        };
+        self.identity_documents
+            .insert(uri.to_string(), (hash, version));
+        Ok(())
+    }
+
     /// Resolve symbol identity using the existing local or remote language
     /// server. Coordinates are zero-based LSP UTF-16 positions. Requests,
     /// including document synchronization, are bounded by the normal budget.
@@ -1250,22 +1361,11 @@ impl LspMultiplexer {
             "textDocument/definition"
         };
         let response = tokio::time::timeout(LSP_REQUEST_TIMEOUT, async {
+            self.sync_identity_document(&server_id, &uri, &content, path)
+                .await?;
             if let Some(remote) = self.remote.as_ref() {
-                remote
-                    .notify(
-                        "textDocument/didOpen",
-                        serde_json::json!({
-                            "textDocument": {"uri": uri, "languageId": language_id_for(path),
-                                "version": 1, "text": content}
-                        }),
-                    )
-                    .await?;
                 return remote.request(method, params).await;
             }
-            self.bridge
-                .open_document(&server_id, &uri, &content)
-                .await
-                .map_err(|e| LainError::Lsp(e.to_string()))?;
             let value = if type_definition {
                 let params =
                     serde_json::from_value(params).map_err(|e| LainError::Lsp(e.to_string()))?;
@@ -1498,11 +1598,13 @@ impl LspMultiplexer {
                 // log from firing twice for the same binary.
                 if self.unavailable.contains(binary) {
                     self.started.remove(binary);
+                    self.identity_documents.clear();
                     return;
                 }
                 // Drop the dead child; the next ensure_server call
                 // will see `!started.contains(binary)` and respawn.
                 self.started.remove(binary);
+                self.identity_documents.clear();
                 self.record_restart_at(binary, now_ms);
             }
             FailureKind::RequestError | FailureKind::Timeout => {
@@ -3158,6 +3260,7 @@ pub mod test_support {
     pub struct ReceivedRequests {
         pub initialize: std::sync::Mutex<Vec<serde_json::Value>>,
         pub did_open: std::sync::Mutex<Vec<serde_json::Value>>,
+        pub did_change: std::sync::Mutex<Vec<serde_json::Value>>,
         pub did_close: std::sync::Mutex<Vec<serde_json::Value>>,
         pub document_symbol: std::sync::Mutex<Vec<serde_json::Value>>,
         pub references: std::sync::Mutex<Vec<serde_json::Value>>,
@@ -3322,6 +3425,9 @@ pub mod test_support {
                 "textDocument/didOpen" => {
                     received.did_open.lock().unwrap().push(value.clone());
                 }
+                "textDocument/didChange" => {
+                    received.did_change.lock().unwrap().push(value.clone());
+                }
                 "textDocument/didClose" => {
                     received.did_close.lock().unwrap().push(value.clone());
                 }
@@ -3428,6 +3534,42 @@ mod definition_wire_tests {
     use super::*;
     use serde_json::json;
 
+    /// The open-vs-change rule, pinned without a live server.
+    ///
+    /// `didChange` is dropped by a server that never received the matching
+    /// `didOpen`, so the identity answer silently disappears. The decision
+    /// must therefore be driven by the multiplexer's own record of what it
+    /// announced, not by whether the bridge happens to still hold the URI.
+    #[test]
+    fn identity_sync_opens_unknown_documents_and_changes_known_ones() {
+        // Never announced: the server must be told the document exists.
+        assert_eq!(
+            identity_sync(None, "hash-a"),
+            IdentitySync::Open { version: 1 }
+        );
+        // Announced with this exact content: nothing to send.
+        assert_eq!(
+            identity_sync(Some(&("hash-a".to_string(), 1)), "hash-a"),
+            IdentitySync::Current
+        );
+        // Announced with different content: a change, with the version
+        // advanced so the server accepts it.
+        assert_eq!(
+            identity_sync(Some(&("hash-a".to_string(), 1)), "hash-b"),
+            IdentitySync::Change { version: 2 }
+        );
+        assert_eq!(
+            identity_sync(Some(&("hash-a".to_string(), 7)), "hash-b"),
+            IdentitySync::Change { version: 8 }
+        );
+        // A cleared record (the server died) reads as "never announced":
+        // the next request must open, not change.
+        assert_eq!(
+            identity_sync(None, "hash-a"),
+            IdentitySync::Open { version: 1 }
+        );
+    }
+
     #[tokio::test]
     async fn definition_and_type_definition_use_the_existing_wire_transport() {
         let dir = tempfile::tempdir().unwrap();
@@ -3464,6 +3606,63 @@ mod definition_wire_tests {
             .await
             .unwrap()
             .is_empty());
+        handle.shutdown().await;
+    }
+
+    /// The identity path re-opens a document only when its content changed,
+    /// and it must open (never "change") a document the server has not been
+    /// told about. Re-opening on every probe made each definition request
+    /// pay a full `didOpen`, and a `didChange` sent to a server that never
+    /// received the matching `didOpen` is silently ignored — the identity
+    /// answer then never arrives.
+    #[tokio::test]
+    async fn identity_document_sync_opens_once_and_changes_only_on_new_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("caller.rs");
+        tokio::fs::write(&path, "fn caller() {}\n").await.unwrap();
+        let server = test_support::FakeLspServer::bind().await.unwrap();
+        let target = dir.path().join("generated.rs");
+        server.set_references(&file_uri(&path), 0, 3, json!({
+            "uri": file_uri(&target),
+            "range": {"start": {"line": 7, "character": 11}, "end": {"line": 7, "character": 17}}
+        })).await;
+        let mut mux = LspMultiplexer::with_server_url(
+            dir.path(),
+            &server.host(),
+            server.port(),
+            &crate::tuning::RuntimeConfig::default(),
+        )
+        .await
+        .unwrap();
+        let handle = server.spawn();
+
+        // First sight of the URI: the server must learn the document exists.
+        mux.get_definitions(&path, 0, 3, false).await.unwrap();
+        assert_eq!(handle.received().did_open.lock().unwrap().len(), 1);
+        assert_eq!(handle.received().did_change.lock().unwrap().len(), 0);
+
+        // Same content: nothing to re-announce.
+        mux.get_definitions(&path, 0, 3, false).await.unwrap();
+        assert_eq!(handle.received().did_open.lock().unwrap().len(), 1);
+        assert_eq!(handle.received().did_change.lock().unwrap().len(), 0);
+
+        // Changed content: a change, not a second open.
+        tokio::fs::write(&path, "fn caller() { let x = 1; }\n")
+            .await
+            .unwrap();
+        mux.get_definitions(&path, 0, 3, false).await.unwrap();
+        assert_eq!(handle.received().did_open.lock().unwrap().len(), 1);
+        assert_eq!(handle.received().did_change.lock().unwrap().len(), 1);
+
+        // After the server dies and is restarted, the multiplexer's record
+        // of what it opened is gone. The next request must re-open the
+        // document — a `didChange` would reach a process that never
+        // received the matching `didOpen` and be ignored there.
+        mux.identity_documents.clear();
+        mux.get_definitions(&path, 0, 3, false).await.unwrap();
+        assert_eq!(handle.received().did_open.lock().unwrap().len(), 2);
+        assert_eq!(handle.received().did_change.lock().unwrap().len(), 1);
+
         handle.shutdown().await;
     }
 }
