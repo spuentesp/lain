@@ -344,9 +344,41 @@ impl<'a> Context<'a> {
         }
     }
     fn typed(&self, ty: Node<'a>, _at: Node<'a>, depth: usize) -> Option<Resolved> {
-        let (resolved, mut evidence) = self.resolve_type(self.text(ty), ty, depth + 1)?;
+        // References may include lifetimes and mutability. Follow the syntax
+        // node instead of stripping text, so &'a mut Alias resolves as Alias.
+        let mut inner = ty;
+        while inner.kind() == "reference_type" {
+            inner = self.field(inner, "type")?;
+        }
+        let (resolved, mut evidence) = self.resolve_type(self.text(inner), inner, depth + 1)?;
         evidence.push(self.evidence(ty, format!("explicit type: {}", self.text(ty))));
         Some((resolved, evidence))
+    }
+    fn pattern_binding_visible(&self, binding: Node<'a>, at: Node<'a>) -> bool {
+        let contains =
+            |n: Node<'a>| n.start_byte() <= at.start_byte() && n.end_byte() >= at.end_byte();
+        match binding.kind() {
+            "for_expression" => self.field(binding, "body").is_some_and(contains),
+            "match_arm" => contains(binding),
+            "let_condition" => {
+                let mut parent = binding.parent();
+                while let Some(n) = parent {
+                    match n.kind() {
+                        "if_expression" => {
+                            return self.field(n, "consequence").is_some_and(contains)
+                                || self.field(n, "condition").is_some_and(contains);
+                        }
+                        "while_expression" => {
+                            return self.field(n, "body").is_some_and(contains)
+                                || self.field(n, "condition").is_some_and(contains);
+                        }
+                        _ => parent = n.parent(),
+                    }
+                }
+                false
+            }
+            _ => false,
+        }
     }
     fn pattern_mentions(&self, pattern: Node<'a>, name: &str) -> bool {
         if matches!(pattern.kind(), "identifier" | "shorthand_field_identifier")
@@ -417,7 +449,7 @@ impl<'a> Context<'a> {
                     if n.start_byte() >= at.start_byte() || !Self::visible(n, at) {
                         continue;
                     }
-                    if matches!(n.kind(), "for_expression" | "match_arm" | "let_condition")
+                    if self.pattern_binding_visible(n, at)
                         && self
                             .field(n, "pattern")
                             .is_some_and(|p| self.pattern_mentions(p, name))
