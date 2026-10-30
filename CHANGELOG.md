@@ -3,7 +3,7 @@
 All notable changes to LAIN are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## [0.14.0] - 2026-10-30
 
 - Allow exact consumer `site` selectors in confirmed mappings, so repeated RPC calls within one symbol can target different services. Existing selectors remain supported.
 - Use the existing LSP pool for bounded live Rust RPC method-definition evidence, including closure receivers; snapshots retain revision-pinned syntax inference and explicit coverage gaps. Advance the contract analyzer cache revision to 8; graph persistence is unchanged.
