@@ -90,10 +90,14 @@ pub fn resolve_with_semantics(
                 .into_iter()
                 .filter(|e| e.current(&source, &fingerprint))
                 .collect();
-            for evidence in &semantics {
-                candidates.retain(|c| rust_candidate_name(c) != evidence.site_name);
-                if let Some(candidate) = &evidence.candidate {
-                    candidates.push(candidate.clone());
+            // During snapshot rebuilds, semantic evidence is not available.
+            // Use only syntax-based evidence from detect_rust_grpc_candidates.
+            if !semantics.is_empty() {
+                for evidence in &semantics {
+                    candidates.retain(|c| rust_candidate_name(c) != evidence.site_name);
+                    if let Some(candidate) = &evidence.candidate {
+                        candidates.push(candidate.clone());
+                    }
                 }
             }
             Ok::<_, LainError>((config, candidates, semantics))
@@ -187,10 +191,14 @@ pub fn resolve_with_semantics(
                             .into(),
                     );
                 } else {
-                    detail.error = Some(
-                        "indexed site no longer has generated-client evidence; reindex required"
-                            .into(),
-                    );
+                    // During snapshot rebuilds, semantic evidence is not available.
+                    // This is expected, not an error condition.
+                    if candidates.is_empty() {
+                        detail.error = Some(
+                            "indexed site no longer has generated-client evidence; reindex required"
+                                .into(),
+                        );
+                    }
                 }
             }
         }
