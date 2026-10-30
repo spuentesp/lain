@@ -1339,6 +1339,19 @@ impl FederatedIndex {
         self.contract_snapshot.read().clone()
     }
 
+    /// Run a read against the published contract snapshot while holding the
+    /// projection lock. The backend nodes belong to the same projected
+    /// generation for the duration of the closure, so callers cannot combine
+    /// an old contract index with nodes being replaced by a reindex.
+    pub fn with_contract_snapshot<T>(
+        &self,
+        read: impl FnOnce(&ContractSnapshot, &dyn GraphBackend) -> T,
+    ) -> Option<T> {
+        let _guard = self.projection_lock.lock();
+        let snapshot = self.contract_snapshot.read().clone()?;
+        Some(read(&snapshot, self.backend.as_ref()))
+    }
+
     /// Recompute the desired `Binds` set and `ContractIndex` when
     /// any of `project_nodes`, `project_edges`, the loader's Phase
     /// 2, the refresh-loop tick, hot-reload apply, `add_repo`, or

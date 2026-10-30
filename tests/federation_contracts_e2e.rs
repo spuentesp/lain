@@ -2913,10 +2913,10 @@ mod pr14_check_binding_graphql {
             "check_binding must accept the graphql link: {data:?}"
         );
         let yaml = data["bindings_entry"].as_str().unwrap();
-        assert!(
-            yaml.contains("key: \"graphql:query:product\""),
-            "both keys must round-trip as graphql:query:product: {yaml}"
-        );
+        let bindings: Vec<lain::federation::contracts::config::ConfirmedBinding> =
+            serde_yaml::from_str(yaml).expect("typed binding YAML");
+        assert_eq!(bindings[0].consumer.key, "graphql:query:product");
+        assert_eq!(bindings[0].provider.key, "graphql:query:product");
         assert!(
             yaml.contains("symbol: graphql-call:query:product"),
             "symbol must be the consumer node name: {yaml}"
@@ -3932,10 +3932,10 @@ mod pr15_check_binding_keys {
             "check_binding must accept the topic link: {data:?}"
         );
         let entry = data["bindings_entry"].as_str().expect("bindings_entry");
-        assert!(
-            entry.contains("key: \"topic:kafka/orders\""),
-            "the entry must carry the topic wire-form key: {entry}"
-        );
+        let bindings: Vec<lain::federation::contracts::config::ConfirmedBinding> =
+            serde_yaml::from_str(entry).expect("typed binding YAML");
+        assert_eq!(bindings[0].consumer.key, "topic:kafka/orders");
+        assert_eq!(bindings[0].provider.key, "topic:kafka/orders");
         assert!(
             entry.contains("symbol: on_orders"),
             "symbol must be the consumer node name: {entry}"
@@ -4492,11 +4492,10 @@ mod pr15_check_binding_keys {
                 .as_str()
                 .expect("bindings_entry")
                 .to_string();
-            assert!(
-                entry.contains(&format!("key: \"{}\"", case.entry_key)),
-                "[{}] emitted entry must carry the wire form: {entry}",
-                case.label
-            );
+            let bindings: Vec<lain::federation::contracts::config::ConfirmedBinding> =
+                serde_yaml::from_str(&entry).expect("typed binding YAML");
+            assert_eq!(bindings[0].consumer.key, case.entry_key);
+            assert_eq!(bindings[0].provider.key, case.entry_key);
 
             // (2) Round-trip, config half — the emitted entry (wire
             // form) parses and survives validate_key.

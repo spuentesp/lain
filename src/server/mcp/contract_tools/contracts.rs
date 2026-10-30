@@ -607,7 +607,6 @@ async fn run_check_binding(
     if resolution.is_none() {
         reasons.push("not_a_consumer");
     }
-    let consumer_repo = consumer_id.repo_id().to_string();
     if let Some(res) = &resolution {
         if res.service.0 == service_str {
             reasons.push("same_service");
@@ -740,10 +739,27 @@ async fn run_check_binding(
             }
         }
     };
+    // Emit the selector the confirmed joiner actually uses: the node's
+    // enclosing symbol and its own fact key, which can differ from the
+    // provider key for an HTTP template bridge. A fully dynamic consumer
+    // with no fact key cannot be represented by the existing bindings
+    // format and must not be advertised as a persistable confirmation.
+    let entry = render_bindings_entry(resolved.backend().as_ref(), &consumer_id, &endpoint_id)
+        .map_err(|e| {
+            error_outcome(
+                "internal",
+                format!("serialize bindings_entry: {e}"),
+                None,
+                &snap_label,
+                started,
+            )
+        })?;
+    if entry.is_none() && reasons.is_empty() {
+        reasons.push("not_a_consumer");
+    }
     let valid = reasons.is_empty() && endpoint_def.is_some();
 
     let data = if valid {
-        let entry = render_bindings_entry(&consumer_repo, &consumer_id, &key, &endpoint_id);
         json!({
             "valid": true,
             "reasons": [],
@@ -1284,18 +1300,44 @@ fn parse_consumer_call_shape(
 }
 
 fn render_bindings_entry(
-    consumer_repo: &str,
+    backend: &dyn GraphBackend,
     consumer_id: &GlobalId,
-    key: &ContractKey,
     endpoint_id: &EndpointId,
-) -> String {
-    let symbol = consumer_id.name().unwrap_or_default();
-    let path = consumer_id.path().unwrap_or_default();
-    format!(
-        "- consumer:\n    repo: {consumer_repo}\n    path: {path}\n    symbol: {symbol}\n    key: \"{key}\"\n  provider:\n    service: {svc}\n    key: \"{pkey}\"\n",
-        svc = endpoint_id.0 .0,
-        pkey = endpoint_id.1,
-    )
+) -> Result<Option<String>, serde_yaml::Error> {
+    use crate::federation::contracts::config::{
+        ConfirmedBinding, ConfirmedBindingConsumer, ConfirmedBindingProvider,
+    };
+
+    let Ok(Some(node)) = backend.get_node(consumer_id.as_str()) else {
+        return Ok(None);
+    };
+    let keys: Vec<_> = node
+        .contract
+        .iter()
+        .flat_map(|fact| fact.consumer_keys())
+        .collect();
+    let Some(key) = keys
+        .iter()
+        .find(|key| *key == &endpoint_id.1)
+        .or_else(|| keys.iter().find(|key| keys_compatible(key, &endpoint_id.1)))
+    else {
+        return Ok(None);
+    };
+    let binding = ConfirmedBinding {
+        consumer: ConfirmedBindingConsumer {
+            repo: consumer_id.repo_id().to_string(),
+            path: node.path,
+            symbol: node.container.unwrap_or(node.name),
+            key: key.to_string(),
+        },
+        provider: ConfirmedBindingProvider {
+            service: endpoint_id.0 .0.clone(),
+            key: endpoint_id.1.to_string(),
+        },
+    };
+    // Serialize the existing config type so YAML-significant source
+    // paths and symbols round-trip without changing the selector.
+    serde_yaml::to_string(&vec![binding]).map(Some)
 }
 
 // ─── renderers ────────────────────────────────────────────────────────
@@ -1444,19 +1486,88 @@ mod tests {
     }
 
     #[test]
-    fn render_bindings_entry_yamls_consumer_provider_pair() {
-        let consumer =
-            GlobalId::from_canonical("billing:HttpClientCall:src/main.py:fetch_order:20");
-        let key = ContractKey::Http {
-            method: MethodSpec::Known(HttpMethod::Get),
-            template: "/api/orders/{}".into(),
+    fn render_bindings_entry_uses_actual_consumer_key_and_container() {
+        use crate::federation::contracts::config::ConfirmedBinding;
+        use crate::federation::contracts::model::{
+            CallVia, ConsumerFact, ContractFact, HostPart, NormalizedUrl,
         };
-        let ep_id: EndpointId = (ServiceName("orders".into()), key.clone());
-        let entry = render_bindings_entry("billing", &consumer, &key, &ep_id);
-        assert!(entry.contains("repo: billing"));
-        assert!(entry.contains("symbol: fetch_order"));
-        assert!(entry.contains("service: orders"));
-        assert!(entry.contains("key:"));
+        use crate::federation::graph_backend::PetgraphBackend;
+        use crate::schema::{GraphNode, NodeType};
+
+        let dir = tempfile::tempdir().unwrap();
+        let backend = PetgraphBackend::new(dir.path()).unwrap();
+        let consumer = GlobalId::new(
+            &RepoId::new("billing").unwrap(),
+            NodeType::HttpClientCall,
+            "src/main: billing.py",
+            "GET /v1/api/orders/{}",
+            Some(20),
+        );
+        let mut node = GraphNode::new(
+            NodeType::HttpClientCall,
+            "GET /v1/api/orders/{}".into(),
+            "src/main: billing.py".into(),
+        );
+        node.id = consumer.as_str().into();
+        node.container = Some("fetch: order #1".into());
+        node.contract.push(ContractFact::Consumer(ConsumerFact {
+            method: MethodSpec::Known(HttpMethod::Get),
+            url: NormalizedUrl {
+                host: HostPart::None,
+                template: Some("/v1/api/orders/{}".into()),
+            },
+            via: CallVia::Library {
+                name: "requests".into(),
+            },
+            url_expr: "upstream".into(),
+            reads_complete: true,
+        }));
+        backend.upsert_node(node).unwrap();
+        let ep_id: EndpointId = (
+            ServiceName("orders".into()),
+            ContractKey::from_str("http:GET /api/orders/{}").unwrap(),
+        );
+        let entry = render_bindings_entry(&backend, &consumer, &ep_id)
+            .unwrap()
+            .unwrap();
+        let bindings: Vec<ConfirmedBinding> = serde_yaml::from_str(&entry).unwrap();
+        assert_eq!(bindings[0].consumer.repo, "billing");
+        assert_eq!(bindings[0].consumer.path, "src/main: billing.py");
+        assert_eq!(bindings[0].consumer.symbol, "fetch: order #1");
+        assert_eq!(bindings[0].consumer.key, "http:GET /v1/api/orders/{}");
+        assert_eq!(bindings[0].provider.key, "http:GET /api/orders/{}");
+    }
+
+    #[test]
+    fn render_bindings_entry_refuses_missing_or_unkeyed_consumer() {
+        use crate::federation::graph_backend::PetgraphBackend;
+        use crate::schema::{GraphNode, NodeType};
+        let dir = tempfile::tempdir().unwrap();
+        let backend = PetgraphBackend::new(dir.path()).unwrap();
+        let consumer = GlobalId::new(
+            &RepoId::new("billing").unwrap(),
+            NodeType::Function,
+            "src/main.py",
+            "fetch_order",
+            Some(20),
+        );
+        let endpoint = (
+            ServiceName("orders".into()),
+            ContractKey::from_str("rpc:orders/GetOrder").unwrap(),
+        );
+        assert!(render_bindings_entry(&backend, &consumer, &endpoint)
+            .unwrap()
+            .is_none());
+        let mut node = GraphNode::new(
+            NodeType::Function,
+            "fetch_order".into(),
+            "src/main.py".into(),
+        );
+        node.id = consumer.as_str().into();
+        backend.upsert_node(node).unwrap();
+        assert!(render_bindings_entry(&backend, &consumer, &endpoint)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
