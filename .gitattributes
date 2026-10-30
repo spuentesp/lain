@@ -1,0 +1,2 @@
+# Ensure consistent LF line endings across platforms for git checkouts
+* text=auto eol=lf

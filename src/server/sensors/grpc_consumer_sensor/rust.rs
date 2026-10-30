@@ -174,13 +174,6 @@ pub fn detect_rust_grpc_candidates(
     config: &RustGrpcConfig,
 ) -> Result<Vec<RustGrpcCandidate>, LainError> {
     config.validate()?;
-    let normalized;
-    let src = if src.contains('\r') {
-        normalized = src.replace("\r\n", "\n").replace('\r', "\n");
-        &normalized
-    } else {
-        src
-    };
     let Some(tree) = parse_for_lang(Lang::Rust, src) else {
         return Ok(Vec::new());
     };
