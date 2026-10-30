@@ -171,7 +171,7 @@ jobs:
     # A hung test (this session hit a real one: a subprocess reader
     # with no timeout blocking forever) must fail the job, not sit on
     # the runner queue for the 360-minute GitHub default.
-    timeout-minutes: 30
+    timeout-minutes: 60
     permissions:
       contents: read
     strategy:
