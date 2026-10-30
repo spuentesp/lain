@@ -1321,7 +1321,8 @@ impl SnapshotManager {
                     self.data_dir.join("mirrors").join(format!("{repo}.git")),
                 )?;
                 let tree = git.find_commit(git2::Oid::from_str(commit)?)?.tree()?;
-                let entry = match tree.get_path(std::path::Path::new(path)) {
+                let normalized_path = path.replace('\\', "/");
+                let entry = match tree.get_path(std::path::Path::new(&normalized_path)) {
                     Ok(e) => e,
                     Err(e) if e.code() == git2::ErrorCode::NotFound => return Ok(None),
                     Err(e) => return Err(e.into()),

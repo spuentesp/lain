@@ -42,13 +42,28 @@ pub struct SemanticRpcEvidence {
 impl SemanticRpcEvidence {
     /// Never reuse a response after its caller, mapping, or definition changed.
     pub fn current(&self, source: &str, config_hash: &str) -> bool {
+        let normalized;
+        let source = if source.contains('\r') {
+            normalized = source.replace("\r\n", "\n").replace('\r', "\n");
+            &normalized
+        } else {
+            source
+        };
         self.source_hash == hash(source)
             && self.config_hash == config_hash
             && !self.definitions.is_empty()
-            && self
-                .definitions
-                .iter()
-                .all(|d| read_source(&d.path).is_some_and(|s| hash(&s) == d.source_hash))
+            && self.definitions.iter().all(|d| {
+                read_source(&d.path).is_some_and(|s| {
+                    let s_norm;
+                    let s = if s.contains('\r') {
+                        s_norm = s.replace("\r\n", "\n").replace('\r', "\n");
+                        &s_norm
+                    } else {
+                        &s
+                    };
+                    hash(s) == d.source_hash
+                })
+            })
     }
 }
 fn hash(source: &str) -> String {
@@ -239,10 +254,17 @@ pub async fn enrich(
         if remaining == 0 || start.elapsed() >= PASS_BUDGET || cancel.is_cancelled() {
             break;
         }
+        let normalized;
+        let source = if source.contains('\r') {
+            normalized = source.replace("\r\n", "\n").replace('\r', "\n");
+            &normalized
+        } else {
+            &source
+        };
         let relative = crate::graph::graph_path(root, &path);
         let mux = pool.next();
         let mut evidence = Vec::new();
-        for probe in probes(&source, &relative, &config) {
+        for probe in probes(source, &relative, &config) {
             if remaining == 0 || start.elapsed() >= PASS_BUDGET || cancel.is_cancelled() {
                 break;
             }
@@ -274,12 +296,19 @@ pub async fn enrich(
                     missing = true;
                     break;
                 };
-                let ty = generated_definition(&definition, location, &probe.method, &config);
+                let def_norm;
+                let definition = if definition.contains('\r') {
+                    def_norm = definition.replace("\r\n", "\n").replace('\r', "\n");
+                    &def_norm
+                } else {
+                    &definition
+                };
+                let ty = generated_definition(definition, location, &probe.method, &config);
                 definitions.push(DefinitionEvidence {
                     path: location.path.clone(),
                     line: location.line,
                     column: location.col,
-                    source_hash: hash(&definition),
+                    source_hash: hash(definition),
                 });
                 if let Some(ty) = ty {
                     candidates.push(ty);

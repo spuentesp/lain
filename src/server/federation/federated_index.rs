@@ -1464,12 +1464,12 @@ impl FederatedIndex {
                     let full = root.join(path);
                     // Graph paths and configuration are workspace-relative; do not
                     // follow a symlink out of the owning source checkout.
-                    let full = match full.canonicalize() {
+                    let full = match dunce::canonicalize(&full) {
                         Ok(p) => p,
                         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
                         Err(e) => return Err(e.into()),
                     };
-                    if !full.starts_with(root.canonicalize()?) {
+                    if !full.starts_with(dunce::canonicalize(root)?) {
                         return Err(LainError::Other(
                             "Rust RPC source escaped repository".into(),
                         ));
