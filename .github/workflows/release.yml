@@ -213,96 +213,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  build-macos-arm64:
-    needs: version-check
-    if: github.event_name == 'push'
-    runs-on: macos-14
-    permissions:
-      contents: write
-      id-token: write
-      attestations: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Extract version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
-        id: version
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
-        with:
-          python-version: '3.12'
-      - name: Compute SOURCE_DATE_EPOCH
-        env:
-          UPDATED_AT: ${{ github.event.repository.updated_at }}
-        run: |
-          EPOCH=$(python3 -c "from datetime import datetime; import os; print(int(datetime.fromisoformat(os.environ['UPDATED_AT'].replace('Z','+00:00')).timestamp()))")
-          echo "SOURCE_DATE_EPOCH=$EPOCH" >> "$GITHUB_ENV"
-          echo "epoch-debug=$EPOCH"
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
-        with:
-          toolchain: stable
-          targets: aarch64-apple-darwin
-      - name: Build
-        env:
-          CARGO_INCREMENTAL: '0'
-          MACOSX_DEPLOYMENT_TARGET: '14.5'
-          SDKROOT: /Applications/Xcode_15.4.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX14.5.sdk
-        run: cargo build --release --target aarch64-apple-darwin
-      - name: Verify built version before publishing
-        shell: bash
-        run: python scripts/check-release-version.py --tag "$GITHUB_REF_NAME" --binary target/aarch64-apple-darwin/release/lain
-      - name: Package tarball
-        run: |
-          mkdir -p release
-          cp target/aarch64-apple-darwin/release/lain release/lain
-          cp target/aarch64-apple-darwin/release/lain-git-sidecar release/lain-git-sidecar
-          tar czf release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz -C release lain lain-git-sidecar
-          rm release/lain release/lain-git-sidecar
-      - name: Compute per-binary SHA256
-        run: python scripts/compute-sha256.py release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz
-      - name: Generate SBOM (CycloneDX JSON)
-        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
-        with:
-          format: cyclonedx-json
-          file: release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz
-          output-file: release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz.cdx.json
-          upload-release-assets: false
-      - name: Attest build provenance
-        id: provenance
-        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
-        with:
-          subject-path: release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz
-      - name: Export signed provenance for release downloads
-        shell: bash
-        env:
-          BUNDLE_PATH: ${{ steps.provenance.outputs.bundle-path }}
-          ARTIFACT_PATH: release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          python scripts/export-release-provenance.py "$BUNDLE_PATH" "$ARTIFACT_PATH"
-          gh attestation verify "$ARTIFACT_PATH" --repo "$GITHUB_REPOSITORY" \
-            --bundle "$ARTIFACT_PATH.sigstore.json" \
-            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
-            --source-ref "$GITHUB_REF"
-      - name: Install cosign
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
-      - name: Sign release artifact (cosign keyless)
-        run: |
-          cosign sign-blob --yes \
-            --bundle release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz.cosign.bundle.json \
-            release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz
-      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
-        with:
-          files: |
-            release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz
-            release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz.sha256
-            release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz.cdx.json
-            release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz.sigstore.json
-            release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz.intoto.jsonl
-            release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz.cosign.bundle.json
-          fail_on_unmatched_files: true
-          draft: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
   build-windows:
     needs: version-check
     if: github.event_name == 'push'
@@ -394,13 +304,13 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # Aggregate the three per-binary tarballs into a single SHA256SUMS
+  # Aggregate the per-binary tarballs into a single SHA256SUMS
   # file and attach it to the release. Downloading via
   # `gh release download` (rather than cross-job artifacts) means the
   # SHA256SUMS file is computed against the exact bytes consumers will
   # receive — there is no separate attacker-controlled surface.
   sha256sums:
-    needs: [build-linux, build-macos-arm64, build-windows]
+    needs: [build-linux, build-windows]
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
@@ -424,7 +334,6 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           python ../scripts/compute-sha256.py \
             "lain-${version}-x86_64-unknown-linux-gnu.tar.gz" \
-            "lain-${version}-aarch64-apple-darwin.tar.gz" \
             "lain-${version}-x86_64-pc-windows-msvc.tar.gz" > SHA256SUMS
           # Compute writes sidecars, but we only want the aggregate
           # file. The output above contains all tarball hashes.
