@@ -194,6 +194,11 @@ jobs:
         with:
           toolchain: stable
 
+      - name: Configure Git
+        run: |
+          git config --global user.name "CI Runner"
+          git config --global user.email "ci@example.com"
+
       # Swatinem/rust-cache keys on Cargo.lock + os + toolchain, so each
       # matrix cell gets its own target/ cache. The cross-run speedup
       # within one OS is what the original ubuntu-only job relied on.
