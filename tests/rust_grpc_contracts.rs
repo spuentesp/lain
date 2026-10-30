@@ -23,8 +23,9 @@ use lain::{
         ingest::ingestion::{index_one_repo, IndexMode, IndexRequest},
         mcp::{
             contract_tools::{
-                analysis::get_coverage_handle,
-                contracts::{check_binding_handle, list_unresolved_handle},
+                analysis::{get_coverage_handle, trace_impact_handle},
+                context::apply_contract_context_handle,
+                contracts::{check_binding_handle, get_contract_handle, list_unresolved_handle},
                 evidence::read_source_handle,
             },
             handler::{HandlerStatus, McpContext},
@@ -255,6 +256,9 @@ async fn call(
         "check_binding" => check_binding_handle(&ctx, args).await,
         "get_coverage" => get_coverage_handle(&ctx, args).await,
         "read_source" => read_source_handle(&ctx, args).await,
+        "apply_contract_context" => apply_contract_context_handle(&ctx, args).await,
+        "get_contract" => get_contract_handle(&ctx, args).await,
+        "trace_impact" => trace_impact_handle(&ctx, args).await,
         _ => unreachable!(),
     }
     .unwrap();
@@ -435,7 +439,7 @@ async fn snapshot_rebuilds_from_pinned_blobs_and_missing_evidence_is_incomplete(
         None,
         Some(&mgr),
         "read_source",
-        json!({"snapshot":snapshot,"repo":"nemo","path":RUST_PATH,"start":line-1,"end":line}),
+        json!({"snapshot":snapshot,"repo":"nemo","path":RUST_PATH,"start":line-2,"end":line}),
     )
     .await;
     assert!(source["data"]["text"]
@@ -486,7 +490,7 @@ async fn same_line_clients_have_caller_paths_and_same_service_validation_is_reje
     let fixture = Fixture::new();
     let sdk = fixture.root.join("openshell");
     let local_path = "crates/openshell-sdk/src/calls.rs";
-    write(&sdk, local_path, "use openshell_core::proto::open_shell_client::OpenShellClient as C; fn first() { let a = C::new(ch); let b = C::new(ch); a.get_sandbox(req); b.create_sandbox(req); } fn entry() { first(); }");
+    write(&sdk, local_path, "use openshell_core::proto::open_shell_client::OpenShellClient as C; fn first() { let a = C::new(ch); let b = C::new(ch); a.get_sandbox(req); b.create_sandbox(req); }\nfn entry() { first(); }");
     write(
         &sdk,
         "crates/openshell-sdk/internal.proto",
@@ -613,4 +617,203 @@ fn proto_word_boundaries_preserve_acronyms_and_digit_runs() {
     ] {
         assert_eq!(snake(input), expected, "{input}");
     }
+}
+
+#[tokio::test]
+async fn inferred_rpc_confirmation_persists_and_rebuilds_without_lsp() {
+    let mut fixture = Fixture::new();
+    let fed = fixture.live().await;
+    let path = fixture.root.join("repos.yaml");
+    let document = json!({
+        "data_dir": fixture.root.join("reloaded-data"),
+        "repos": [
+            {"id": "openshell", "source": {"type": "workspace_dir", "path": fixture.root.join("openshell")}},
+            {"id": "nemo", "source": {"type": "workspace_dir", "path": fixture.root.join("nemo")}}
+        ],
+        "contract": fixture.config,
+        "operator_note": "preserve-this"
+    });
+    std::fs::write(&path, serde_yaml::to_string(&document).unwrap()).unwrap();
+    fed.set_config_path(path.clone());
+    let initial = std::fs::read(&path).unwrap();
+    let initial_hash = fixture.config.config_hash();
+    let manager = fixture.manager();
+    let old_snapshot = fixture.snapshot(&manager).await;
+    let unresolved = call(
+        Some(&fed),
+        None,
+        "list_unresolved",
+        json!({"snapshot": "live"}),
+    )
+    .await;
+    let item = rust_items(&unresolved)
+        .into_iter()
+        .find(|i| i["rpc"]["contract_key"] == KEY_CREATE)
+        .unwrap();
+    assert_eq!(item["reason"], "rpc_stub_unknown");
+    let consumer = item["consumer"]["id"].as_str().unwrap().to_string();
+    let enclosing = fed
+        .contract_index()
+        .unwrap()
+        .rust_rpcs
+        .iter()
+        .find(|(id, _)| id.as_str() == consumer)
+        .unwrap()
+        .1
+        .enclosing_symbol
+        .clone()
+        .unwrap();
+    let checked = call(
+        Some(&fed),
+        None,
+        "check_binding",
+        json!({
+            "snapshot": "live", "consumer": consumer,
+            "endpoint": {"service": "gateway", "key": KEY_CREATE}
+        }),
+    )
+    .await;
+    assert_eq!(checked["data"]["valid"], true, "{checked}");
+    let bindings: Vec<lain::federation::contracts::config::ConfirmedBinding> =
+        serde_yaml::from_str(checked["data"]["bindings_entry"].as_str().unwrap()).unwrap();
+    let preview = call(
+        Some(&fed),
+        None,
+        "apply_contract_context",
+        json!({
+            "snapshot": "live", "bindings": bindings, "dry_run": true
+        }),
+    )
+    .await;
+    assert_eq!(preview["data"]["applied"], false);
+    assert_eq!(std::fs::read(&path).unwrap(), initial);
+    let applied = call(
+        Some(&fed),
+        None,
+        "apply_contract_context",
+        json!({
+            "snapshot": "live", "bindings": bindings, "dry_run": false
+        }),
+    )
+    .await;
+    assert_eq!(applied["data"]["applied"], true, "{applied}");
+    let written = std::fs::read(&path).unwrap();
+    let duplicate = call(
+        Some(&fed),
+        None,
+        "apply_contract_context",
+        json!({
+            "snapshot": "live", "bindings": bindings, "dry_run": false
+        }),
+    )
+    .await;
+    assert_eq!(duplicate["data"]["applied"], true);
+    assert!(duplicate["data"]["added_bindings"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert_eq!(std::fs::read(&path).unwrap(), written);
+    assert!(String::from_utf8(written)
+        .unwrap()
+        .contains("preserve-this"));
+    assert_rpc_confirmation(&fed, None, "live", &consumer, &enclosing).await;
+
+    // A fresh loader reads the persisted declaration. Rebuild the source graph
+    // without LSP rather than relying on the first federation's derived facts.
+    let reloaded = lain::federation::loader::load_federation(&path)
+        .await
+        .unwrap();
+    for name in ["openshell", "nemo"] {
+        fixture.index(&reloaded, name, IndexMode::Snapshot).await;
+    }
+    reloaded.rejoin_contracts_if_dirty().unwrap();
+    assert_rpc_confirmation(&reloaded, None, "live", &consumer, &enclosing).await;
+    let persisted = ContractFederationConfig::load(&path).unwrap();
+    assert_eq!(persisted.bindings.len(), 1);
+    assert_eq!(
+        reloaded.contract_config().unwrap().config_hash(),
+        persisted.config_hash()
+    );
+
+    // New snapshots capture the confirmed config; old snapshots stay immutable.
+    assert_ne!(initial_hash, persisted.config_hash());
+    let old_record = manager.get(&old_snapshot, 5000).await.unwrap().record;
+    assert_eq!(old_record.config_hash, initial_hash);
+    let old_contract = call(
+        Some(&reloaded),
+        Some(&manager),
+        "get_contract",
+        json!({
+            "snapshot": old_snapshot, "service": "gateway", "key": KEY_CREATE
+        }),
+    )
+    .await;
+    assert!(
+        old_contract["data"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|i| i["consumers"].as_array().unwrap())
+            .all(|c| c["site"]["id"] != consumer),
+        "old snapshot acquired a live binding: {old_contract}"
+    );
+    fixture.config = persisted;
+    let snapshot = fixture.snapshot(&manager).await;
+    assert_rpc_confirmation(&reloaded, Some(&manager), &snapshot, &consumer, &enclosing).await;
+}
+
+async fn assert_rpc_confirmation(
+    fed: &FederatedIndex,
+    manager: Option<&Arc<SnapshotManager>>,
+    snapshot: &str,
+    consumer: &str,
+    enclosing: &str,
+) {
+    let contract = call(
+        Some(fed),
+        manager,
+        "get_contract",
+        json!({
+            "snapshot": snapshot, "service": "gateway", "key": KEY_CREATE
+        }),
+    )
+    .await;
+    let bound = contract["data"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|i| i["consumers"].as_array().unwrap())
+        .find(|c| c["site"]["id"] == consumer)
+        .unwrap();
+    assert_eq!(bound["binding"]["kind"], "confirmed", "{contract}");
+    assert!(bound["binding"]["source"]
+        .as_str()
+        .unwrap()
+        .contains("repos.yaml#bindings"));
+    let impact = call(
+        Some(fed),
+        manager,
+        "trace_impact",
+        json!({
+            "snapshot": snapshot,
+            "from": {"endpoint": {"service": "gateway", "key": KEY_CREATE}}, "depth": 4
+        }),
+    )
+    .await;
+    let hops: Vec<_> = impact["data"]["paths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|p| p["hops"].as_array().unwrap())
+        .collect();
+    assert!(
+        hops.iter()
+            .any(|h| h["node"] == consumer && h["edge"] == "Binds"),
+        "{impact}"
+    );
+    assert!(
+        hops.iter()
+            .any(|h| h["node"] == enclosing && h["edge"] == "Calls"),
+        "{impact}"
+    );
 }
