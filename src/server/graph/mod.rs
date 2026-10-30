@@ -290,6 +290,13 @@ fn derive_owner(
         // RequestSchema/ResponseSchema edges on every run.
         (_, Some(ContractFact::RpcProvider(_))) => Some(SensorOwner::GrpcProviderSensor),
         (_, Some(ContractFact::RpcHandler(_))) => Some(SensorOwner::GrpcHandlerLinkSensor),
+        (NodeType::Function, _)
+            if node
+                .name
+                .starts_with(crate::server::sensors::grpc_consumer_sensor::RUST_RPC_PREFIX) =>
+        {
+            Some(SensorOwner::GrpcConsumerSensor)
+        }
         (_, Some(ContractFact::RpcConsumer(_))) => Some(SensorOwner::GrpcConsumerSensor),
         // Phase E (spec §8.3): same split for the GraphQL family.
         (_, Some(ContractFact::GraphqlProvider(_))) => Some(SensorOwner::GraphqlProviderSensor),

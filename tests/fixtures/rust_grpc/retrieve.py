@@ -10,6 +10,10 @@ from urllib.request import urlopen
 ROOT = Path(__file__).resolve().parent
 SOURCES = [
     (
+        "openshell.proto", "OpenShell", "6648bd0c290efbc41ba131ee9831ee45cd431f94",
+        "proto/openshell.proto", [(1, 6), (23, 23), (47, 54), (73, 80)], "}\n",
+    ),
+    (
         "nemo-cargo-lock.txt", "NeMo-Fabric", "4fdf65a4b4c96024327501ae28243f2d206e7ec7",
         "Cargo.lock", [(1600, 1603)], "",
     ),
@@ -56,7 +60,8 @@ def main():
             fixture += "".join(lines[start - 1:end])
             mappings.append({"fixture_start": fixture_start, "source_start": start, "source_end": end})
         if suffix:
-            fixture += "\n// Fixture scaffolding: close the excerpted impl.\n" + suffix
+            kind = "service" if filename.endswith(".proto") else "impl"
+            fixture += f"\n// Fixture scaffolding: close the excerpted {kind}.\n" + suffix
         output = fixture.encode("utf-8")
         outputs[filename] = output
         provenance["files"].append({

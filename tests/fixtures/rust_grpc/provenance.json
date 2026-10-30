@@ -2,6 +2,37 @@
   "format": 1,
   "files": [
     {
+      "fixture": "openshell.proto",
+      "repository": "https://github.com/NVIDIA/OpenShell",
+      "revision": "6648bd0c290efbc41ba131ee9831ee45cd431f94",
+      "source_path": "proto/openshell.proto",
+      "retrieval_url": "https://raw.githubusercontent.com/NVIDIA/OpenShell/6648bd0c290efbc41ba131ee9831ee45cd431f94/proto/openshell.proto",
+      "source_sha256": "2e31d0faca652b91729f88bd4053447e5d162e74de7dbacdcc06327ed82e5b95",
+      "fixture_sha256": "e918b6c3621b99e3abd71fc4de76a70515ed7b94cfc18bc318b13fcf0e3e0884",
+      "ranges": [
+        {
+          "fixture_start": 4,
+          "source_start": 1,
+          "source_end": 6
+        },
+        {
+          "fixture_start": 12,
+          "source_start": 23,
+          "source_end": 23
+        },
+        {
+          "fixture_start": 15,
+          "source_start": 47,
+          "source_end": 54
+        },
+        {
+          "fixture_start": 25,
+          "source_start": 73,
+          "source_end": 80
+        }
+      ]
+    },
+    {
       "fixture": "nemo-cargo-lock.txt",
       "repository": "https://github.com/NVIDIA/NeMo-Fabric",
       "revision": "4fdf65a4b4c96024327501ae28243f2d206e7ec7",

@@ -7,3 +7,7 @@ deny_methods: [clone, ready, send_compressed, accept_compressed, max_decoding_me
 # Cross-file accessors are opt-in, keyed by the receiver's qualified type.
 # Each entry needs receiver_type, method, return_type, provenance.
 accessors: []
+
+# Catalog comparison uses both generated module and type, plus an RPC name.
+client_module_template: "{service_snake}_client"
+client_type_template: "{service_camel}Client"

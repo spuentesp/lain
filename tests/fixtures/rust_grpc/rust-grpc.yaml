@@ -9,3 +9,7 @@ accessors:
     method: raw_grpc
     return_type: openshell_core::proto::open_shell_client::OpenShellClient
     provenance: 'NVIDIA/OpenShell@6648bd0c290efbc41ba131ee9831ee45cd431f94 crates/openshell-sdk/src/client.rs:99-104 returns AuthedGrpcClient; src/raw.rs:22 reexports generated OpenShellClient as GrpcClient; src/raw.rs:39-44 aliases AuthedGrpcClient to GrpcClient<InterceptedService<Channel, EdgeAuthInterceptor>>'
+
+# Catalog comparison uses both generated module and type, plus an RPC name.
+client_module_template: "{service_snake}_client"
+client_type_template: "{service_camel}Client"

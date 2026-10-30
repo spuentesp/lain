@@ -1479,3 +1479,42 @@ mod walk_cache_root_tests {
         });
     }
 }
+
+/// Protobuf Rust codegen word boundaries (acronym runs stay together).
+/// Protobuf identifiers are ASCII. Unlike the historical sensor helper,
+/// `GetURL` becomes `get_url`, not `get_u_r_l`.
+pub fn rust_proto_snake_case(name: &str) -> String {
+    let mut words = Vec::new();
+    for word in name
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty())
+    {
+        let bytes = word.as_bytes();
+        let mut start = 0;
+        let mut mode = 0; // most recent cased character: 1 lower, 2 upper
+        for i in 0..bytes.len().saturating_sub(1) {
+            let c = bytes[i];
+            let next = bytes[i + 1];
+            let next_mode = if c.is_ascii_lowercase() {
+                1
+            } else if c.is_ascii_uppercase() {
+                2
+            } else {
+                mode
+            };
+            if next_mode == 1 && next.is_ascii_uppercase() {
+                words.push(word[start..i + 1].to_ascii_lowercase());
+                start = i + 1;
+                mode = 0;
+            } else if mode == 2 && c.is_ascii_uppercase() && next.is_ascii_lowercase() {
+                words.push(word[start..i].to_ascii_lowercase());
+                start = i;
+                mode = 0;
+            } else {
+                mode = next_mode;
+            }
+        }
+        words.push(word[start..].to_ascii_lowercase());
+    }
+    words.join("_")
+}

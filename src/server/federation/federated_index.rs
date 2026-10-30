@@ -1438,6 +1438,41 @@ impl FederatedIndex {
             self.contract_node_ids.remove(&r);
         }
 
+        let (rust_nodes, rust_details) = crate::federation::contracts::rust_rpc::resolve(
+            self.backend.as_ref(),
+            |repo, path| {
+                let id = RepoId::new(repo).map_err(|e| LainError::InvalidRepoId(e.to_string()))?;
+                let Some(repo) = self.get_repo(&id) else {
+                    return Ok(None);
+                };
+                let root = repo.local_path();
+                let full = root.join(path);
+                // Graph paths and configuration are workspace-relative; do not
+                // follow a symlink out of the owning source checkout.
+                let full = match full.canonicalize() {
+                    Ok(p) => p,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                    Err(e) => return Err(e.into()),
+                };
+                if !full.starts_with(root.canonicalize()?) {
+                    return Err(LainError::Other(
+                        "Rust RPC source escaped repository".into(),
+                    ));
+                }
+                if std::fs::metadata(&full)?.len()
+                    > crate::federation::contracts::coverage::SIZE_CAP_BYTES
+                {
+                    return Err(LainError::Other("Rust RPC source exceeds size cap".into()));
+                }
+                Ok(Some(std::fs::read_to_string(full)?))
+            },
+        )?;
+        contract_nodes.retain(|n| {
+            !n.name
+                .starts_with(crate::server::sensors::grpc_consumer_sensor::RUST_RPC_PREFIX)
+        });
+        contract_nodes.extend(rust_nodes.into_iter().filter(|n| !n.contract.is_empty()));
+
         // Collect the contract-bearing edges the joiner needs:
         // `HasField`, `RequestSchema`, `ResponseSchema`, and
         // `ReadsFrom` (the §7.5 input). Reading every edge and
@@ -1468,7 +1503,7 @@ impl FederatedIndex {
             })
             .collect();
 
-        let out = {
+        let mut out = {
             // S3 fix: build the per-repo Phase B + Phase C
             // inputs (ClientRegistry + EnvBindingIndex) and
             // route the joiner through
@@ -1488,6 +1523,8 @@ impl FederatedIndex {
                 &env_bindings,
             )
         };
+
+        crate::federation::contracts::rust_rpc::attach(&mut out.index, rust_details);
 
         // Diff against current backend `Binds`. Build the desired
         // set keyed by `(consumer_id, provider_id)`; build the
