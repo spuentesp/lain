@@ -14,6 +14,135 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{oneshot, Mutex as AsyncMutex};
 use tracing::{debug, info, warn};
 
+/// Environment escape hatch to disable all LSP servers operator-wide.
+///
+/// Unset, empty and `0` leave LSP on — the same rule the other
+/// `LAIN_DISABLE_*` knobs follow (see
+/// [`crate::server::ingest::background::env_disables`]).
+pub const DISABLE_LSP_ENV: &str = "LAIN_DISABLE_LSP";
+
+/// Environment escape hatch: `LAIN_LSP_LEAN=1` starts rust-analyzer in
+/// the memory-saving profile. See [`LspProfile::Lean`] for what that
+/// costs in symbol fidelity.
+pub const LEAN_LSP_ENV: &str = "LAIN_LSP_LEAN";
+
+/// Which rust-analyzer configuration the multiplexer starts servers with.
+///
+/// The default is [`LspProfile::Fidelity`]: rust-analyzer expands proc
+/// macros, runs build scripts and resolves the workspace the way the
+/// user builds it, so every symbol Lain extracts is the symbol the
+/// user sees. [`LspProfile::Lean`] trades that fidelity for memory and
+/// is opt-in through [`LEAN_LSP_ENV`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LspProfile {
+    Fidelity,
+    Lean,
+}
+
+impl LspProfile {
+    /// Read the profile from the environment.
+    pub fn from_env() -> Self {
+        Self::from_raw(std::env::var(LEAN_LSP_ENV).ok().as_deref())
+    }
+
+    /// Parse the profile from the raw environment value.
+    ///
+    /// Case-insensitive, matching the `LAIN_LSP_PREWARM` parsing in
+    /// [`crate::cli::doctor`]: `1`, `true`, `yes` and `on` select the
+    /// lean profile; everything else — unset, empty, `0`, `false` —
+    /// keeps the default fidelity profile.
+    fn from_raw(raw: Option<&str>) -> Self {
+        match raw.map(|v| v.trim().to_ascii_lowercase()).as_deref() {
+            Some("1") | Some("true") | Some("yes") | Some("on") => Self::Lean,
+            _ => Self::Fidelity,
+        }
+    }
+}
+
+/// `initializationOptions` for a language server, if it takes any.
+///
+/// Only rust-analyzer is configured today. The options fall into two
+/// groups:
+///
+/// *Fidelity-neutral* — set in every profile. rust-analyzer's own
+/// diagnostics and the `cargo check` it runs on save cost a rustc
+/// process per workspace, and the multiplexer only ever reads
+/// `textDocument/documentSymbol` and `textDocument/references` — it
+/// never consumes `textDocument/publishDiagnostics`. Turning them off
+/// saves those processes without changing a single symbol.
+///
+/// *Fidelity-affecting* — set only in [`LspProfile::Lean`]. Each of
+/// these makes rust-analyzer resolve *less* than the user's build
+/// does: `procMacro.enable` off hides every derive-generated impl,
+/// `cargo.buildScripts.enable` off leaves `env!("OUT_DIR")` and
+/// `include!` unresolved, `cargo.noDefaultFeatures` drops the
+/// workspace member's own `default` feature (which is not the feature
+/// set the user compiles), and `files.exclude` skips `target` and
+/// `.git` while indexing.
+fn initialization_options_for(binary: &str, profile: LspProfile) -> Option<serde_json::Value> {
+    if binary != "rust-analyzer" {
+        return None;
+    }
+    let mut opts = serde_json::Map::new();
+    opts.insert("checkOnSave".to_string(), serde_json::Value::Bool(false));
+    opts.insert(
+        "diagnostics".to_string(),
+        serde_json::json!({ "enable": false }),
+    );
+    if profile == LspProfile::Lean {
+        opts.insert(
+            "procMacro".to_string(),
+            serde_json::json!({ "enable": false }),
+        );
+        opts.insert(
+            "cargo".to_string(),
+            serde_json::json!({
+                "buildScripts": { "enable": false },
+                "noDefaultFeatures": true,
+            }),
+        );
+        opts.insert(
+            "files".to_string(),
+            serde_json::json!({ "exclude": ["target", ".git"] }),
+        );
+    }
+    Some(serde_json::Value::Object(opts))
+}
+
+/// The language servers the operator (or a test) has switched off.
+///
+/// `LAIN_DISABLE_LSP` is the operator-facing switch and follows the
+/// `LAIN_DISABLE_*` rule: unset, empty and `0` leave LSP on, anything
+/// else turns it off. `LAIN_TEST_NO_LSP` is the older test-only switch
+/// and keeps its original presence-based rule — any non-empty value,
+/// `0` included, turns LSP off — so existing callers are unaffected.
+///
+/// Returning the set instead of reading the environment here is what
+/// keeps the tests off process-global state: the harness runs tests in
+/// parallel, and a test that set an environment variable would leak
+/// into its siblings.
+fn disabled_lsp_binaries(
+    raw_disable: Option<&str>,
+    raw_test_no_lsp: Option<&str>,
+    registry: &HashMap<String, &'static LspConfig>,
+) -> HashSet<String> {
+    let disabled = crate::server::ingest::background::env_disables(raw_disable)
+        || raw_test_no_lsp.is_some_and(|v| !v.is_empty());
+    if !disabled {
+        return HashSet::new();
+    }
+    registry.values().map(|c| c.binary.to_string()).collect()
+}
+
+/// The extension → language server registry.
+fn language_registry() -> HashMap<String, &'static LspConfig> {
+    let mut registry = HashMap::new();
+    for (ext, config) in LANGUAGE_MAP {
+        registry.insert(ext.to_string(), config);
+    }
+    registry
+}
+
 /// Sentinel server id used when the multiplexer is wired to an external
 /// JSON-RPC endpoint (via [`LspMultiplexer::with_server_url`]). The
 /// `ensure_server` fast-path returns this id and the request methods
@@ -403,6 +532,9 @@ pub struct LspMultiplexer {
     poll_interval: Duration,
     /// ext -> language server configuration
     registry: HashMap<String, &'static LspConfig>,
+    /// Which configuration to start language servers with. Decided once,
+    /// at construction, from `LAIN_LSP_LEAN`.
+    profile: LspProfile,
     /// binary name -> started
     started: HashSet<String>,
     /// binary name -> missing from system
@@ -574,39 +706,53 @@ impl LspMultiplexer {
         workspace: &Path,
         runtime: &crate::tuning::RuntimeConfig,
     ) -> Result<Self, LainError> {
-        let mut registry = HashMap::new();
-        for (ext, config) in LANGUAGE_MAP {
-            registry.insert(ext.to_string(), config);
-        }
-        // `LAIN_TEST_NO_LSP=1` is a test-only escape hatch that pre-populates
-        // `unavailable` with every registered binary. `ensure_server` short
-        // -circuits to `LainError::Lsp(... is missing)` instead of trying to
-        // spawn rust-analyzer / gopls / etc. Smoke tests that drive the
-        // scanner in-process (or via `Command::new(env!("CARGO_BIN_EXE_lain"))`)
-        // set this so the test outcome doesn't depend on whether the host
-        // happens to have rust-analyzer on PATH. Production never sets it.
-        let mut unavailable = HashSet::new();
-        if std::env::var("LAIN_TEST_NO_LSP")
-            .ok()
-            .filter(|v| !v.is_empty())
-            .is_some()
-        {
-            for config in registry.values() {
-                unavailable.insert(config.binary.to_string());
-            }
-        }
+        let registry = language_registry();
+        // `LAIN_DISABLE_LSP=1` (or `LAIN_TEST_NO_LSP=1`) is an escape hatch that
+        // pre-populates `unavailable` with every registered binary.
+        // `ensure_server` short-circuits to `LainError::Lsp(... is missing)`
+        // instead of trying to spawn rust-analyzer / gopls / etc.
+        let unavailable = disabled_lsp_binaries(
+            std::env::var(DISABLE_LSP_ENV).ok().as_deref(),
+            std::env::var("LAIN_TEST_NO_LSP").ok().as_deref(),
+            &registry,
+        );
+        Self::with_parts(
+            workspace,
+            runtime,
+            registry,
+            unavailable,
+            LspProfile::from_env(),
+        )
+    }
+
+    /// Build a multiplexer from explicit parts.
+    ///
+    /// [`LspMultiplexer::new`] is the environment-reading front door;
+    /// this one takes the disabled set and the profile by value so
+    /// tests can drive the multiplexer without mutating
+    /// process-global environment state — the test harness runs tests
+    /// in parallel, and a test that set an environment variable would
+    /// leak into its siblings.
+    fn with_parts(
+        workspace: &Path,
+        runtime: &crate::tuning::RuntimeConfig,
+        registry: HashMap<String, &'static LspConfig>,
+        unavailable: HashSet<String>,
+        profile: LspProfile,
+    ) -> Result<Self, LainError> {
         Ok(Self {
             bridge: LspBridge::new(),
             poll_timeout: Duration::from_secs(runtime.lsp_symbol_poll_timeout_secs),
             poll_interval: Duration::from_millis(runtime.lsp_symbol_poll_interval_ms),
             registry,
             started: HashSet::new(),
-            unavailable: HashSet::new(),
+            unavailable,
             consecutive_failures: HashMap::new(),
             restart_budget: HashMap::new(),
             prewarm_state: HashMap::new(),
             workspace: workspace.to_path_buf(),
             remote: None,
+            profile,
             #[cfg(test)]
             test_overrides: None,
         })
@@ -625,10 +771,7 @@ impl LspMultiplexer {
         runtime: &crate::tuning::RuntimeConfig,
     ) -> Result<Self, LainError> {
         let client = JsonRpcClient::connect(host, port).await?;
-        let mut registry = HashMap::new();
-        for (ext, config) in LANGUAGE_MAP {
-            registry.insert(ext.to_string(), config);
-        }
+        let registry = language_registry();
         Ok(Self {
             bridge: LspBridge::new(),
             poll_timeout: Duration::from_secs(runtime.lsp_symbol_poll_timeout_secs),
@@ -641,6 +784,10 @@ impl LspMultiplexer {
             prewarm_state: HashMap::new(),
             workspace: workspace.to_path_buf(),
             remote: Some(Arc::new(client)),
+            // A bridged server was initialized by whoever started it —
+            // its `initializationOptions` are already fixed, so the
+            // profile only ever applies to servers we spawn.
+            profile: LspProfile::Fidelity,
             #[cfg(test)]
             test_overrides: None,
         })
@@ -654,6 +801,10 @@ impl LspMultiplexer {
 
     pub async fn ensure_server(&mut self, path: &Path) -> Result<String, LainError> {
         if self.remote.is_some() {
+            // A bridged server is already running and already
+            // initialized, so neither the disable hatch nor the lean
+            // profile reaches it: `LAIN_DISABLE_LSP=1` silences the
+            // servers *we* spawn, not one someone else started.
             return Ok(REMOTE_SERVER_ID.to_string());
         }
         let config = self
@@ -678,9 +829,13 @@ impl LspMultiplexer {
                 )));
             }
 
-            let lsp_config = LspServerConfig::new()
+            let mut lsp_config = LspServerConfig::new()
                 .command(&binary)
                 .root_path(self.workspace.clone());
+
+            if let Some(init_opts) = initialization_options_for(&binary, self.profile) {
+                lsp_config = lsp_config.initialization_options(init_opts);
+            }
 
             let startup = async {
                 self.bridge.register_server(&binary, lsp_config).await?;
@@ -3271,6 +3426,131 @@ pub mod test_support {
             Ok(v) => Ok(v),
             Err(e) => Err(std::io::Error::other(e.to_string())),
         }
+    }
+}
+
+#[cfg(test)]
+mod disable_env_tests {
+    use super::*;
+
+    /// `LAIN_DISABLE_LSP=1` is the operator-facing switch: every
+    /// registered binary lands in the disabled set, so `ensure_server`
+    /// short-circuits without spawning anything.
+    #[test]
+    fn disable_env_one_disables_every_registered_binary() {
+        let disabled = disabled_lsp_binaries(Some("1"), None, &language_registry());
+        assert!(disabled.contains("rust-analyzer"));
+        assert!(disabled.contains("gopls"));
+        assert!(disabled.contains("pylsp"));
+    }
+
+    /// `LAIN_DISABLE_LSP=0` must not disable anything — the knob
+    /// follows the `LAIN_DISABLE_*` rule where `0` means "do not
+    /// disable".
+    #[test]
+    fn disable_env_zero_keeps_every_language_server_available() {
+        let disabled = disabled_lsp_binaries(Some("0"), None, &language_registry());
+        assert!(disabled.is_empty());
+    }
+
+    /// The legacy test-only switch keeps its presence-based rule: any
+    /// non-empty value, `0` included, turns LSP off.
+    #[test]
+    fn the_legacy_test_switch_keeps_its_presence_based_rule() {
+        let registry = language_registry();
+        assert!(!disabled_lsp_binaries(None, Some("1"), &registry).is_empty());
+        assert!(!disabled_lsp_binaries(None, Some("0"), &registry).is_empty());
+        assert!(disabled_lsp_binaries(None, Some(""), &registry).is_empty());
+        assert!(disabled_lsp_binaries(None, None, &registry).is_empty());
+    }
+
+    /// A disabled multiplexer must report every language server as
+    /// unavailable — that is the whole point of the hatch, and the
+    /// tree-sitter fallback is what answers instead.
+    #[test]
+    fn a_disabled_multiplexer_reports_no_language_server_as_available() {
+        let registry = language_registry();
+        let unavailable = disabled_lsp_binaries(Some("1"), None, &registry);
+        let mux = LspMultiplexer::with_parts(
+            Path::new("."),
+            &crate::tuning::RuntimeConfig::default(),
+            registry,
+            unavailable,
+            LspProfile::Fidelity,
+        )
+        .unwrap();
+        assert!(mux.unavailable.contains("rust-analyzer"));
+        assert!(
+            mux.get_supported_languages()
+                .iter()
+                .all(|(_, _, available)| !available),
+            "a disabled multiplexer must report every language server as unavailable"
+        );
+    }
+}
+
+#[cfg(test)]
+mod initialization_options_tests {
+    use super::*;
+
+    /// The default profile must not touch anything that changes which
+    /// symbols rust-analyzer resolves. The only two options it sets are
+    /// the ones Lain never reads: rust-analyzer's own diagnostics and
+    /// the `cargo check` it runs on save.
+    #[test]
+    fn the_fidelity_profile_only_disables_options_lain_never_reads() {
+        let opts = initialization_options_for("rust-analyzer", LspProfile::Fidelity)
+            .expect("rust-analyzer takes initialization options");
+        assert_eq!(opts["checkOnSave"], false);
+        assert_eq!(opts["diagnostics"]["enable"], false);
+        assert!(
+            opts.get("procMacro").is_none(),
+            "the fidelity profile must not disable proc-macro expansion"
+        );
+        assert!(
+            opts.get("cargo").is_none(),
+            "the fidelity profile must not change how cargo resolves the workspace"
+        );
+        assert!(opts.get("files").is_none());
+    }
+
+    /// The lean profile turns the fidelity-affecting options on. They
+    /// are opt-in because each one makes rust-analyzer resolve less
+    /// than the user's build does.
+    #[test]
+    fn the_lean_profile_disables_proc_macros_build_scripts_and_default_features() {
+        let opts = initialization_options_for("rust-analyzer", LspProfile::Lean)
+            .expect("rust-analyzer takes initialization options");
+        assert_eq!(opts["procMacro"]["enable"], false);
+        assert_eq!(opts["cargo"]["buildScripts"]["enable"], false);
+        assert_eq!(opts["cargo"]["noDefaultFeatures"], true);
+        let exclude = opts["files"]["exclude"].as_array().expect("array");
+        assert!(exclude.iter().any(|v| v == "target"));
+        assert!(exclude.iter().any(|v| v == ".git"));
+        // The fidelity-neutral options stay off in the lean profile too.
+        assert_eq!(opts["checkOnSave"], false);
+        assert_eq!(opts["diagnostics"]["enable"], false);
+    }
+
+    /// Only rust-analyzer is configured; the other servers keep their
+    /// own defaults.
+    #[test]
+    fn other_language_servers_take_no_initialization_options() {
+        assert!(initialization_options_for("gopls", LspProfile::Fidelity).is_none());
+        assert!(initialization_options_for("pylsp", LspProfile::Lean).is_none());
+    }
+
+    /// `LAIN_LSP_LEAN` is case-insensitive and only the documented
+    /// truthy values select the lean profile.
+    #[test]
+    fn the_lean_env_parses_case_insensitively() {
+        for v in ["1", "true", "TRUE", "yes", "On"] {
+            assert_eq!(LspProfile::from_raw(Some(v)), LspProfile::Lean, "{v:?}");
+        }
+        for v in ["0", "false", "", "off", "maybe"] {
+            assert_eq!(LspProfile::from_raw(Some(v)), LspProfile::Fidelity, "{v:?}");
+        }
+        assert_eq!(LspProfile::from_raw(None), LspProfile::Fidelity);
     }
 }
 
