@@ -116,7 +116,11 @@ fn pinned_nvidia_candidates_require_explicit_cross_file_evidence() {
             .evidence
             .iter()
             .any(|e| e.description.contains("openshell_sdk::OpenShellClient")));
-        assert_eq!(&src[call.site.start_byte..call.site.end_byte], call.method);
+        let normalized_src = src.replace("\r\n", "\n").replace('\r', "\n");
+        assert_eq!(
+            &normalized_src[call.site.start_byte..call.site.end_byte],
+            call.method
+        );
     }
     let borrowed = src.replace(
         "client: OpenShellClient",
