@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "list_unresolved data",
-  "description": "`data` field of the `list_unresolved` envelope (§10.2).",
+  "description": "`data` field of the `list_unresolved` envelope (\u00a710.2).",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -10,13 +10,52 @@
       "items": {
         "type": "object",
         "properties": {
-          "consumer": { "$ref": "#/$defs/EvidenceRef" },
-          "url_expr": { "type": "string" },
-          "method": { "type": "string" },
-          "template": { "type": "string" },
-          "host": { "type": "string" },
-          "reason": { "type": "string", "enum": ["no_route_in_service", "no_match"] },
-          "target_service": { "type": "string" },
+          "consumer": {
+            "$ref": "#/$defs/EvidenceRef"
+          },
+          "url_expr": {
+            "type": "string"
+          },
+          "method": {
+            "type": "string"
+          },
+          "template": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "no_route_in_service",
+              "no_match",
+              "wrapper_unconfigured",
+              "env_unmapped",
+              "env_ambiguous",
+              "rpc_stub_unknown",
+              "graphql_no_op",
+              "dynamic_url",
+              "base_unknown",
+              "dynamic_topic",
+              "external_ref",
+              "dynamic_sql",
+              "orm_dynamic_query",
+              "external_schema_ref"
+            ]
+          },
+          "target_service": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "candidates": {
             "type": "array",
             "items": {
@@ -25,18 +64,43 @@
                 "endpoint": {
                   "type": "object",
                   "properties": {
-                    "service": { "type": "string" },
-                    "key": { "type": "string" }
+                    "service": {
+                      "type": "string"
+                    },
+                    "key": {
+                      "type": "string"
+                    }
                   },
-                  "required": ["service", "key"]
+                  "required": [
+                    "service",
+                    "key"
+                  ]
                 },
-                "reason": { "type": "string", "enum": ["same_key", "pattern", "prefix_stripped"] }
+                "reason": {
+                  "type": "string",
+                  "enum": [
+                    "same_key",
+                    "pattern",
+                    "prefix_stripped"
+                  ]
+                }
               },
-              "required": ["endpoint", "reason"]
+              "required": [
+                "endpoint",
+                "reason"
+              ]
             }
+          },
+          "rpc": {
+            "$ref": "#/$defs/RustRpcDetail"
           }
         },
-        "required": ["consumer", "url_expr", "method", "reason"]
+        "required": [
+          "consumer",
+          "url_expr",
+          "method",
+          "reason"
+        ]
       }
     },
     "ambiguous": {
@@ -44,49 +108,268 @@
       "items": {
         "type": "object",
         "properties": {
-          "consumer": { "$ref": "#/$defs/EvidenceRef" },
+          "consumer": {
+            "$ref": "#/$defs/EvidenceRef"
+          },
           "candidates": {
             "type": "array",
             "items": {
               "type": "object",
               "properties": {
-                "service": { "type": "string" },
-                "key": { "type": "string" }
+                "service": {
+                  "type": "string"
+                },
+                "key": {
+                  "type": "string"
+                }
               },
-              "required": ["service", "key"]
+              "required": [
+                "service",
+                "key"
+              ]
             }
           }
         },
-        "required": ["consumer", "candidates"]
+        "required": [
+          "consumer",
+          "candidates"
+        ]
       }
     },
-    "cursor": { "type": "string" },
-    "scope": { "$ref": "#/$defs/Scope" }
+    "cursor": {
+      "type": "string"
+    },
+    "scope": {
+      "$ref": "#/$defs/Scope"
+    }
   },
-  "required": ["items", "ambiguous", "scope"],
+  "required": [
+    "items",
+    "ambiguous",
+    "scope"
+  ],
   "$defs": {
     "EvidenceRef": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "id":     { "type": "string" },
-        "repo":   { "type": "string" },
-        "commit": { "type": "string" },
-        "path":   { "type": "string" },
-        "line":   { "type": "integer" },
-        "text":   { "type": "string" }
+        "id": {
+          "type": "string"
+        },
+        "repo": {
+          "type": "string"
+        },
+        "commit": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "line": {
+          "type": "integer"
+        },
+        "text": {
+          "type": "string"
+        }
       },
-      "required": ["id", "repo", "commit", "path", "line", "text"]
+      "required": [
+        "id",
+        "repo",
+        "commit",
+        "path",
+        "line",
+        "text"
+      ]
     },
     "Scope": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "reviewed": { "type": "array", "items": { "type": "object" } },
-        "unreviewed": { "type": "array", "items": { "type": "object" } },
-        "configured_only": { "type": "boolean" }
+        "reviewed": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "unreviewed": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "configured_only": {
+          "type": "boolean"
+        }
       },
-      "required": ["reviewed", "unreviewed", "configured_only"]
+      "required": [
+        "reviewed",
+        "unreviewed",
+        "configured_only"
+      ]
+    },
+    "RustRpcDetail": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "resolved",
+            "unknown_identity",
+            "ambiguous_identity",
+            "missing_evidence"
+          ]
+        },
+        "candidate": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RustRpcCandidate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "contract_key": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "compatible_keys": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "enclosing_symbol": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "identity_rule": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "status",
+        "candidate",
+        "contract_key",
+        "compatible_keys",
+        "enclosing_symbol",
+        "error",
+        "provider_ids",
+        "identity_rule"
+      ]
+    },
+    "RustRpcSite": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "start_byte": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "end_byte": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "line": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "column": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "path",
+        "start_byte",
+        "end_byte",
+        "line",
+        "column"
+      ]
+    },
+    "RustRpcEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "site": {
+          "$ref": "#/$defs/RustRpcSite"
+        }
+      },
+      "required": [
+        "description",
+        "site"
+      ]
+    },
+    "RustRpcCandidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "method": {
+          "type": "string"
+        },
+        "receiver": {
+          "type": "string"
+        },
+        "generated_type": {
+          "type": "string"
+        },
+        "site": {
+          "$ref": "#/$defs/RustRpcSite"
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RustRpcEvidence"
+          }
+        },
+        "enclosing_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "enclosing_start_line": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "method",
+        "receiver",
+        "generated_type",
+        "site",
+        "evidence",
+        "enclosing_name",
+        "enclosing_start_line"
+      ]
     }
   }
 }

@@ -47,6 +47,7 @@ use crate::federation::contracts::model::{
 use crate::graph::{graph_path, GraphDatabase, SensorOwner};
 use crate::schema::{GraphEdge, GraphNode, RepoNamespace};
 use crate::server::sensors::util::compose_service_name;
+use crate::server::sensors::SensorEntry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
@@ -86,13 +87,55 @@ pub struct GrpcStubCall {
 
 pub struct GrpcConsumerSensor;
 
-crate::server::sensors::register_sensor!(
-    GrpcConsumerSensor,
-    "grpc_consumer",
-    Proto,
-    1,
-    scan_workspace_grpc_consumer
-);
+impl crate::server::sensors::Sensor for GrpcConsumerSensor {
+    fn name(&self) -> &'static str {
+        "grpc_consumer"
+    }
+    fn count_field(&self) -> crate::server::sensors::SensorCountField {
+        crate::server::sensors::SensorCountField::Proto
+    }
+    fn phase(&self) -> u8 {
+        1
+    }
+    fn scan(
+        &self,
+        graph: &GraphDatabase,
+        root: &Path,
+        namespace: &RepoNamespace,
+    ) -> Result<usize, LainError> {
+        scan_workspace_grpc_consumer(graph, root, namespace)
+    }
+    fn scan_with_report(
+        &self,
+        graph: &GraphDatabase,
+        root: &Path,
+        namespace: &RepoNamespace,
+    ) -> Result<crate::server::sensors::ScanReport, LainError> {
+        let emitted = self.scan(graph, root, namespace)?;
+        let rust_files: Vec<String> = crate::server::sensors::util::scan_files(root, |p| {
+            (p.extension()?.to_str()? == "rs").then(|| "rs".to_string())
+        })
+        .map(|(path, _, _)| graph_path(root, &path))
+        .collect();
+        // PR2 proves individual identities, not absence of RPCs behind arbitrary
+        // Rust wrappers. A missing mapping must never turn into clean coverage.
+        let unresolved = if rust_files.is_empty() {
+            vec![]
+        } else {
+            vec![crate::federation::contracts::coverage::UnresolvedRecord {
+                reason: crate::federation::contracts::model::UnresolvedReason::RpcStubUnknown,
+                count: rust_files.len(),
+                sample_ids: rust_files.iter().take(5).cloned().collect(),
+            }]
+        };
+        Ok(crate::server::sensors::ScanReport {
+            emitted,
+            unresolved,
+            error: None,
+        })
+    }
+}
+inventory::submit!(SensorEntry(&GrpcConsumerSensor));
 
 /// Walk `root`, find every recognised stub call, resolve the
 /// channel address from the enclosing function, and emit one
@@ -114,6 +157,39 @@ pub fn scan_workspace_grpc_consumer(
     };
     let mut total = 0usize;
     let mut all_nodes: Vec<GraphNode> = Vec::new();
+    let mut all_edges = Vec::new();
+    // Syntax-only anchors survive snapshot caching; identity evidence is
+    // rebuilt from revision-pinned source at federation resolution time.
+    for candidate in discover_rust_grpc_candidates(root)? {
+        let mut node = crate::server::sensors::util::synthetic_site_node(
+            rust_candidate_name(&candidate),
+            &candidate.site.path,
+            candidate.site.line as u32,
+            namespace,
+        );
+        let callers: Vec<_> = graph
+            .get_nodes_in_path(&node.path)
+            .into_iter()
+            .filter(|n| {
+                matches!(
+                    n.node_type,
+                    crate::schema::NodeType::Function | crate::schema::NodeType::Method
+                ) && n.line_end.is_some()
+                    && candidate.enclosing_name.as_deref() == Some(n.name.as_str())
+                    && candidate.enclosing_start_line.map(|l| l as u32 - 1) == n.line_start
+            })
+            .collect();
+        if let [caller] = callers.as_slice() {
+            node.container = Some(caller.name.clone());
+            all_edges.push(GraphEdge::new(
+                crate::schema::EdgeType::Calls,
+                caller.id.clone(),
+                node.id.clone(),
+            ));
+        }
+        all_nodes.push(node);
+        total += 1;
+    }
     for (path, content, ext) in crate::server::sensors::util::scan_files(root, code_ext) {
         let graph_path_str = graph_path(root, &path);
         let calls = detect_stub_calls(&content, &ext, &graph_path_str);
@@ -147,12 +223,17 @@ pub fn scan_workspace_grpc_consumer(
     // the only call that retracts, so deleting the last call site from
     // a repo left the old nodes forever. `sql_sensor` has always done
     // this unconditionally.
-    graph.replace_sensor_output(
-        SensorOwner::GrpcConsumerSensor,
-        &all_nodes,
-        &[] as &[GraphEdge],
-    )?;
+    graph.replace_sensor_output(SensorOwner::GrpcConsumerSensor, &all_nodes, &all_edges)?;
     Ok(total)
+}
+
+/// Syntax anchors retain the byte offset so same-line receivers cannot collide.
+pub const RUST_RPC_PREFIX: &str = "rpc-call:rust:";
+pub fn rust_candidate_name(candidate: &RustGrpcCandidate) -> String {
+    format!(
+        "{RUST_RPC_PREFIX}{}:{}",
+        candidate.site.start_byte, candidate.method
+    )
 }
 
 // ─── Detection ─────────────────────────────────────────────────────────

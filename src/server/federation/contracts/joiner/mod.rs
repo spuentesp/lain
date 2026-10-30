@@ -618,6 +618,7 @@ impl ContractJoiner {
             stale_bindings,
             external,
             unnormalized,
+            rust_rpcs: BTreeMap::new(),
         };
         JoinOutput {
             binds,

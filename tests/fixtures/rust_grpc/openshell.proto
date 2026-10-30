@@ -1,0 +1,35 @@
+// Exact upstream excerpts. See provenance.json; not a compilable crate.
+
+// Upstream proto/openshell.proto:1-6
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+
+package openshell.v1;
+
+// Upstream proto/openshell.proto:23-23
+service OpenShell {
+
+// Upstream proto/openshell.proto:47-54
+  // Create a new sandbox.
+  rpc CreateSandbox(CreateSandboxRequest) returns (SandboxResponse) {
+    option (openshell.options.v1.authorization) = {
+      auth_mode: "bearer"
+      scope: "sandbox:write"
+      workspace_role: "user"
+    };
+  }
+
+// Upstream proto/openshell.proto:73-80
+  // Fetch a sandbox by name.
+  rpc GetSandbox(GetSandboxRequest) returns (SandboxResponse) {
+    option (openshell.options.v1.authorization) = {
+      auth_mode: "bearer"
+      scope: "sandbox:read"
+      workspace_role: "user"
+    };
+  }
+
+// Fixture scaffolding: close the excerpted service.
+}

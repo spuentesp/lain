@@ -1312,7 +1312,33 @@ impl SnapshotManager {
         // `ContractIndex` from its own projected graph using its
         // `join_config`, never the live federation's.
         let config = parse_join_config(&record.join_config)?;
-        let contract_index = build_snapshot_contract_index(backend.as_ref(), &config)?;
+        let (rust_nodes, rust_details) =
+            crate::federation::contracts::rust_rpc::resolve(backend.as_ref(), |repo, path| {
+                let Some(commit) = record.repos.get(repo) else {
+                    return Ok(None);
+                };
+                let git = git2::Repository::open_bare(
+                    self.data_dir.join("mirrors").join(format!("{repo}.git")),
+                )?;
+                let tree = git.find_commit(git2::Oid::from_str(commit)?)?.tree()?;
+                let entry = match tree.get_path(std::path::Path::new(path)) {
+                    Ok(e) => e,
+                    Err(e) if e.code() == git2::ErrorCode::NotFound => return Ok(None),
+                    Err(e) => return Err(e.into()),
+                };
+                let blob = git.find_blob(entry.id())?;
+                if blob.size() > crate::federation::contracts::coverage::SIZE_CAP_BYTES as usize {
+                    return Err(LainError::Other(
+                        "Rust RPC snapshot source exceeds size cap".into(),
+                    ));
+                }
+                String::from_utf8(blob.content().to_vec())
+                    .map(Some)
+                    .map_err(|e| LainError::Other(format!("Rust RPC source is not UTF-8: {e}")))
+            })?;
+        let _ = rust_nodes; // resolve already installed facts in the ephemeral backend
+        let mut contract_index = build_snapshot_contract_index(backend.as_ref(), &config)?;
+        crate::federation::contracts::rust_rpc::attach(&mut contract_index, rust_details);
         let fed = Arc::new(SnapshotFederation {
             snapshot_id: record.id.clone(),
             backend,

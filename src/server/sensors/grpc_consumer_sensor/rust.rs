@@ -2,12 +2,12 @@
 use crate::error::LainError;
 use crate::server::sensors::util::{language_for, parse_for_lang, scan_files, Lang};
 use regex::Regex;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 use tree_sitter::{Node, Query, QueryCursor, StreamingIterator};
 
 /// Byte offsets are half-open; lines and columns are one-based.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RustGrpcSite {
     pub path: String,
     pub start_byte: usize,
@@ -16,7 +16,7 @@ pub struct RustGrpcSite {
     pub column: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RustGrpcEvidence {
     pub description: String,
     pub site: RustGrpcSite,
@@ -24,19 +24,25 @@ pub struct RustGrpcEvidence {
 
 /// A generated-client receiver with a method call, not a proven protobuf RPC.
 /// No destination, normalized method, contract fact, or caller edge is inferred.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RustGrpcCandidate {
     pub method: String,
     pub receiver: String,
     pub generated_type: String,
     pub site: RustGrpcSite,
     pub evidence: Vec<RustGrpcEvidence>,
+    pub enclosing_name: Option<String>,
+    pub enclosing_start_line: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RustGrpcConfig {
     pub generated_type_pattern: String,
+    #[serde(default)]
+    pub client_module_template: Option<String>,
+    #[serde(default)]
+    pub client_type_template: Option<String>,
     pub constructors: Vec<String>,
     #[serde(default)]
     pub async_constructors: Vec<String>,
@@ -63,11 +69,20 @@ impl RustGrpcConfig {
             &dir.join("rust-grpc.yaml"),
             include_str!("../patterns/rust-grpc.yaml"),
         )?;
-        let mut config: Self = serde_yaml::from_str(&yaml)?;
-        config.query = read_override(
+        let query = read_override(
             &dir.join("rust/grpc-candidate.scm"),
             include_str!("../patterns/rust/grpc-candidate.scm"),
         )?;
+        Self::from_sources(Some(&yaml), Some(&query))
+    }
+
+    /// Load pinned source blobs without a worktree or LSP connection.
+    pub fn from_sources(yaml: Option<&str>, query: Option<&str>) -> Result<Self, LainError> {
+        let mut config: Self =
+            serde_yaml::from_str(yaml.unwrap_or(include_str!("../patterns/rust-grpc.yaml")))?;
+        config.query = query
+            .unwrap_or(include_str!("../patterns/rust/grpc-candidate.scm"))
+            .into();
         config.validate()?;
         Ok(config)
     }
@@ -172,6 +187,11 @@ pub fn detect_rust_grpc_candidates(
                     generated_type: ty,
                     site: ctx.site(method),
                     evidence,
+                    enclosing_name: enclosing_function(call)
+                        .and_then(|f| f.child_by_field_name("name"))
+                        .map(|n| ctx.text(n).to_string()),
+                    enclosing_start_line: enclosing_function(call)
+                        .map(|f| f.start_position().row + 1),
                 });
             }
         }
@@ -552,4 +572,14 @@ impl<'a> Context<'a> {
             _ => None,
         }
     }
+}
+
+fn enclosing_function(mut node: Node<'_>) -> Option<Node<'_>> {
+    while let Some(parent) = node.parent() {
+        if parent.kind() == "function_item" {
+            return Some(parent);
+        }
+        node = parent;
+    }
+    None
 }

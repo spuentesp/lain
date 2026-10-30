@@ -458,7 +458,7 @@ async fn run_list_unresolved(
             }
         }
         let candidates = candidate_endpoints_for(&view, call_id, resolution);
-        items.push(json!({
+        let mut item = json!({
             "consumer": evidence_ref_from_call(call_id),
             "url_expr": url_expr_for(call_id),
             "method": method_label_for(call_id),
@@ -467,6 +467,63 @@ async fn run_list_unresolved(
             "reason": unresolved_reason_label(reason),
             "target_service": target_service.as_ref().map(|s| s.0.clone()),
             "candidates": candidates,
+        });
+        if let Some(detail) = view.rust_rpcs.get(call_id) {
+            item["rpc"] = json!(detail);
+            item["consumer"]["commit"] = json!(resolved
+                .commits()
+                .get(call_id.repo_id())
+                .cloned()
+                .unwrap_or_default());
+            if let Some(candidate) = &detail.candidate {
+                item["consumer"]["line"] = json!(candidate.site.line);
+                item["method"] = json!(candidate.method);
+            }
+        }
+        items.push(item);
+    }
+    // A source candidate with no unique proto identity has no consumer fact,
+    // but is still an explicit, inspectable coverage gap.
+    for (id, detail) in &view.rust_rpcs {
+        if detail.contract_key.is_some() {
+            continue;
+        }
+        if repo_filter
+            .as_ref()
+            .is_some_and(|repo| id.repo_id() != repo)
+        {
+            continue;
+        }
+        if let Some(svc) = &service_filter {
+            let Some(info) = view.services.get(svc) else {
+                continue;
+            };
+            if info.repo.as_str() != id.repo_id()
+                || (!info.paths.is_empty()
+                    && !info
+                        .paths
+                        .iter()
+                        .any(|p| id.path().is_some_and(|path| path.starts_with(p))))
+            {
+                continue;
+            }
+        }
+        let mut consumer = evidence_ref_from_call(id);
+        consumer["commit"] = json!(resolved
+            .commits()
+            .get(id.repo_id())
+            .cloned()
+            .unwrap_or_default());
+        if let Some(candidate) = &detail.candidate {
+            consumer["line"] = json!(candidate.site.line);
+        }
+        items.push(json!({
+            "consumer": consumer,
+            "url_expr": url_expr_for(id),
+            "method": detail.candidate.as_ref().map(|c| c.method.as_str()).unwrap_or(""),
+            "template": null, "host": null, "target_service": null,
+            "reason": "rpc_stub_unknown", "rpc": detail,
+            "candidates": rust_rpc_candidates(&view, detail),
         }));
     }
 
@@ -743,7 +800,25 @@ async fn run_check_binding(
     let valid = reasons.is_empty() && endpoint_def.is_some();
 
     let data = if valid {
-        let entry = render_bindings_entry(&consumer_repo, &consumer_id, &key, &endpoint_id);
+        let entry = if view.rust_rpcs.contains_key(&consumer_id) {
+            let node = resolved
+                .backend()
+                .get_node(consumer_id.as_str())
+                .ok()
+                .flatten();
+            let fallback_symbol = consumer_id.name().unwrap_or_default();
+            render_bindings_entry_with_symbol(
+                &consumer_repo,
+                &consumer_id,
+                &key,
+                &endpoint_id,
+                node.as_ref()
+                    .and_then(|n| n.container.as_deref())
+                    .unwrap_or(&fallback_symbol),
+            )
+        } else {
+            render_bindings_entry(&consumer_repo, &consumer_id, &key, &endpoint_id)
+        };
         json!({
             "valid": true,
             "reasons": [],
@@ -1137,6 +1212,16 @@ fn candidate_endpoints_for(
         Some(ts) => &ep_id.0 == ts,
         None => true,
     };
+    if let Some(detail) = view.rust_rpcs.get(call_id) {
+        return rust_rpc_candidates(view, detail);
+    }
+    // Other fact-keyed RPC consumers also need RPC suggestions, never HTTP.
+    if call_id
+        .name()
+        .is_some_and(|n| n.starts_with(crate::server::sensors::util::RPC_CALL_PREFIX))
+    {
+        return view.endpoints.keys().filter(|id| in_target(id) && matches!(id.1, ContractKey::Rpc { .. })).map(|id| json!({"endpoint": {"service": id.0.0, "key": id.1.to_string()}, "reason": "pattern"})).collect();
+    }
     // GraphQL consumers (`graphql-call:{op}:{field}`) carry no HTTP
     // method/template: `parse_consumer_call_shape` reads their name
     // as `Unknown`/no template, so the HTTP filter below would admit
@@ -1289,7 +1374,22 @@ fn render_bindings_entry(
     key: &ContractKey,
     endpoint_id: &EndpointId,
 ) -> String {
-    let symbol = consumer_id.name().unwrap_or_default();
+    render_bindings_entry_with_symbol(
+        consumer_repo,
+        consumer_id,
+        key,
+        endpoint_id,
+        &consumer_id.name().unwrap_or_default(),
+    )
+}
+
+fn render_bindings_entry_with_symbol(
+    consumer_repo: &str,
+    consumer_id: &GlobalId,
+    key: &ContractKey,
+    endpoint_id: &EndpointId,
+    symbol: &str,
+) -> String {
     let path = consumer_id.path().unwrap_or_default();
     format!(
         "- consumer:\n    repo: {consumer_repo}\n    path: {path}\n    symbol: {symbol}\n    key: \"{key}\"\n  provider:\n    service: {svc}\n    key: \"{pkey}\"\n",
@@ -1985,4 +2085,11 @@ mod tests {
             "same-op fallback runs inside the target_service's endpoints"
         );
     }
+}
+
+fn rust_rpc_candidates(
+    view: &ContractIndex,
+    detail: &crate::federation::contracts::rust_rpc::RustRpcDetail,
+) -> Vec<Value> {
+    view.endpoints.keys().filter(|ep| detail.compatible_keys.contains(&ep.1.to_string())).map(|ep| json!({"endpoint": {"service": ep.0.0, "key": ep.1.to_string()}, "reason": "same_key"})).collect()
 }

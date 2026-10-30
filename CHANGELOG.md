@@ -7,6 +7,15 @@ All notable changes to LAIN are documented here. Versions follow
 
 ### Added
 
+- **Rust gRPC consumer identity in federation.** Generated-client call sites
+  are compared with protobuf provider facts across repositories. A unique
+  identity is emitted as an RPC consumer at the call site, with an unknown
+  destination, and `list_unresolved` exposes source/provider evidence and
+  compatible mappings for `check_binding`. Unknown or ambiguous identities
+  remain explicit coverage gaps. Snapshot resolution reads the pinned source
+  blobs without LSP. The analyzer cache revision advances; the serialized
+  federation graph schema does not change. See `docs/RUST_GRPC_CONTRACTS.md`.
+
 - **Python gRPC consumers are detected through stub handles.** `self._stub`
   and `stub` receivers bind to the service their constructor names, and a
   channel whose address is a constructor parameter resolves through the file's
