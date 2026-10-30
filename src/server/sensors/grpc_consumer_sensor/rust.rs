@@ -294,6 +294,23 @@ impl<'a> Context<'a> {
             .trim();
         let raw = raw.split('<').next()?.trim();
         let first = raw.split("::").next()?;
+        // Generic type parameters take precedence over imports. Their bounds
+        // or defaults do not establish a concrete generated-client identity.
+        let mut scope = Some(at);
+        while let Some(node) = scope {
+            if let Some(parameters) = self.field(node, "type_parameters") {
+                let mut cursor = parameters.walk();
+                if parameters.named_children(&mut cursor).any(|parameter| {
+                    parameter.kind() == "type_parameter"
+                        && self
+                            .field(parameter, "name")
+                            .is_some_and(|name| self.text(name) == first)
+                }) {
+                    return None;
+                }
+            }
+            scope = node.parent();
+        }
         let mut bindings = Vec::new();
         for &n in &self.nodes {
             if !Self::visible(n, at) {

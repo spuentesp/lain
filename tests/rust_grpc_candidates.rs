@@ -184,3 +184,22 @@ fn completed_pattern_scopes_do_not_hide_later_clients() {
         assert!(candidates(&src).is_empty(), "false identity: {src}");
     }
 }
+
+#[test]
+fn generic_type_parameters_shadow_imports_without_proving_client_identity() {
+    for body in [
+        "fn f<C: OtherClient>(c: C) { c.get(req); }",
+        "struct Holder<C> { c: C } impl<C: OtherClient> Holder<C> { fn f(&self) { self.c.get(req); } }",
+        "trait Wrapper<C: OtherClient> { fn f(c: C) { c.get(req); } }",
+        "type Alias<C> = C; fn f(c: Alias<Plain>) { c.get(req); }",
+    ] {
+        let src = format!("use api::orders_client::OrdersClient as C; {body}");
+        assert!(candidates(&src).is_empty(), "generic inherited imported identity: {src}");
+    }
+    let src = "use api::orders_client::OrdersClient as C; fn f<T>(c: C<Channel>, other: T) { c.get(req); }";
+    assert_eq!(
+        candidates(src).len(),
+        1,
+        "unrelated generic hid a known client"
+    );
+}
