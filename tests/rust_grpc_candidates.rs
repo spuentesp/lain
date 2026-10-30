@@ -203,3 +203,30 @@ fn generic_type_parameters_shadow_imports_without_proving_client_identity() {
         "unrelated generic hid a known client"
     );
 }
+
+#[test]
+fn local_nominal_items_do_not_inherit_generated_client_imports() {
+    for item in [
+        "struct Client;",
+        "enum Client { Value }",
+        "union Client { value: u8 }",
+    ] {
+        for body in [
+            format!("fn f() {{ {item} let c = Client::new(); c.get(req); }}"),
+            format!("fn f() {{ let c = Client::new(); c.get(req); {item} }}"),
+            format!("fn f() {{ {item} fn g(c: Client) {{ c.get(req); }} }}"),
+        ] {
+            let src = format!("use api::orders_client::OrdersClient as Client; {body}");
+            assert!(
+                candidates(&src).is_empty(),
+                "local type inherited imported identity: {src}"
+            );
+        }
+    }
+    let src = "use api::orders_client::OrdersClient as Client; fn f(c: Client<Channel>) { { struct Client; } c.get(req); }";
+    assert_eq!(
+        candidates(src).len(),
+        1,
+        "out-of-scope type hid a known client"
+    );
+}

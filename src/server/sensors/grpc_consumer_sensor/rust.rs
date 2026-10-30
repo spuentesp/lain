@@ -316,6 +316,15 @@ impl<'a> Context<'a> {
             if !Self::visible(n, at) {
                 continue;
             }
+            // Local nominal types occupy the same namespace as imported
+            // clients. Preserve their spelling for wrapper/field inspection,
+            // but never expand an outer import through such a declaration.
+            // Items are visible throughout their scope, even before the item.
+            if matches!(n.kind(), "struct_item" | "enum_item" | "union_item")
+                && self.field(n, "name").is_some_and(|x| self.text(x) == first)
+            {
+                bindings.push((raw.to_string(), n));
+            }
             if n.kind() == "type_item"
                 && self.field(n, "name").is_some_and(|x| self.text(x) == first)
             {
