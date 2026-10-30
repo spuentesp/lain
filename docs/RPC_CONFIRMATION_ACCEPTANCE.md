@@ -24,3 +24,7 @@ Confirmation supplies deployment context. It does not make an unknown RPC
 identity valid, establish runtime execution, or remove coverage gaps for
 unsupported Rust wrappers. A mapping is explicit source evidence; maintain it
 when its dependency revision changes.
+
+Generic type parameters that shadow imported client aliases must remain unproven.
+Dedicated candidate and federation regressions check that such receivers never
+produce an RPC fact that an agent could confirm.

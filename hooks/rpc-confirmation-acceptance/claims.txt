@@ -1,3 +1,4 @@
 tests/rust_grpc_contracts.rs
 docs/RPC_CONFIRMATION_ACCEPTANCE.md
 src/server/mcp/contract_tools/contracts.rs
+tests/use_cases/confirmed_bindings_mcp.rs
