@@ -1,9 +1,11 @@
-These excerpts exercise Rust gRPC candidate discovery without generated bindings,
-an LSP server, or a network connection during tests. They retain upstream source
-text; comments mark each original line range. The only added Rust code closes
-the excerpted `impl` blocks. These files parse as Rust but don't form a compilable
-crate. `provenance.json` maps fixture lines to upstream lines and records SHA-256
-hashes of the original files and excerpts.
+These excerpts exercise Rust gRPC candidate discovery and protobuf identity
+matching without generated bindings, an LSP server, or a network connection
+during tests. They retain upstream source text; comments mark each original line
+range. Added scaffold closes excerpted Rust `impl` blocks and the protobuf
+service. The Rust files parse but do not form a compilable crate. The protobuf
+excerpt supplies the service and create/get RPC declarations used by the tests.
+`provenance.json` maps fixture lines to upstream lines and records SHA-256 hashes
+of the original files and excerpts.
 
 NeMo-Fabric revision `4fdf65a4b4c96024327501ae28243f2d206e7ec7` pins OpenShell
 revision `6648bd0c290efbc41ba131ee9831ee45cd431f94` in `Cargo.lock`.
