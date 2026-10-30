@@ -101,6 +101,19 @@ All notable changes to LAIN are documented here. Versions follow
   `suggested: true` and a score; they are proposals, never links. `min_score`
   (default 0.6) sets the cut-off. `suggestions_status` says why there are none
   when a server context, a contract index or an embedding model is missing.
+- **Two operator switches for language servers.** `LAIN_DISABLE_LSP=1` turns
+  every language server off, so the scanner falls back to tree-sitter and no
+  `rust-analyzer` / `gopls` process is ever spawned; unset, empty and `0` leave
+  LSP on, matching the other `LAIN_DISABLE_*` knobs. `LAIN_LSP_LEAN=1` keeps
+  LSP but starts `rust-analyzer` in a memory-saving profile with proc-macro
+  expansion, build scripts and the workspace member's own `default` feature
+  switched off. That profile is a deliberate trade: rust-analyzer then
+  resolves *less* than the user's build does — derive-generated impls,
+  `env!("OUT_DIR")` code and default-feature code stay invisible to
+  `textDocument/references` — so it is opt-in and the default profile keeps
+  full fidelity. `scripts/lsp-memory-probe.py` measures the trade on any
+  repository: on the Lain checkout the lean profile saves roughly 500–600
+  MiB of peak RSS (~17–21%).
 
 ### Changed
 
@@ -124,9 +137,20 @@ All notable changes to LAIN are documented here. Versions follow
   address: `localhost:<published>` and `<service>:<container port>` resolve to
   the repo's service when the service builds from that repo. Image-only
   services and unpublished ports are not claimed.
+- **`rust-analyzer` no longer runs `cargo check` on save, and no longer
+  publishes its own diagnostics.** The multiplexer only ever reads
+  `textDocument/documentSymbol` and `textDocument/references` — it never
+  consumes `textDocument/publishDiagnostics` — so the on-save check and the
+  diagnostic pass cost a rustc process per workspace and changed no symbol.
+  Every symbol Lain extracts is unchanged.
 
 ### Fixed
 
+- **`LAIN_TEST_NO_LSP=1` now actually disables LSP.** The multiplexer built
+  the disabled-binary set and then wrote an empty set into the struct, so the
+  hatch was a no-op: the scanner still spawned `rust-analyzer` / `gopls` in
+  the tests that asked it not to. `tests/cli_surface.rs` set the variable and
+  believed it was taking effect.
 - **A URL built from an enclosing scope did not resolve.** The HTTP client
   sensor recorded only module-level assignments for JavaScript and
   TypeScript, and resolved an identifier only against the innermost enclosing
