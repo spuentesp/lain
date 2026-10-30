@@ -59,3 +59,6 @@ mod battery_success_metrics;
 
 #[path = "use_cases/battery_e2e_chains.rs"]
 mod battery_e2e_chains;
+
+#[path = "use_cases/confirmed_bindings_mcp.rs"]
+mod confirmed_bindings_mcp;

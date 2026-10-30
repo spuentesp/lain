@@ -4,14 +4,28 @@
   "description": "`data` field of the `apply_contract_context` envelope.",
   "type": "object",
   "properties": {
-    "applied": { "type": "boolean", "description": "True only when the declaration was written and the re-joined index serves it." },
-    "dry_run": { "type": "boolean" },
-    "config_path": { "type": "string" },
+    "applied": {
+      "type": "boolean",
+      "description": "True only when every requested declaration is currently served, including an already served no-op."
+    },
+    "dry_run": {
+      "type": "boolean"
+    },
+    "config_path": {
+      "type": "string"
+    },
     "added": {
       "type": "array",
       "items": {
         "type": "object",
-        "properties": { "service": { "type": "string" }, "key": { "type": "string" } }
+        "properties": {
+          "service": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          }
+        }
       },
       "description": "The declared providers that were added."
     },
@@ -20,15 +34,95 @@
       "items": {
         "type": "object",
         "properties": {
-          "host": { "type": ["string", "null"] },
-          "file": { "type": ["string", "null"] },
-          "service": { "type": "string" }
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "file": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "service": {
+            "type": "string"
+          }
         }
       },
       "description": "The declared host aliases that were added."
     },
-    "yaml": { "type": "string", "description": "The full repos.yaml that would be written (dry run)." },
-    "backup": { "type": "string", "description": "The .bak file holding the previous content (applied)." },
-    "note": { "type": "string" }
+    "yaml": {
+      "type": "string",
+      "description": "The full repos.yaml that would be written (dry run)."
+    },
+    "backup": {
+      "type": "string",
+      "description": "The .bak file holding the previous content (applied)."
+    },
+    "note": {
+      "type": "string"
+    },
+    "added_bindings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "consumer": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "repo": {
+                "type": "string",
+                "minLength": 1
+              },
+              "path": {
+                "type": "string",
+                "minLength": 1
+              },
+              "symbol": {
+                "type": "string",
+                "minLength": 1
+              },
+              "key": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "repo",
+              "path",
+              "symbol",
+              "key"
+            ]
+          },
+          "provider": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "service": {
+                "type": "string",
+                "minLength": 1
+              },
+              "key": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "service",
+              "key"
+            ]
+          }
+        },
+        "required": [
+          "consumer",
+          "provider"
+        ]
+      },
+      "description": "Explicit bindings newly added; empty for an identical declaration."
+    }
   }
 }

@@ -247,9 +247,9 @@ pub const CONTRACT_TOOL_DEFS: &[ToolDef] = &[
     },
     ToolDef {
         name: "apply_contract_context",
-        description: "Declare the contract context the analyzer cannot see into the federation's repos.yaml: `provides` for an endpoint a service exposes (a runtime-configured route, a mesh spec) and `host_aliases` for which service a host expression dials (a consumer whose URL the analyzer cannot follow). Dry-run by default: returns the YAML that would be written. With dry_run=false it validates the whole result, writes atomically with a .bak, re-joins the contract index, and reports applied=true only when the declaration is served; a failed re-join restores the file.",
+        description: "Declare the contract context the analyzer cannot see into the federation's repos.yaml: `provides` for an endpoint a service exposes (a runtime-configured route, a mesh spec), `host_aliases` for which service a host expression dials, and `bindings` for an explicit existing consumer to compatible endpoint mapping. Binding selectors must match exactly one current site; conflicting destinations are refused. Confirmed records a declaration, not human approval. Dry-run by default: returns the YAML that would be written. With dry_run=false it validates the whole result, writes atomically with a .bak, re-joins the contract index, and reports applied=true only when the declaration is served; a failed re-join restores the file.",
         required_args: &["snapshot"],
-        optional_args: &["provides", "host_aliases", "dry_run"],
+        optional_args: &["provides", "host_aliases", "bindings", "dry_run"],
         input_schema: Some(include_str!("contract_tools/schemas/apply_contract_context.in.json")),
         output_schema: Some(include_str!("contract_tools/schemas/apply_contract_context.out.json")),
     },

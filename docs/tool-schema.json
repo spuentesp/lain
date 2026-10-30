@@ -2711,12 +2711,72 @@
     }
   },
   {
-    "description": "Declare the contract context the analyzer cannot see into the federation's repos.yaml: `provides` for an endpoint a service exposes (a runtime-configured route, a mesh spec) and `host_aliases` for which service a host expression dials (a consumer whose URL the analyzer cannot follow). Dry-run by default: returns the YAML that would be written. With dry_run=false it validates the whole result, writes atomically with a .bak, re-joins the contract index, and reports applied=true only when the declaration is served; a failed re-join restores the file.",
+    "description": "Declare the contract context the analyzer cannot see into the federation's repos.yaml: `provides` for an endpoint a service exposes (a runtime-configured route, a mesh spec), `host_aliases` for which service a host expression dials, and `bindings` for an explicit existing consumer to compatible endpoint mapping. Binding selectors must match exactly one current site; conflicting destinations are refused. Confirmed records a declaration, not human approval. Dry-run by default: returns the YAML that would be written. With dry_run=false it validates the whole result, writes atomically with a .bak, re-joins the contract index, and reports applied=true only when the declaration is served; a failed re-join restores the file.",
     "inputSchema": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "additionalProperties": false,
-      "description": "Input for `apply_contract_context`. Declares the contract context the analyzer cannot see into the federation's repos.yaml: endpoints a service exposes (`provides`) and which service a host expression dials (`host_aliases`). Dry-run by default; `snapshot` must be `live`.",
+      "description": "Input for apply_contract_context. Merge provides, host_aliases and explicit bindings in the existing repos.yaml format. Bindings select exactly one current consumer and an existing compatible endpoint. Dry-run by default; snapshot must be live.",
       "properties": {
+        "bindings": {
+          "description": "Explicit confirmed mappings using existing repos.yaml bindings entries. The repo/path/symbol/key selector must match exactly one current consumer; fanout is refused. Conflicting destinations are errors; identical mappings are idempotent. Apply revalidates current facts independently of check_binding. Confirmed means declared, not human-approved.",
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "consumer": {
+                "additionalProperties": false,
+                "properties": {
+                  "key": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "path": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "repo": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "symbol": {
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "repo",
+                  "path",
+                  "symbol",
+                  "key"
+                ],
+                "type": "object"
+              },
+              "provider": {
+                "additionalProperties": false,
+                "properties": {
+                  "key": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "service": {
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "service",
+                  "key"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "consumer",
+              "provider"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
         "dry_run": {
           "default": true,
           "description": "When true (the default), return the YAML that would be written and touch nothing.",
@@ -2808,6 +2868,66 @@
           },
           "type": "array"
         },
+        "added_bindings": {
+          "description": "Explicit bindings newly added; empty for an identical declaration.",
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "consumer": {
+                "additionalProperties": false,
+                "properties": {
+                  "key": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "path": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "repo": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "symbol": {
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "repo",
+                  "path",
+                  "symbol",
+                  "key"
+                ],
+                "type": "object"
+              },
+              "provider": {
+                "additionalProperties": false,
+                "properties": {
+                  "key": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "service": {
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "service",
+                  "key"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "consumer",
+              "provider"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
         "added_host_aliases": {
           "description": "The declared host aliases that were added.",
           "items": {
@@ -2833,7 +2953,7 @@
           "type": "array"
         },
         "applied": {
-          "description": "True only when the declaration was written and the re-joined index serves it.",
+          "description": "True only when every requested declaration is currently served, including an already served no-op.",
           "type": "boolean"
         },
         "backup": {
