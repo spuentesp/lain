@@ -46,6 +46,7 @@ fn stale_binding(
 ) -> StaleBinding {
     StaleBinding {
         consumer: ConfirmedBindingKey {
+            site: binding.consumer.site.clone(),
             repo: RepoId::new(&binding.consumer.repo)
                 .unwrap_or_else(|_| RepoId::new("unknown").unwrap()),
             path: binding.consumer.path.clone(),
@@ -137,6 +138,14 @@ pub(crate) fn apply_confirmed_binding(
         let Ok(gid) = GlobalId::parse(&node.id) else {
             continue;
         };
+        if binding
+            .consumer
+            .site
+            .as_ref()
+            .is_some_and(|site| site != gid.as_str())
+        {
+            continue;
+        }
         if gid.repo_id() != binding.consumer.repo {
             continue;
         }

@@ -5,6 +5,10 @@ All notable changes to LAIN are documented here. Versions follow
 
 ## Unreleased
 
+- Allow exact consumer `site` selectors in confirmed mappings, so repeated RPC calls within one symbol can target different services. Existing selectors remain supported.
+- Use the existing LSP pool for bounded live Rust RPC method-definition evidence, including closure receivers; snapshots retain revision-pinned syntax inference and explicit coverage gaps. Advance the contract analyzer cache revision to 8; graph persistence is unchanged.
+- Reuse the document the language server already has open for identity requests: a file is opened once and re-announced only when its content changes, instead of being reopened on every probe. After a language server dies and is restarted, the document is opened again — a change notification alone is dropped by a server that never received the matching open.
+
 ### Added
 
 - **Rust gRPC consumer identity in federation.** Generated-client call sites
@@ -2239,3 +2243,4 @@ that touches the joiner, sensors, or fixture must keep
 
 Initial public release. Federation `lain server` + single-repo `lain mcp` +
 Command Center SPA.
+

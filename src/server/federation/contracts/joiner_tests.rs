@@ -1023,6 +1023,7 @@ fn confirmed_binding_matches_consumer_and_records_provenance() {
         schemas: vec![],
         bindings: vec![ConfirmedBinding {
             consumer: ConfirmedBindingConsumer {
+                site: None,
                 repo: "billing".into(),
                 path: "src/orders_api.py".into(),
                 symbol: "create_order".into(),
@@ -1120,6 +1121,7 @@ fn confirmed_binding_reads_complete_comes_from_the_matched_fact() {
         schemas: vec![],
         bindings: vec![ConfirmedBinding {
             consumer: ConfirmedBindingConsumer {
+                site: None,
                 repo: "billing".into(),
                 path: "src/sub.py".into(),
                 symbol: "on_orders".into(),
@@ -1194,6 +1196,7 @@ fn confirmed_binding_no_endpoint_marks_stale() {
         schemas: vec![],
         bindings: vec![ConfirmedBinding {
             consumer: ConfirmedBindingConsumer {
+                site: None,
                 repo: "billing".into(),
                 path: "src/orders_api.py".into(),
                 symbol: "create_order".into(),
@@ -1234,6 +1237,7 @@ fn confirmed_binding_no_consumer_marks_stale() {
         schemas: vec![],
         bindings: vec![ConfirmedBinding {
             consumer: ConfirmedBindingConsumer {
+                site: None,
                 repo: "billing".into(),
                 path: "src/orders_api.py".into(),
                 symbol: "create_order".into(),
@@ -1269,6 +1273,7 @@ fn config_with_graphql_binding() -> ContractFederationConfig {
         schemas: vec![],
         bindings: vec![ConfirmedBinding {
             consumer: ConfirmedBindingConsumer {
+                site: None,
                 repo: "storefront".into(),
                 path: "src/gql.ts".into(),
                 symbol: "graphql-call:query:product".into(),
@@ -1362,6 +1367,7 @@ fn confirmed_binding_cross_kind_keys_marks_stale_and_does_not_bind() {
         schemas: vec![],
         bindings: vec![ConfirmedBinding {
             consumer: ConfirmedBindingConsumer {
+                site: None,
                 repo: "storefront".into(),
                 path: "src/gql.ts".into(),
                 symbol: "graphql-call:query:product".into(),
@@ -1430,6 +1436,7 @@ fn confirmed_binding_template_bridge_binds() {
         schemas: vec![],
         bindings: vec![ConfirmedBinding {
             consumer: ConfirmedBindingConsumer {
+                site: None,
                 repo: "billing".into(),
                 path: "src/orders_api.py".into(),
                 symbol: "create_order".into(),
@@ -1494,6 +1501,7 @@ fn confirmed_binding_equivalent_key_spelling_binds() {
         schemas: vec![],
         bindings: vec![ConfirmedBinding {
             consumer: ConfirmedBindingConsumer {
+                site: None,
                 repo: "billing".into(),
                 path: "src/orders_api.py".into(),
                 symbol: "create_order".into(),
@@ -1575,6 +1583,7 @@ fn confirmed_binding_merges_into_multi_fact_consumers_vec() {
         // subscription must survive.
         bindings: vec![ConfirmedBinding {
             consumer: ConfirmedBindingConsumer {
+                site: None,
                 repo: "billing".into(),
                 path: "src/sub.py".into(),
                 symbol: "sub_two".into(),

@@ -483,6 +483,7 @@ impl ContractJoiner {
                 .then_with(|| a.consumer.path.cmp(&b.consumer.path))
                 .then_with(|| a.consumer.symbol.cmp(&b.consumer.symbol))
                 .then_with(|| a.consumer.key.cmp(&b.consumer.key))
+                .then_with(|| a.consumer.site.cmp(&b.consumer.site))
         });
 
         // Build the index.

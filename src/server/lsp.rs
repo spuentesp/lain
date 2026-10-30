@@ -517,6 +517,43 @@ pub struct HierarchicalSymbol {
     pub children: Vec<HierarchicalSymbol>,
 }
 
+/// What the identity path must send to make the language server's view of a
+/// document current.
+///
+/// The distinction is not cosmetic: `didChange` is only meaningful for a
+/// document the server was already told about. Sending it for a document the
+/// server never opened is silently dropped by the server, so the identity
+/// answer never arrives. The server's own document state is *not* a reliable
+/// oracle for this — the local bridge keeps its document map across a server
+/// restart, so it still holds a URI whose new process never received the
+/// matching `didOpen`. The multiplexer's own record is the oracle, and it is
+/// cleared whenever the server dies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IdentitySync {
+    /// The server's view is already current — send nothing.
+    Current,
+    /// The server has never been told about this document: send `didOpen`.
+    Open { version: i32 },
+    /// The server already has the document open: send `didChange`.
+    Change { version: i32 },
+}
+
+/// Decide how to bring the server's view of a document up to date.
+///
+/// `prior` is the multiplexer's record of the last content it announced for
+/// this URI: `(content hash, version)`. `None` means the server has not been
+/// told about the document — either it is the first sight of the URI, or the
+/// server died and the record was cleared.
+fn identity_sync(prior: Option<&(String, i32)>, hash: &str) -> IdentitySync {
+    match prior {
+        None => IdentitySync::Open { version: 1 },
+        Some((old, _version)) if old == hash => IdentitySync::Current,
+        Some((_, version)) => IdentitySync::Change {
+            version: version.saturating_add(1),
+        },
+    }
+}
+
 pub struct LspMultiplexer {
     bridge: LspBridge,
     /// How long to keep asking the language server for document symbols
@@ -564,6 +601,7 @@ pub struct LspMultiplexer {
     /// which languages got warm before scanning started.
     prewarm_state: HashMap<String, PrewarmOutcome>,
     workspace: PathBuf,
+    identity_documents: HashMap<String, (String, i32)>,
     /// When `Some`, the multiplexer routes LSP requests through a JSON-RPC
     /// client connected to a real server at this address instead of
     /// spawning a child process via `lsp_bridge`. Set by
@@ -751,6 +789,7 @@ impl LspMultiplexer {
             restart_budget: HashMap::new(),
             prewarm_state: HashMap::new(),
             workspace: workspace.to_path_buf(),
+            identity_documents: HashMap::new(),
             remote: None,
             profile,
             #[cfg(test)]
@@ -783,6 +822,7 @@ impl LspMultiplexer {
             restart_budget: HashMap::new(),
             prewarm_state: HashMap::new(),
             workspace: workspace.to_path_buf(),
+            identity_documents: HashMap::new(),
             remote: Some(Arc::new(client)),
             // A bridged server was initialized by whoever started it —
             // its `initializationOptions` are already fixed, so the
@@ -1165,6 +1205,10 @@ impl LspMultiplexer {
                 )
                 .await?;
 
+            self.identity_documents.insert(
+                uri.clone(),
+                (blake3::hash(content.as_bytes()).to_hex().to_string(), 1),
+            );
             let response = remote
                 .request(
                     "textDocument/documentSymbol",
@@ -1185,6 +1229,11 @@ impl LspMultiplexer {
             self.record_lsp_failure(&server_id, kind);
             return Err(LainError::Lsp(e.to_string()));
         }
+
+        self.identity_documents.insert(
+            uri.clone(),
+            (blake3::hash(content.as_bytes()).to_hex().to_string(), 1),
+        );
 
         // Wait for LSP to analyze (intelligent polling). Track the
         // outcome so the circuit-breaker bookkeeping at the end of
@@ -1381,6 +1430,135 @@ impl LspMultiplexer {
         Ok(results)
     }
 
+    async fn sync_identity_document(
+        &mut self,
+        server_id: &str,
+        uri: &str,
+        content: &str,
+        path: &Path,
+    ) -> Result<(), LainError> {
+        let hash = blake3::hash(content.as_bytes()).to_hex().to_string();
+        let prior = self
+            .identity_documents
+            .get(uri)
+            .map(|(h, v)| (h.clone(), *v));
+        let version = match identity_sync(prior.as_ref(), &hash) {
+            IdentitySync::Current => return Ok(()),
+            IdentitySync::Open { version } => {
+                if let Some(remote) = &self.remote {
+                    remote
+                        .notify(
+                            "textDocument/didOpen",
+                            serde_json::json!({
+                                "textDocument": {
+                                    "uri": uri,
+                                    "languageId": language_id_for(path),
+                                    "version": version,
+                                    "text": content
+                                }
+                            }),
+                        )
+                        .await?;
+                } else {
+                    self.bridge
+                        .open_document(server_id, uri, content)
+                        .await
+                        .map_err(|e| LainError::Lsp(e.to_string()))?;
+                }
+                version
+            }
+            IdentitySync::Change { version } => {
+                if let Some(remote) = &self.remote {
+                    remote
+                        .notify(
+                            "textDocument/didChange",
+                            serde_json::json!({
+                                "textDocument": {"uri": uri, "version": version},
+                                "contentChanges": [{"text": content}]
+                            }),
+                        )
+                        .await?;
+                } else {
+                    self.bridge
+                        .update_document(server_id, uri, content)
+                        .await
+                        .map_err(|e| LainError::Lsp(e.to_string()))?;
+                }
+                version
+            }
+        };
+        self.identity_documents
+            .insert(uri.to_string(), (hash, version));
+        Ok(())
+    }
+
+    /// Resolve symbol identity using the existing local or remote language
+    /// server. Coordinates are zero-based LSP UTF-16 positions. Requests,
+    /// including document synchronization, are bounded by the normal budget.
+    pub async fn get_definitions(
+        &mut self,
+        path: &Path,
+        line: u32,
+        col: u32,
+        type_definition: bool,
+    ) -> Result<Vec<ReferenceLocation>, LainError> {
+        use lsp_types::request::{GotoDefinition, GotoTypeDefinition};
+        let server_id = self.ensure_server(path).await?;
+        let uri = file_uri(path);
+        let content = tokio::fs::read_to_string(path).await?;
+        let params = serde_json::json!({
+            "textDocument": {"uri": uri},
+            "position": {"line": line, "character": col}
+        });
+        let method = if type_definition {
+            "textDocument/typeDefinition"
+        } else {
+            "textDocument/definition"
+        };
+        let response = tokio::time::timeout(LSP_REQUEST_TIMEOUT, async {
+            self.sync_identity_document(&server_id, &uri, &content, path)
+                .await?;
+            if let Some(remote) = self.remote.as_ref() {
+                return remote.request(method, params).await;
+            }
+            let value = if type_definition {
+                let params =
+                    serde_json::from_value(params).map_err(|e| LainError::Lsp(e.to_string()))?;
+                let result = self
+                    .bridge
+                    .request::<GotoTypeDefinition>(&server_id, params)
+                    .await
+                    .map_err(|e| LainError::Lsp(e.to_string()))?;
+                serde_json::to_value(result)
+            } else {
+                let params =
+                    serde_json::from_value(params).map_err(|e| LainError::Lsp(e.to_string()))?;
+                let result = self
+                    .bridge
+                    .request::<GotoDefinition>(&server_id, params)
+                    .await
+                    .map_err(|e| LainError::Lsp(e.to_string()))?;
+                serde_json::to_value(result)
+            };
+            value.map_err(|e| LainError::Lsp(e.to_string()))
+        })
+        .await
+        .map_err(|_| LainError::Lsp(format!("{method} timed out")))??;
+        Ok(parse_locations(response)
+            .into_iter()
+            .filter_map(|loc| {
+                // parse_locations retains percent escapes; decode local file paths.
+                let path = decode_file_path(&loc.path)?;
+                Some(ReferenceLocation {
+                    path,
+                    line: loc.line,
+                    col: loc.col,
+                    context: String::new(),
+                })
+            })
+            .collect())
+    }
+
     pub async fn install_server(&mut self, ext: &str) -> Result<String, LainError> {
         // Accept either a file extension ("rs", "py") or a language name
         // ("rust", "python"). When given a name, resolve to the canonical ext.
@@ -1575,11 +1753,13 @@ impl LspMultiplexer {
                 // log from firing twice for the same binary.
                 if self.unavailable.contains(binary) {
                     self.started.remove(binary);
+                    self.identity_documents.clear();
                     return;
                 }
                 // Drop the dead child; the next ensure_server call
                 // will see `!started.contains(binary)` and respawn.
                 self.started.remove(binary);
+                self.identity_documents.clear();
                 self.record_restart_at(binary, now_ms);
             }
             FailureKind::RequestError | FailureKind::Timeout => {
@@ -1936,6 +2116,14 @@ pub struct LspPool {
 }
 
 impl LspPool {
+    #[cfg(test)]
+    pub(crate) fn from_test_multiplexer(mux: LspMultiplexer) -> Self {
+        Self {
+            multiplexers: vec![Arc::new(AsyncMutex::new(mux))],
+            next: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
     pub fn new(
         workspace: &Path,
         size: usize,
@@ -3112,6 +3300,51 @@ fn parse_document_symbols(value: serde_json::Value) -> Vec<DocumentSymbol> {
         .unwrap_or_default()
 }
 
+pub(crate) fn file_uri(path: &Path) -> String {
+    let path = path.to_string_lossy().replace('\\', "/");
+    let mut uri = if path.starts_with('/') {
+        "file://".to_string()
+    } else {
+        "file:///".to_string()
+    };
+    for b in path.bytes() {
+        if b.is_ascii_alphanumeric() || b"/-._~:".contains(&b) {
+            uri.push(b as char);
+        } else {
+            uri.push_str(&format!("%{b:02X}"));
+        }
+    }
+    uri
+}
+
+fn decode_file_path(path: &str) -> Option<PathBuf> {
+    // Reject virtual/remote documents: identity inspection reads local sources.
+    if path.contains("://") {
+        return None;
+    }
+    let mut out = Vec::new();
+    let bytes = path.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = std::str::from_utf8(bytes.get(i + 1..i + 3)?).ok()?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    let path = String::from_utf8(out).ok()?;
+    #[cfg(windows)]
+    let path = path
+        .strip_prefix('/')
+        .filter(|p| p.as_bytes().get(1) == Some(&b':'))
+        .unwrap_or(&path)
+        .to_string();
+    Some(PathBuf::from(path))
+}
+
 struct ParsedLocation {
     path: String,
     line: u32,
@@ -3182,9 +3415,12 @@ pub mod test_support {
     pub struct ReceivedRequests {
         pub initialize: std::sync::Mutex<Vec<serde_json::Value>>,
         pub did_open: std::sync::Mutex<Vec<serde_json::Value>>,
+        pub did_change: std::sync::Mutex<Vec<serde_json::Value>>,
         pub did_close: std::sync::Mutex<Vec<serde_json::Value>>,
         pub document_symbol: std::sync::Mutex<Vec<serde_json::Value>>,
         pub references: std::sync::Mutex<Vec<serde_json::Value>>,
+        pub definitions: std::sync::Mutex<Vec<serde_json::Value>>,
+        pub type_definitions: std::sync::Mutex<Vec<serde_json::Value>>,
         pub shutdown: std::sync::Mutex<u32>,
         pub exit: std::sync::Mutex<u32>,
     }
@@ -3344,6 +3580,9 @@ pub mod test_support {
                 "textDocument/didOpen" => {
                     received.did_open.lock().unwrap().push(value.clone());
                 }
+                "textDocument/didChange" => {
+                    received.did_change.lock().unwrap().push(value.clone());
+                }
                 "textDocument/didClose" => {
                     received.did_close.lock().unwrap().push(value.clone());
                 }
@@ -3362,8 +3601,20 @@ pub mod test_support {
                     let result = canned.unwrap_or_else(|| serde_json::json!([]));
                     send_response(&write, id, result).await?;
                 }
-                "textDocument/references" => {
-                    received.references.lock().unwrap().push(value.clone());
+                "textDocument/references"
+                | "textDocument/definition"
+                | "textDocument/typeDefinition" => {
+                    match method.as_str() {
+                        "textDocument/definition" => {
+                            received.definitions.lock().unwrap().push(value.clone())
+                        }
+                        "textDocument/typeDefinition" => received
+                            .type_definitions
+                            .lock()
+                            .unwrap()
+                            .push(value.clone()),
+                        _ => received.references.lock().unwrap().push(value.clone()),
+                    }
                     let uri = params
                         .get("textDocument")
                         .and_then(|td| td.get("uri"))
@@ -3557,3 +3808,141 @@ mod initialization_options_tests {
 #[cfg(test)]
 #[path = "lsp_verification.rs"]
 mod verification;
+
+#[cfg(test)]
+mod definition_wire_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// The open-vs-change rule, pinned without a live server.
+    ///
+    /// `didChange` is dropped by a server that never received the matching
+    /// `didOpen`, so the identity answer silently disappears. The decision
+    /// must therefore be driven by the multiplexer's own record of what it
+    /// announced, not by whether the bridge happens to still hold the URI.
+    #[test]
+    fn identity_sync_opens_unknown_documents_and_changes_known_ones() {
+        // Never announced: the server must be told the document exists.
+        assert_eq!(
+            identity_sync(None, "hash-a"),
+            IdentitySync::Open { version: 1 }
+        );
+        // Announced with this exact content: nothing to send.
+        assert_eq!(
+            identity_sync(Some(&("hash-a".to_string(), 1)), "hash-a"),
+            IdentitySync::Current
+        );
+        // Announced with different content: a change, with the version
+        // advanced so the server accepts it.
+        assert_eq!(
+            identity_sync(Some(&("hash-a".to_string(), 1)), "hash-b"),
+            IdentitySync::Change { version: 2 }
+        );
+        assert_eq!(
+            identity_sync(Some(&("hash-a".to_string(), 7)), "hash-b"),
+            IdentitySync::Change { version: 8 }
+        );
+        // A cleared record (the server died) reads as "never announced":
+        // the next request must open, not change.
+        assert_eq!(
+            identity_sync(None, "hash-a"),
+            IdentitySync::Open { version: 1 }
+        );
+    }
+
+    #[tokio::test]
+    async fn definition_and_type_definition_use_the_existing_wire_transport() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("caller with spaces.rs");
+        tokio::fs::write(&path, "fn caller() {}\n").await.unwrap();
+        let server = test_support::FakeLspServer::bind().await.unwrap();
+        let target = dir.path().join("generated with spaces.rs");
+        server.set_references(&file_uri(&path), 0, 3, json!({
+            "uri": file_uri(&target),
+            "range": {"start": {"line": 7, "character": 11}, "end": {"line": 7, "character": 17}}
+        })).await;
+        let mut mux = LspMultiplexer::with_server_url(
+            dir.path(),
+            &server.host(),
+            server.port(),
+            &crate::tuning::RuntimeConfig::default(),
+        )
+        .await
+        .unwrap();
+        let handle = server.spawn();
+        for type_definition in [false, true] {
+            let locations = mux
+                .get_definitions(&path, 0, 3, type_definition)
+                .await
+                .unwrap();
+            assert_eq!(locations.len(), 1);
+            assert_eq!(locations[0].path, target);
+            assert_eq!((locations[0].line, locations[0].col), (7, 11));
+        }
+        assert_eq!(handle.received().definitions.lock().unwrap().len(), 1);
+        assert_eq!(handle.received().type_definitions.lock().unwrap().len(), 1);
+        assert!(mux
+            .get_definitions(&path, 0, 99, false)
+            .await
+            .unwrap()
+            .is_empty());
+        handle.shutdown().await;
+    }
+
+    /// The identity path re-opens a document only when its content changed,
+    /// and it must open (never "change") a document the server has not been
+    /// told about. Re-opening on every probe made each definition request
+    /// pay a full `didOpen`, and a `didChange` sent to a server that never
+    /// received the matching `didOpen` is silently ignored — the identity
+    /// answer then never arrives.
+    #[tokio::test]
+    async fn identity_document_sync_opens_once_and_changes_only_on_new_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("caller.rs");
+        tokio::fs::write(&path, "fn caller() {}\n").await.unwrap();
+        let server = test_support::FakeLspServer::bind().await.unwrap();
+        let target = dir.path().join("generated.rs");
+        server.set_references(&file_uri(&path), 0, 3, json!({
+            "uri": file_uri(&target),
+            "range": {"start": {"line": 7, "character": 11}, "end": {"line": 7, "character": 17}}
+        })).await;
+        let mut mux = LspMultiplexer::with_server_url(
+            dir.path(),
+            &server.host(),
+            server.port(),
+            &crate::tuning::RuntimeConfig::default(),
+        )
+        .await
+        .unwrap();
+        let handle = server.spawn();
+
+        // First sight of the URI: the server must learn the document exists.
+        mux.get_definitions(&path, 0, 3, false).await.unwrap();
+        assert_eq!(handle.received().did_open.lock().unwrap().len(), 1);
+        assert_eq!(handle.received().did_change.lock().unwrap().len(), 0);
+
+        // Same content: nothing to re-announce.
+        mux.get_definitions(&path, 0, 3, false).await.unwrap();
+        assert_eq!(handle.received().did_open.lock().unwrap().len(), 1);
+        assert_eq!(handle.received().did_change.lock().unwrap().len(), 0);
+
+        // Changed content: a change, not a second open.
+        tokio::fs::write(&path, "fn caller() { let x = 1; }\n")
+            .await
+            .unwrap();
+        mux.get_definitions(&path, 0, 3, false).await.unwrap();
+        assert_eq!(handle.received().did_open.lock().unwrap().len(), 1);
+        assert_eq!(handle.received().did_change.lock().unwrap().len(), 1);
+
+        // After the server dies and is restarted, the multiplexer's record
+        // of what it opened is gone. The next request must re-open the
+        // document — a `didChange` would reach a process that never
+        // received the matching `didOpen` and be ignored there.
+        mux.identity_documents.clear();
+        mux.get_definitions(&path, 0, 3, false).await.unwrap();
+        assert_eq!(handle.received().did_open.lock().unwrap().len(), 2);
+        assert_eq!(handle.received().did_change.lock().unwrap().len(), 1);
+
+        handle.shutdown().await;
+    }
+}

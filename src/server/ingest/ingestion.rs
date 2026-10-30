@@ -809,6 +809,17 @@ impl LainServer {
         if sensor_counts.total() > 0 {
             info!("Protocol sensors contributed {:?}", sensor_counts);
         }
+        if let Err(error) = crate::server::sensors::grpc_consumer_sensor::semantic::enrich(
+            self.ingest().graph(),
+            &self.ingest().config().workspace,
+            self.ingest().id_namespace(),
+            self.ingest().lsp_pool(),
+            &cancel,
+        )
+        .await
+        {
+            tracing::warn!("Rust RPC LSP enrichment unavailable: {error}");
+        }
 
         // 4. Temporal Analysis Phase: Co-changes
         if cancel.is_cancelled() {
@@ -1737,6 +1748,18 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<IndexOutcome, L
         if let Some(ref last) = last_commit {
             if last == &latest_commit {
                 info!("[federation] {:?} already up to date at {}", path, last);
+                if !mode.skips_lsp() {
+                    if let Some(pool) = lsp_pool {
+                        if let Err(error) =
+                            crate::server::sensors::grpc_consumer_sensor::semantic::enrich(
+                                graph, path, namespace, pool, cancel,
+                            )
+                            .await
+                        {
+                            tracing::warn!("Rust RPC LSP enrichment unavailable: {error}");
+                        }
+                    }
+                }
                 return Ok(IndexOutcome {
                     sensor_counts: crate::server::sensors::SensorCounts::default(),
                     sensor_reports: Vec::new(),
@@ -2053,6 +2076,20 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<IndexOutcome, L
             "[federation] {:?}: protocol sensors contributed {:?}",
             path, sensor_counts
         );
+    }
+
+    if !mode.skips_lsp() {
+        if let Some(pool) = lsp_pool {
+            if let Err(error) = crate::server::sensors::grpc_consumer_sensor::semantic::enrich(
+                graph, path, namespace, pool, &cancel,
+            )
+            .await
+            {
+                tracing::warn!("Rust RPC LSP enrichment unavailable: {error}");
+            }
+        }
+    } else {
+        graph.clear_rust_rpc_semantics();
     }
 
     // Co-change analysis — F2: use the `try_*` variant (same rationale

@@ -13,3 +13,10 @@ accessors:
 # Catalog comparison uses both generated module and type, plus an RPC name.
 client_module_template: "{service_snake}_client"
 client_type_template: "{service_camel}Client"
+
+tonic_dispatch_patterns:
+  - '\.unary\('
+  - '\.server_streaming\('
+  - '\.client_streaming\('
+  - '\.streaming\('
+rpc_path_pattern: 'PathAndQuery::from_static\("/(?P<service>[^/" ]+)/(?P<method>[^/" ]+)"\)'

@@ -213,6 +213,7 @@ pub struct StaleBinding {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfirmedBindingKey {
+    pub site: Option<String>,
     pub repo: RepoId,
     pub path: String,
     pub symbol: String,

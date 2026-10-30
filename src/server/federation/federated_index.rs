@@ -1451,35 +1451,44 @@ impl FederatedIndex {
             self.contract_node_ids.remove(&r);
         }
 
-        let (rust_nodes, rust_details) = crate::federation::contracts::rust_rpc::resolve(
-            self.backend.as_ref(),
-            |repo, path| {
-                let id = RepoId::new(repo).map_err(|e| LainError::InvalidRepoId(e.to_string()))?;
-                let Some(repo) = self.get_repo(&id) else {
-                    return Ok(None);
-                };
-                let root = repo.local_path();
-                let full = root.join(path);
-                // Graph paths and configuration are workspace-relative; do not
-                // follow a symlink out of the owning source checkout.
-                let full = match full.canonicalize() {
-                    Ok(p) => p,
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-                    Err(e) => return Err(e.into()),
-                };
-                if !full.starts_with(root.canonicalize()?) {
-                    return Err(LainError::Other(
-                        "Rust RPC source escaped repository".into(),
-                    ));
-                }
-                if std::fs::metadata(&full)?.len()
-                    > crate::federation::contracts::coverage::SIZE_CAP_BYTES
-                {
-                    return Err(LainError::Other("Rust RPC source exceeds size cap".into()));
-                }
-                Ok(Some(std::fs::read_to_string(full)?))
-            },
-        )?;
+        let (rust_nodes, rust_details) =
+            crate::federation::contracts::rust_rpc::resolve_with_semantics(
+                self.backend.as_ref(),
+                |repo, path| {
+                    let id =
+                        RepoId::new(repo).map_err(|e| LainError::InvalidRepoId(e.to_string()))?;
+                    let Some(repo) = self.get_repo(&id) else {
+                        return Ok(None);
+                    };
+                    let root = repo.local_path();
+                    let full = root.join(path);
+                    // Graph paths and configuration are workspace-relative; do not
+                    // follow a symlink out of the owning source checkout.
+                    let full = match full.canonicalize() {
+                        Ok(p) => p,
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                        Err(e) => return Err(e.into()),
+                    };
+                    if !full.starts_with(root.canonicalize()?) {
+                        return Err(LainError::Other(
+                            "Rust RPC source escaped repository".into(),
+                        ));
+                    }
+                    if std::fs::metadata(&full)?.len()
+                        > crate::federation::contracts::coverage::SIZE_CAP_BYTES
+                    {
+                        return Err(LainError::Other("Rust RPC source exceeds size cap".into()));
+                    }
+                    Ok(Some(std::fs::read_to_string(full)?))
+                },
+                |repo, path| {
+                    RepoId::new(repo)
+                        .ok()
+                        .and_then(|id| self.get_repo(&id))
+                        .map(|repo| repo.db().rust_rpc_semantics(path))
+                        .unwrap_or_default()
+                },
+            )?;
         contract_nodes.retain(|n| {
             !n.name
                 .starts_with(crate::server::sensors::grpc_consumer_sensor::RUST_RPC_PREFIX)

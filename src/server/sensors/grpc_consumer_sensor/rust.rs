@@ -47,9 +47,28 @@ pub struct RustGrpcConfig {
     #[serde(default)]
     pub async_constructors: Vec<String>,
     pub deny_methods: Vec<String>,
+    #[serde(default = "default_tonic_dispatch_patterns")]
+    pub tonic_dispatch_patterns: Vec<String>,
+    #[serde(default = "default_rpc_path_pattern")]
+    pub rpc_path_pattern: String,
     pub accessors: Vec<Accessor>,
     #[serde(skip)]
-    query: String,
+    pub(super) query: String,
+}
+
+fn default_tonic_dispatch_patterns() -> Vec<String> {
+    [
+        r"\.unary\(",
+        r"\.server_streaming\(",
+        r"\.client_streaming\(",
+        r"\.streaming\(",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+fn default_rpc_path_pattern() -> String {
+    r#"PathAndQuery::from_static\("/(?P<service>[^/"]+)/(?P<method>[^/"]+)"\)"#.into()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -98,6 +117,17 @@ impl RustGrpcConfig {
                     "Rust gRPC query missing @{capture}"
                 )));
             }
+        }
+        for pattern in &self.tonic_dispatch_patterns {
+            Regex::new(pattern)
+                .map_err(|e| LainError::Other(format!("Rust gRPC dispatch pattern: {e}")))?;
+        }
+        let path = Regex::new(&self.rpc_path_pattern)
+            .map_err(|e| LainError::Other(format!("Rust gRPC path pattern: {e}")))?;
+        if path.capture_names().flatten().collect::<Vec<_>>() != ["service", "method"] {
+            return Err(LainError::Other(
+                "Rust gRPC path pattern must define named service and method captures".into(),
+            ));
         }
         if self
             .accessors

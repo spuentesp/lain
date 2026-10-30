@@ -394,6 +394,15 @@ impl serde::Serialize for SortedIndexMap<'_> {
 
 #[derive(Clone)]
 pub struct GraphDatabase {
+    /// Revision-checked live LSP RPC evidence. Intentionally not persisted.
+    rust_rpc_semantics: Arc<
+        RwLock<
+            HashMap<
+                String,
+                Vec<crate::server::sensors::grpc_consumer_sensor::semantic::SemanticRpcEvidence>,
+            >,
+        >,
+    >,
     graph: Arc<RwLock<StableGraph<GraphNode, GraphEdge>>>,
     // The three secondary indexes are wrapped in `Arc` so that
     // `GraphDatabase::clone()` (the derive) shares the underlying
@@ -632,6 +641,26 @@ pub(crate) fn edge_identity_key(
 }
 
 impl GraphDatabase {
+    pub fn clear_rust_rpc_semantics(&self) {
+        self.rust_rpc_semantics.write().clear();
+    }
+    pub fn set_rust_rpc_semantics(
+        &self,
+        path: String,
+        evidence: Vec<crate::server::sensors::grpc_consumer_sensor::semantic::SemanticRpcEvidence>,
+    ) {
+        self.rust_rpc_semantics.write().insert(path, evidence);
+    }
+    pub fn rust_rpc_semantics(
+        &self,
+        path: &str,
+    ) -> Vec<crate::server::sensors::grpc_consumer_sensor::semantic::SemanticRpcEvidence> {
+        self.rust_rpc_semantics
+            .read()
+            .get(path)
+            .cloned()
+            .unwrap_or_default()
+    }
     pub fn new(memory_path: &Path) -> Result<Self, LainError> {
         let db = Self::empty(memory_path);
         if memory_path.exists() {
@@ -660,6 +689,7 @@ impl GraphDatabase {
 
     fn empty(memory_path: &Path) -> Self {
         Self {
+            rust_rpc_semantics: Arc::new(RwLock::new(HashMap::new())),
             graph: Arc::new(RwLock::new(StableGraph::new())),
             index_map: Arc::new(DashMap::new()),
             path_index: Arc::new(DashMap::new()),

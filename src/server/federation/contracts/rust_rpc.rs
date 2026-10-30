@@ -24,6 +24,8 @@ pub struct RustRpcDetail {
     pub error: Option<String>,
     pub provider_ids: Vec<String>,
     pub identity_rule: Option<String>,
+    pub semantic:
+        Option<crate::server::sensors::grpc_consumer_sensor::semantic::SemanticRpcEvidence>,
 }
 
 /// Re-read only files that indexing marked as Rust candidate sites. The reader
@@ -31,7 +33,20 @@ pub struct RustRpcDetail {
 /// A missing source/config is an explicit gap, never an old identity reused.
 pub fn resolve(
     backend: &dyn GraphBackend,
+    read: impl FnMut(&str, &str) -> Result<Option<String>, LainError>,
+) -> Result<(Vec<GraphNode>, BTreeMap<GlobalId, RustRpcDetail>), LainError> {
+    resolve_with_semantics(backend, read, |_, _| vec![])
+}
+
+pub fn resolve_with_semantics(
+    backend: &dyn GraphBackend,
     mut read: impl FnMut(&str, &str) -> Result<Option<String>, LainError>,
+    mut semantics: impl FnMut(
+        &str,
+        &str,
+    ) -> Vec<
+        crate::server::sensors::grpc_consumer_sensor::semantic::SemanticRpcEvidence,
+    >,
 ) -> Result<(Vec<GraphNode>, BTreeMap<GlobalId, RustRpcDetail>), LainError> {
     let mut markers = Vec::new();
     let mut catalog = BTreeSet::new();
@@ -66,8 +81,22 @@ pub fn resolve(
             let source = read(&key.0, &key.1)?.ok_or_else(|| {
                 LainError::NotFound(format!("Rust RPC source {}:{}", key.0, key.1))
             })?;
-            let candidates = detect_rust_grpc_candidates(&source, &key.1, &config)?;
-            Ok::<_, LainError>((config, candidates))
+            let mut candidates = detect_rust_grpc_candidates(&source, &key.1, &config)?;
+            let fingerprint = crate::server::sensors::grpc_consumer_sensor::semantic::config_hash(
+                yaml.as_deref(),
+                query.as_deref(),
+            );
+            let semantics: Vec<_> = semantics(&key.0, &key.1)
+                .into_iter()
+                .filter(|e| e.current(&source, &fingerprint))
+                .collect();
+            for evidence in &semantics {
+                candidates.retain(|c| rust_candidate_name(c) != evidence.site_name);
+                if let Some(candidate) = &evidence.candidate {
+                    candidates.push(candidate.clone());
+                }
+            }
+            Ok::<_, LainError>((config, candidates, semantics))
         })()
         .map_err(|e| e.to_string());
         files.insert(key, result);
@@ -87,15 +116,20 @@ pub fn resolve(
             error: None,
             provider_ids: vec![],
             identity_rule: None,
+            semantic: None,
         };
         match &files[&(id.repo_id().to_string(), node.path.clone())] {
             Err(error) => detail.error = Some(error.clone()),
-            Ok((config, candidates)) => {
+            Ok((config, candidates, semantics)) => {
+                detail.semantic = semantics.iter().find(|e| e.site_name == node.name).cloned();
                 if let Some(candidate) = candidates
                     .iter()
                     .find(|c| rust_candidate_name(c) == node.name)
                 {
-                    let keys = catalog_matches(candidate, config, &catalog);
+                    let mut keys = catalog_matches(candidate, config, &catalog);
+                    if let Some(key) = detail.semantic.as_ref().and_then(|e| e.rpc_key.as_ref()) {
+                        keys.retain(|candidate| candidate.to_string() == *key);
+                    }
                     detail.status = match keys.len() {
                         0 => "unknown_identity",
                         1 => "resolved",
@@ -105,7 +139,12 @@ pub fn resolve(
                     detail.candidate = Some(candidate.clone());
                     detail.compatible_keys = keys.iter().map(ToString::to_string).collect();
                     detail.identity_rule = Some(format!(
-                        "catalog module={:?}, type={:?}, protobuf Rust snake_case method={}",
+                        "{}; catalog module={:?}, type={:?}, protobuf Rust snake_case method={}",
+                        if detail.semantic.is_some() {
+                            "LSP method definition and tonic RPC path"
+                        } else {
+                            "syntax evidence"
+                        },
                         config.client_module_template,
                         config.client_type_template,
                         candidate.method
@@ -141,6 +180,12 @@ pub fn resolve(
                                 channel_host_part: HostPart::None,
                             }));
                     }
+                } else if detail.semantic.is_some() {
+                    detail.status = "unproven_definition".into();
+                    detail.error = Some(
+                        "LSP resolved this site without a unique generated tonic RPC definition"
+                            .into(),
+                    );
                 } else {
                     detail.error = Some(
                         "indexed site no longer has generated-client evidence; reindex required"

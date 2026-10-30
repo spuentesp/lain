@@ -161,32 +161,8 @@ pub fn scan_workspace_grpc_consumer(
     // Syntax-only anchors survive snapshot caching; identity evidence is
     // rebuilt from revision-pinned source at federation resolution time.
     for candidate in discover_rust_grpc_candidates(root)? {
-        let mut node = crate::server::sensors::util::synthetic_site_node(
-            rust_candidate_name(&candidate),
-            &candidate.site.path,
-            candidate.site.line as u32,
-            namespace,
-        );
-        let callers: Vec<_> = graph
-            .get_nodes_in_path(&node.path)
-            .into_iter()
-            .filter(|n| {
-                matches!(
-                    n.node_type,
-                    crate::schema::NodeType::Function | crate::schema::NodeType::Method
-                ) && n.line_end.is_some()
-                    && candidate.enclosing_name.as_deref() == Some(n.name.as_str())
-                    && candidate.enclosing_start_line.map(|l| l as u32 - 1) == n.line_start
-            })
-            .collect();
-        if let [caller] = callers.as_slice() {
-            node.container = Some(caller.name.clone());
-            all_edges.push(GraphEdge::new(
-                crate::schema::EdgeType::Calls,
-                caller.id.clone(),
-                node.id.clone(),
-            ));
-        }
+        let (node, edges) = rust_candidate_anchor(graph, &candidate, namespace);
+        all_edges.extend(edges);
         all_nodes.push(node);
         total += 1;
     }
@@ -225,6 +201,45 @@ pub fn scan_workspace_grpc_consumer(
     // this unconditionally.
     graph.replace_sensor_output(SensorOwner::GrpcConsumerSensor, &all_nodes, &all_edges)?;
     Ok(total)
+}
+
+pub mod semantic;
+
+/// Shared anchors let verified live definitions participate in the same call
+/// graph as syntax candidates without inventing a second protocol/node kind.
+fn rust_candidate_anchor(
+    graph: &GraphDatabase,
+    candidate: &RustGrpcCandidate,
+    namespace: &RepoNamespace,
+) -> (GraphNode, Vec<GraphEdge>) {
+    let mut edges = Vec::new();
+    let mut node = crate::server::sensors::util::synthetic_site_node(
+        rust_candidate_name(candidate),
+        &candidate.site.path,
+        candidate.site.line as u32,
+        namespace,
+    );
+    let callers: Vec<_> = graph
+        .get_nodes_in_path(&node.path)
+        .into_iter()
+        .filter(|n| {
+            matches!(
+                n.node_type,
+                crate::schema::NodeType::Function | crate::schema::NodeType::Method
+            ) && n.line_end.is_some()
+                && candidate.enclosing_name.as_deref() == Some(n.name.as_str())
+                && candidate.enclosing_start_line.map(|l| l as u32 - 1) == n.line_start
+        })
+        .collect();
+    if let [caller] = callers.as_slice() {
+        node.container = Some(caller.name.clone());
+        edges.push(GraphEdge::new(
+            crate::schema::EdgeType::Calls,
+            caller.id.clone(),
+            node.id.clone(),
+        ));
+    }
+    (node, edges)
 }
 
 /// Syntax anchors retain the byte offset so same-line receivers cannot collide.

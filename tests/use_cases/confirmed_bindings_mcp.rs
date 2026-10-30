@@ -878,3 +878,103 @@ async fn a_held_config_transaction_refuses_another_apply() {
     let retried = apply(&fixture.fed, json!([binding()]), false).await;
     assert_eq!(retried["data"]["applied"], true, "{retried}");
 }
+
+#[tokio::test]
+async fn exact_sites_in_one_symbol_can_bind_to_different_services() {
+    let fixture = Fixture::new().await;
+    let other = rpc_consumer(20);
+    let other_id = other.id.clone();
+    let repo_id = RepoId::new("billing").unwrap();
+    fixture
+        .fed
+        .get_repo(&repo_id)
+        .unwrap()
+        .db()
+        .insert_nodes_batch(std::slice::from_ref(&other))
+        .unwrap();
+    fixture
+        .fed
+        .register_contract_node_for_test(repo_id.clone(), other.id.clone());
+    fixture.fed.project_repo(&repo_id).await.unwrap();
+    fixture.fed.mark_contracts_dirty();
+    fixture.fed.rejoin_contracts_if_dirty().unwrap();
+
+    let status = HandlerStatus::for_test();
+    let mut entries = Vec::new();
+    for (consumer, service) in [(&fixture.consumer, "orders"), (&other_id, "backup")] {
+        let check = check_binding_handle(
+            &context(&fixture.fed, &status),
+            json!({
+                "snapshot": "live", "consumer": consumer,
+                "endpoint": {"service": service, "key": KEY}
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            check.structured["data"]["valid"], true,
+            "{}",
+            check.structured
+        );
+        let checked: Vec<ConfirmedBinding> =
+            serde_yaml::from_str(check.structured["data"]["bindings_entry"].as_str().unwrap())
+                .unwrap();
+        assert_eq!(checked[0].consumer.site.as_deref(), Some(consumer.as_str()));
+        entries.extend(checked);
+    }
+    let bindings = serde_json::to_value(&entries).unwrap();
+    let before = fixture.bytes();
+    let preview = apply(&fixture.fed, bindings.clone(), true).await;
+    assert_eq!(
+        preview["data"]["added_bindings"].as_array().unwrap().len(),
+        2,
+        "{preview}"
+    );
+    assert_eq!(fixture.bytes(), before);
+    let applied = apply(&fixture.fed, bindings.clone(), false).await;
+    assert_eq!(applied["data"]["applied"], true, "{applied}");
+    let repeated = apply(&fixture.fed, bindings, false).await;
+    assert_eq!(repeated["data"]["applied"], true, "{repeated}");
+    assert!(repeated["data"]["added_bindings"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    let reloaded = load(fixture.root.path(), "site-reloaded").await;
+    reloaded
+        .get_repo(&repo_id)
+        .unwrap()
+        .db()
+        .insert_nodes_batch(std::slice::from_ref(&other))
+        .unwrap();
+    reloaded.register_contract_node_for_test(repo_id.clone(), other.id);
+    reloaded.project_repo(&repo_id).await.unwrap();
+    reloaded.mark_contracts_dirty();
+    reloaded.rejoin_contracts_if_dirty().unwrap();
+    for fed in [fixture.fed.as_ref(), reloaded.as_ref()] {
+        let index = fed.contract_index().unwrap();
+        for (consumer, service) in [(&fixture.consumer, "orders"), (&other_id, "backup")] {
+            let id = GlobalId::parse(consumer).unwrap();
+            let resolutions = &index.consumers[&id];
+            let confirmed: Vec<_> = resolutions
+                .iter()
+                .filter(|r| {
+                    matches!(
+                        r.target,
+                        Some(ConsumerTarget::Binds {
+                            provenance: EdgeProvenance::Confirmed { .. },
+                            ..
+                        })
+                    )
+                })
+                .collect();
+            assert_eq!(confirmed.len(), 1);
+            assert_eq!(confirmed[0].bound_endpoints[0].0 .0, service);
+        }
+    }
+    let mut stale = binding();
+    stale["consumer"]["site"] = json!(rpc_consumer(999).id);
+    let before = fixture.bytes();
+    let refused = apply(&fixture.fed, json!([stale]), false).await;
+    assert!(refused["error"].is_object(), "{refused}");
+    assert_eq!(fixture.bytes(), before);
+}
