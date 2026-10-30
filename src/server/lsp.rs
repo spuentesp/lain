@@ -14,6 +14,35 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{oneshot, Mutex as AsyncMutex};
 use tracing::{debug, info, warn};
 
+/// Environment escape hatch to disable all LSP servers operator-wide.
+pub const DISABLE_LSP_ENV: &str = "LAIN_DISABLE_LSP";
+
+/// Default initializationOptions for language servers to minimize memory overhead
+/// and suppress heavy background tasks (like proc-macro expansion and build scripts in rust-analyzer).
+fn default_initialization_options_for(binary: &str) -> Option<serde_json::Value> {
+    match binary {
+        "rust-analyzer" => Some(serde_json::json!({
+            "procMacro": {
+                "enable": false
+            },
+            "cargo": {
+                "buildScripts": {
+                    "enable": false
+                },
+                "noDefaultFeatures": true
+            },
+            "checkOnSave": false,
+            "diagnostics": {
+                "enable": false
+            },
+            "files": {
+                "exclude": ["target", ".git"]
+            }
+        })),
+        _ => None,
+    }
+}
+
 /// Sentinel server id used when the multiplexer is wired to an external
 /// JSON-RPC endpoint (via [`LspMultiplexer::with_server_url`]). The
 /// `ensure_server` fast-path returns this id and the request methods
@@ -578,19 +607,21 @@ impl LspMultiplexer {
         for (ext, config) in LANGUAGE_MAP {
             registry.insert(ext.to_string(), config);
         }
-        // `LAIN_TEST_NO_LSP=1` is a test-only escape hatch that pre-populates
-        // `unavailable` with every registered binary. `ensure_server` short
-        // -circuits to `LainError::Lsp(... is missing)` instead of trying to
-        // spawn rust-analyzer / gopls / etc. Smoke tests that drive the
-        // scanner in-process (or via `Command::new(env!("CARGO_BIN_EXE_lain"))`)
-        // set this so the test outcome doesn't depend on whether the host
-        // happens to have rust-analyzer on PATH. Production never sets it.
+        // `LAIN_DISABLE_LSP=1` (or `LAIN_TEST_NO_LSP=1`) is an escape hatch that
+        // pre-populates `unavailable` with every registered binary.
+        // `ensure_server` short-circuits to `LainError::Lsp(... is missing)`
+        // instead of trying to spawn rust-analyzer / gopls / etc.
+        // `LAIN_DISABLE_LSP=1` is the operator-facing flag matching the
+        // `env_disables()` semantics of other LAIN_DISABLE_* knobs.
         let mut unavailable = HashSet::new();
-        if std::env::var("LAIN_TEST_NO_LSP")
+        let lsp_disabled = crate::server::ingest::background::env_disables(
+            std::env::var(DISABLE_LSP_ENV).ok().as_deref(),
+        ) || std::env::var("LAIN_TEST_NO_LSP")
             .ok()
             .filter(|v| !v.is_empty())
-            .is_some()
-        {
+            .is_some();
+
+        if lsp_disabled {
             for config in registry.values() {
                 unavailable.insert(config.binary.to_string());
             }
@@ -601,7 +632,7 @@ impl LspMultiplexer {
             poll_interval: Duration::from_millis(runtime.lsp_symbol_poll_interval_ms),
             registry,
             started: HashSet::new(),
-            unavailable: HashSet::new(),
+            unavailable,
             consecutive_failures: HashMap::new(),
             restart_budget: HashMap::new(),
             prewarm_state: HashMap::new(),
@@ -678,9 +709,13 @@ impl LspMultiplexer {
                 )));
             }
 
-            let lsp_config = LspServerConfig::new()
+            let mut lsp_config = LspServerConfig::new()
                 .command(&binary)
                 .root_path(self.workspace.clone());
+
+            if let Some(init_opts) = default_initialization_options_for(&binary) {
+                lsp_config = lsp_config.initialization_options(init_opts);
+            }
 
             let startup = async {
                 self.bridge.register_server(&binary, lsp_config).await?;
@@ -3271,6 +3306,77 @@ pub mod test_support {
             Ok(v) => Ok(v),
             Err(e) => Err(std::io::Error::other(e.to_string())),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn test_rust_analyzer_default_initialization_options() {
+        let opts = default_initialization_options_for("rust-analyzer")
+            .expect("rust-analyzer should have default options");
+        assert_eq!(opts["procMacro"]["enable"], false);
+        assert_eq!(opts["cargo"]["buildScripts"]["enable"], false);
+        assert_eq!(opts["cargo"]["noDefaultFeatures"], true);
+        assert_eq!(opts["checkOnSave"], false);
+        assert_eq!(opts["diagnostics"]["enable"], false);
+        let exclude = opts["files"]["exclude"].as_array().expect("array");
+        assert!(exclude.iter().any(|v| v == "target"));
+        assert!(exclude.iter().any(|v| v == ".git"));
+    }
+
+    #[test]
+    fn test_other_binary_default_initialization_options() {
+        assert!(default_initialization_options_for("gopls").is_none());
+        assert!(default_initialization_options_for("pylsp").is_none());
+    }
+
+    #[test]
+    fn test_disable_lsp_env_populates_unavailable() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let prev = std::env::var(DISABLE_LSP_ENV).ok();
+        std::env::set_var(DISABLE_LSP_ENV, "1");
+        let mux = LspMultiplexer::new(
+            Path::new("."),
+            &crate::tuning::RuntimeConfig::default(),
+        )
+        .unwrap();
+        match prev {
+            Some(v) => std::env::set_var(DISABLE_LSP_ENV, v),
+            None => std::env::remove_var(DISABLE_LSP_ENV),
+        }
+        assert!(mux.unavailable.contains("rust-analyzer"));
+        assert!(mux.unavailable.contains("gopls"));
+        assert!(mux.unavailable.contains("pylsp"));
+    }
+
+    #[test]
+    fn test_disable_lsp_env_explicit_zero_keeps_lsp_enabled() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let prev_disable = std::env::var(DISABLE_LSP_ENV).ok();
+        let prev_test_no = std::env::var("LAIN_TEST_NO_LSP").ok();
+        std::env::set_var(DISABLE_LSP_ENV, "0");
+        std::env::remove_var("LAIN_TEST_NO_LSP");
+        let mux = LspMultiplexer::new(
+            Path::new("."),
+            &crate::tuning::RuntimeConfig::default(),
+        )
+        .unwrap();
+        match prev_disable {
+            Some(v) => std::env::set_var(DISABLE_LSP_ENV, v),
+            None => std::env::remove_var(DISABLE_LSP_ENV),
+        }
+        match prev_test_no {
+            Some(v) => std::env::set_var("LAIN_TEST_NO_LSP", v),
+            None => std::env::remove_var("LAIN_TEST_NO_LSP"),
+        }
+        // When 0, not unavailable by default
+        assert!(!mux.unavailable.contains("rust-analyzer"));
     }
 }
 
