@@ -99,6 +99,12 @@ pub enum SensorOwner {
     /// `WritesTable` edges. A rescan replaces only its own previous
     /// output.
     SqlSensor,
+    /// The Django ORM sensor owns the `Table` nodes it mints (marked by
+    /// `util::DJANGO_TABLE_MARK` in `signature`), its synthetic
+    /// `orm-read:` consumer nodes, and the `ReadsTable` / `WritesTable`
+    /// edges it emits. Kept apart from [`Self::SqlSensor`] so neither
+    /// sensor's rescan retracts the other's tables.
+    DjangoOrmSensor,
     /// Phase E (spec §8.2): the legacy `proto_sensor` emits bare
     /// `Module` nodes with no contract fact. Those are owned here and
     /// retracted on every `scan_workspace`, so a service renamed away
@@ -254,6 +260,22 @@ fn derive_owner(
         // guard keeps pre-fix graphs working: their `TableConsumer`
         // facts ride real symbol nodes, which this sensor no longer
         // re-emits — retracting those would delete the symbol.
+        // The Django ORM sensor's tables carry a marker in `signature`;
+        // this arm must precede the catch-all below or `sql_sensor`
+        // would claim (and on every rescan retract) them.
+        (NodeType::Table, _)
+            if node.signature.as_deref()
+                == Some(crate::server::sensors::util::DJANGO_TABLE_MARK) =>
+        {
+            Some(SensorOwner::DjangoOrmSensor)
+        }
+        (_, Some(ContractFact::TableConsumer(_)))
+            if node
+                .name
+                .starts_with(crate::server::sensors::util::ORM_READ_PREFIX) =>
+        {
+            Some(SensorOwner::DjangoOrmSensor)
+        }
         (NodeType::Table, _) | (_, Some(ContractFact::Table(_))) => Some(SensorOwner::SqlSensor),
         (_, Some(ContractFact::TableConsumer(_)))
             if node
@@ -268,6 +290,13 @@ fn derive_owner(
         // RequestSchema/ResponseSchema edges on every run.
         (_, Some(ContractFact::RpcProvider(_))) => Some(SensorOwner::GrpcProviderSensor),
         (_, Some(ContractFact::RpcHandler(_))) => Some(SensorOwner::GrpcHandlerLinkSensor),
+        (NodeType::Function, _)
+            if node
+                .name
+                .starts_with(crate::server::sensors::grpc_consumer_sensor::RUST_RPC_PREFIX) =>
+        {
+            Some(SensorOwner::GrpcConsumerSensor)
+        }
         (_, Some(ContractFact::RpcConsumer(_))) => Some(SensorOwner::GrpcConsumerSensor),
         // Phase E (spec §8.3): same split for the GraphQL family.
         (_, Some(ContractFact::GraphqlProvider(_))) => Some(SensorOwner::GraphqlProviderSensor),
@@ -318,8 +347,62 @@ pub(crate) fn anchor_order(a: &GraphNode, b: &GraphNode) -> std::cmp::Ordering {
         .then_with(|| a.id.cmp(&b.id))
 }
 
+/// A second file that receives the same encoded snapshot as the primary
+/// checkpoint file, preceded by `prefix` (the federation envelope for
+/// `federated_graph.bin`). See [`GraphDatabase::save_to_disk_sync_mirrored`].
+pub(crate) struct PayloadMirror<'a> {
+    pub path: &'a Path,
+    pub prefix: &'a [u8],
+}
+
+/// Fan one encode out to the primary file and, when present, the mirror.
+struct Tee<'a, A: std::io::Write, B: std::io::Write> {
+    first: &'a mut A,
+    second: Option<&'a mut B>,
+}
+
+impl<A: std::io::Write, B: std::io::Write> std::io::Write for Tee<'_, A, B> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        // Both files must see every byte: write the whole slice to each.
+        self.first.write_all(buf)?;
+        if let Some(second) = self.second.as_mut() {
+            second.write_all(buf)?;
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.first.flush()?;
+        if let Some(second) = self.second.as_mut() {
+            second.flush()?;
+        }
+        Ok(())
+    }
+}
+
+/// The `index_map` entries, sorted by key, serialized as a map without
+/// copying a single id. Encodes exactly like the `BTreeMap<String, NodeIndex>`
+/// [`GraphDatabase::build_state`] builds: a map is its length, then its
+/// entries in order.
+struct SortedIndexMap<'a>(Vec<dashmap::mapref::multiple::RefMulti<'a, String, NodeIndex>>);
+
+impl serde::Serialize for SortedIndexMap<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_map(self.0.iter().map(|entry| (entry.key(), entry.value())))
+    }
+}
+
 #[derive(Clone)]
 pub struct GraphDatabase {
+    /// Revision-checked live LSP RPC evidence. Intentionally not persisted.
+    rust_rpc_semantics: Arc<
+        RwLock<
+            HashMap<
+                String,
+                Vec<crate::server::sensors::grpc_consumer_sensor::semantic::SemanticRpcEvidence>,
+            >,
+        >,
+    >,
     graph: Arc<RwLock<StableGraph<GraphNode, GraphEdge>>>,
     // The three secondary indexes are wrapped in `Arc` so that
     // `GraphDatabase::clone()` (the derive) shares the underlying
@@ -558,6 +641,26 @@ pub(crate) fn edge_identity_key(
 }
 
 impl GraphDatabase {
+    pub fn clear_rust_rpc_semantics(&self) {
+        self.rust_rpc_semantics.write().clear();
+    }
+    pub fn set_rust_rpc_semantics(
+        &self,
+        path: String,
+        evidence: Vec<crate::server::sensors::grpc_consumer_sensor::semantic::SemanticRpcEvidence>,
+    ) {
+        self.rust_rpc_semantics.write().insert(path, evidence);
+    }
+    pub fn rust_rpc_semantics(
+        &self,
+        path: &str,
+    ) -> Vec<crate::server::sensors::grpc_consumer_sensor::semantic::SemanticRpcEvidence> {
+        self.rust_rpc_semantics
+            .read()
+            .get(path)
+            .cloned()
+            .unwrap_or_default()
+    }
     pub fn new(memory_path: &Path) -> Result<Self, LainError> {
         let db = Self::empty(memory_path);
         if memory_path.exists() {
@@ -586,6 +689,7 @@ impl GraphDatabase {
 
     fn empty(memory_path: &Path) -> Self {
         Self {
+            rust_rpc_semantics: Arc::new(RwLock::new(HashMap::new())),
             graph: Arc::new(RwLock::new(StableGraph::new())),
             index_map: Arc::new(DashMap::new()),
             path_index: Arc::new(DashMap::new()),
@@ -2365,6 +2469,21 @@ impl GraphDatabase {
         out
     }
 
+    /// All `CallsGraphql` edges in the graph: `(provider_id, resolver_id)`
+    /// pairs. Used by `entry_point_sensor` to tag resolver functions as
+    /// `EntryKind::HttpHandler`: a GraphQL resolver runs because a request
+    /// reached the schema's endpoint, exactly as an HTTP handler does.
+    pub fn calls_graphql_pairs(&self) -> Vec<(String, String)> {
+        let graph = self.graph.read();
+        let mut out: Vec<(String, String)> = graph
+            .edge_references()
+            .filter(|e| e.weight().edge_type == EdgeType::CallsGraphql)
+            .map(|e| (graph[e.source()].id.clone(), graph[e.target()].id.clone()))
+            .collect();
+        out.sort();
+        out
+    }
+
     pub fn insert_co_change_edges(
         &self,
         pairs: &[(String, String, usize)],
@@ -2762,13 +2881,58 @@ impl GraphDatabase {
     }
 
     pub fn save_to_disk_sync(&self) -> Result<(), LainError> {
-        self.save_to_disk_sync_bytes().map(|_| ())
+        self.save_to_disk_sync_mirrored(None)
     }
 
-    /// Like [`Self::save_to_disk_sync`], but also returns the encoded
-    /// `GraphState` payload bytes so callers like `PetgraphBackend::save`
-    /// do not have to re-read the file from disk immediately after writing it.
-    pub(crate) fn save_to_disk_sync_bytes(&self) -> Result<Vec<u8>, LainError> {
+    /// Stream the snapshot into `out`: the bytes `encode_state(&build_state())`
+    /// returns, without cloning the graph or building the payload in memory.
+    ///
+    /// One `graph.read()` guard covers the whole encode, as in
+    /// [`Self::build_state`]: mutations hold `graph.write()` while they touch
+    /// `index_map`, `last_commit` and the publication stamp, so what is
+    /// written is one consistent snapshot. The cost is that a writer waits for
+    /// the encode instead of for a clone.
+    fn stream_snapshot<W: std::io::Write>(&self, out: &mut W) -> Result<(), LainError> {
+        let graph_guard = self.graph.read();
+        // Ordered like the `BTreeMap` `build_state` collects, so the same
+        // graph encodes to the same bytes. Holding the map's entries by
+        // reference (not copying every id) is safe under the graph guard:
+        // writers cannot reach `index_map` without `graph.write()`.
+        let mut entries: Vec<_> = self.index_map.iter().collect();
+        entries.sort_by(|a, b| a.key().cmp(b.key()));
+        let last_commit = self.last_commit.read();
+        let calls_published_for = self.calls_published_for.read();
+        persist::encode_state_to(
+            out,
+            &graph_guard,
+            SortedIndexMap(entries),
+            &last_commit,
+            &calls_published_for,
+        )
+        .map_err(|e| LainError::Database(e.to_string()))
+    }
+
+    /// The pre-streaming encode: clone the graph, build the whole payload in
+    /// memory. Kept for tests only, as the reference the streamed bytes must
+    /// equal and as the writer of "old format" files the loader must accept.
+    #[cfg(test)]
+    pub(crate) fn encode_snapshot_buffered(&self) -> Vec<u8> {
+        persist::encode_state(&self.build_state()).expect("encode")
+    }
+
+    /// Checkpoint the graph to `persistence_path`, streaming the encode to a
+    /// temp file and renaming it into place, with no full copy of the payload
+    /// in memory. With `mirror`, the same bytes (after `mirror.prefix`) go to
+    /// a second file in the same pass, published after the WAL step so the
+    /// order matches the old "save, then write the `.bin`" sequence.
+    ///
+    /// A failure at any point (encode error, full disk) drops the writers,
+    /// which removes their temp files: the previous good files stay as they
+    /// were and the retired WAL stays on disk for recovery.
+    pub(crate) fn save_to_disk_sync_mirrored(
+        &self,
+        mirror: Option<PayloadMirror<'_>>,
+    ) -> Result<(), LainError> {
         let _one_checkpoint_at_a_time = self.checkpoint_lock.lock();
         // Start the checkpoint under the graph write lock: every logging
         // mutator appends under that same lock, so after this point all
@@ -2788,17 +2952,32 @@ impl GraphDatabase {
                 .map_err(|e| LainError::Database(format!("wal close: {e}")))?;
             wal::rotate(&wal_path).map_err(|e| LainError::Database(format!("wal rotate: {e}")))?;
         }
-        let data = persist::encode_state(&self.build_state())
-            .map_err(|e| LainError::Database(e.to_string()))?;
-        crate::cli::io::write_file_atomic(&self.persistence_path, &data)
-            .map_err(|e| LainError::Database(e.to_string()))?;
+        let io_err = |e: std::io::Error| LainError::Database(e.to_string());
+        let mut main =
+            crate::cli::io::AtomicWriter::create(&self.persistence_path).map_err(io_err)?;
+        let mut mirrored = match &mirror {
+            Some(m) => {
+                let mut w = crate::cli::io::AtomicWriter::create(m.path).map_err(io_err)?;
+                std::io::Write::write_all(&mut w, m.prefix).map_err(io_err)?;
+                Some(w)
+            }
+            None => None,
+        };
+        self.stream_snapshot(&mut Tee {
+            first: &mut main,
+            second: mirrored.as_mut(),
+        })?;
+        main.commit().map_err(io_err)?;
         self.write_index_build_stamp()?;
         // The snapshot is durable and covers the retired log.
         if logging {
             wal::discard_prev(&wal_path)
                 .map_err(|e| LainError::Database(format!("wal discard: {e}")))?;
         }
-        Ok(data)
+        if let Some(w) = mirrored {
+            w.commit().map_err(io_err)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn validate_persisted_payload(data: &[u8]) -> Result<(), LainError> {
@@ -3033,6 +3212,121 @@ fn is_test_path(path: &str) -> bool {
     let stem = path.rsplit('/').next().unwrap_or(path);
     let stem = stem.strip_suffix(".rs").unwrap_or(stem);
     stem == "tests" || stem.ends_with("_tests") || stem.ends_with("_test")
+}
+
+#[cfg(test)]
+mod streaming_save_tests {
+    use super::*;
+
+    fn populated(dir: &Path) -> GraphDatabase {
+        // `new` takes the graph FILE: a directory would be read as a corrupt
+        // graph. It does not exist yet, so the database starts empty.
+        let g = GraphDatabase::new(&dir.join("graph.bin")).unwrap();
+        let nodes: Vec<GraphNode> = (0..60)
+            .map(|i| {
+                let kind = if i % 3 == 0 {
+                    NodeType::Class
+                } else {
+                    NodeType::Function
+                };
+                // Ids that sort differently from insertion order, so the
+                // sorted index map is actually exercised.
+                GraphNode::new(
+                    kind,
+                    format!("sym_{:02}", (i * 7) % 60),
+                    format!("src/m{}.rs", i % 5),
+                )
+            })
+            .collect();
+        g.insert_nodes_batch(&nodes).unwrap();
+        let edges: Vec<GraphEdge> = nodes
+            .windows(2)
+            .map(|w| GraphEdge::new(EdgeType::Calls, w[0].id.clone(), w[1].id.clone()))
+            .collect();
+        g.insert_edges_batch(&edges).unwrap();
+        g
+    }
+
+    fn streamed(g: &GraphDatabase) -> Vec<u8> {
+        let mut out = Vec::new();
+        g.stream_snapshot(&mut out).unwrap();
+        out
+    }
+
+    fn temp_files_in(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".tmp."))
+            .collect()
+    }
+
+    /// The on-disk format must not move: the streamed encode is byte-for-byte
+    /// what the buffered encoder produced.
+    #[test]
+    fn the_streamed_snapshot_is_byte_identical_to_the_buffered_encode() {
+        let tmp = tempfile::tempdir().unwrap();
+        let g = populated(tmp.path());
+        assert_eq!(streamed(&g), g.encode_snapshot_buffered());
+    }
+
+    #[test]
+    fn an_empty_graph_streams_the_same_bytes_too() {
+        let tmp = tempfile::tempdir().unwrap();
+        let g = GraphDatabase::new(&tmp.path().join("graph.bin")).unwrap();
+        assert_eq!(streamed(&g), g.encode_snapshot_buffered());
+    }
+
+    /// Both files get the whole snapshot in one pass; the mirror is the
+    /// prefix then exactly the primary's bytes.
+    #[test]
+    fn a_mirrored_checkpoint_writes_both_files_with_identical_payloads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let g = populated(tmp.path());
+        let mirror_dir = tempfile::tempdir().unwrap();
+        let mirror_path = mirror_dir.path().join("copy.bin");
+        g.save_to_disk_sync_mirrored(Some(PayloadMirror {
+            path: &mirror_path,
+            prefix: b"HDR-8-BY",
+        }))
+        .unwrap();
+
+        let primary = std::fs::read(&g.persistence_path).unwrap();
+        let mirrored = std::fs::read(&mirror_path).unwrap();
+        assert_eq!(primary, g.encode_snapshot_buffered());
+        assert_eq!(&mirrored[..8], b"HDR-8-BY");
+        assert_eq!(&mirrored[8..], primary.as_slice());
+        assert!(temp_files_in(mirror_dir.path()).is_empty());
+        assert!(temp_files_in(g.persistence_path.parent().unwrap()).is_empty());
+    }
+
+    /// A checkpoint that cannot finish must not touch the files already on
+    /// disk, and must not leave its temp file behind.
+    #[test]
+    fn a_failed_checkpoint_keeps_the_previous_files_and_leaves_no_temp() {
+        let tmp = tempfile::tempdir().unwrap();
+        let g = populated(tmp.path());
+        std::fs::write(&g.persistence_path, b"PREVIOUS-GOOD").unwrap();
+        // The mirror's parent is a regular file, so opening it fails after
+        // the primary temp file already exists.
+        let blocker = tmp.path().join("blocker");
+        std::fs::write(&blocker, b"x").unwrap();
+        let bad_mirror = blocker.join("copy.bin");
+
+        let err = g
+            .save_to_disk_sync_mirrored(Some(PayloadMirror {
+                path: &bad_mirror,
+                prefix: b"HDR-8-BY",
+            }))
+            .unwrap_err();
+        assert!(matches!(err, LainError::Database(_)), "{err:?}");
+        assert_eq!(
+            std::fs::read(&g.persistence_path).unwrap(),
+            b"PREVIOUS-GOOD"
+        );
+        assert!(temp_files_in(g.persistence_path.parent().unwrap()).is_empty());
+    }
 }
 
 #[cfg(test)]

@@ -150,6 +150,7 @@ fn round_trip_constructed_index_through_partial_eq() {
 #[test]
 fn stale_binding_constructs_with_reason() {
     let key = ConfirmedBindingKey {
+        site: None,
         repo: RepoId::new("billing").unwrap(),
         path: "src/x.py".into(),
         symbol: "create_order".into(),

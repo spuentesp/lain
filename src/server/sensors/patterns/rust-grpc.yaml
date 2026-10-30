@@ -1,0 +1,22 @@
+# Replaced as a whole by <repo>/.lain/patterns/rust-grpc.yaml.
+# Identity requires a qualified generated module path, never a Client suffix alone.
+generated_type_pattern: '(^|::)[a-zA-Z_][a-zA-Z_0-9]*_client::[A-Z][a-zA-Z_0-9]*Client$'
+constructors: [new, with_interceptor, with_origin]
+async_constructors: [connect]
+deny_methods: [clone, ready, send_compressed, accept_compressed, max_decoding_message_size, max_encoding_message_size]
+# Cross-file accessors are opt-in, keyed by the receiver's qualified type.
+# Each entry needs receiver_type, method, return_type, provenance.
+accessors: []
+
+# Catalog comparison uses both generated module and type, plus an RPC name.
+client_module_template: "{service_snake}_client"
+client_type_template: "{service_camel}Client"
+
+# Live LSP definition validation. These are regexes over the compacted generated
+# method body and can be replaced in a repository's rust-grpc.yaml override.
+tonic_dispatch_patterns:
+  - '\.unary\('
+  - '\.server_streaming\('
+  - '\.client_streaming\('
+  - '\.streaming\('
+rpc_path_pattern: 'PathAndQuery::from_static\("/(?P<service>[^/" ]+)/(?P<method>[^/" ]+)"\)'

@@ -95,6 +95,7 @@ fn federation_config(fix: &Fixture) -> FederationConfig {
         ("platform", "platform"),
     ] {
         repos.push(RepoConfig {
+            packages: Vec::new(),
             id: id.to_string(),
             source: SourceConfig::WorkspaceDir {
                 path: fix.repos_root.join(dirname),
@@ -106,6 +107,7 @@ fn federation_config(fix: &Fixture) -> FederationConfig {
         max_concurrent_indexers: 2,
         ready_threshold: 1.0,
         parse_cache_mb: 0,
+        params: Default::default(),
         share: true,
         git_sensor: None,
         repos,

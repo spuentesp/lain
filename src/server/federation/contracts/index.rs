@@ -40,6 +40,8 @@ pub struct ContractIndex {
     pub stale_bindings: Vec<StaleBinding>,
     pub external: BTreeMap<String, u32>,
     pub unnormalized: Vec<GlobalId>,
+    /// Rebuilt from live/pinned source. Never serialized or cached as evidence.
+    pub rust_rpcs: BTreeMap<GlobalId, super::rust_rpc::RustRpcDetail>,
 }
 
 impl ContractIndex {
@@ -211,6 +213,7 @@ pub struct StaleBinding {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfirmedBindingKey {
+    pub site: Option<String>,
     pub repo: RepoId,
     pub path: String,
     pub symbol: String,

@@ -483,6 +483,7 @@ impl ContractJoiner {
                 .then_with(|| a.consumer.path.cmp(&b.consumer.path))
                 .then_with(|| a.consumer.symbol.cmp(&b.consumer.symbol))
                 .then_with(|| a.consumer.key.cmp(&b.consumer.key))
+                .then_with(|| a.consumer.site.cmp(&b.consumer.site))
         });
 
         // Build the index.
@@ -618,6 +619,7 @@ impl ContractJoiner {
             stale_bindings,
             external,
             unnormalized,
+            rust_rpcs: BTreeMap::new(),
         };
         JoinOutput {
             binds,
@@ -719,7 +721,7 @@ impl CompiledHttpClients {
             .map(|e| CompiledHttpClient {
                 pattern: e.call.clone(),
                 service: ServiceName(e.service.clone()),
-                method: e.method.as_ref().and_then(|m| parse_method(m)),
+                method: e.method.as_ref().and_then(|m| HttpMethod::parse(m)),
                 path_arg: e.path_arg,
             })
             .collect();
@@ -769,25 +771,11 @@ fn compile_http_clients(config: &ContractFederationConfig) -> CompiledHttpClient
         .map(|e| CompiledHttpClient {
             pattern: e.call.clone(),
             service: ServiceName(e.service.clone()),
-            method: e.method.as_ref().and_then(|m| parse_method(m)),
+            method: e.method.as_ref().and_then(|m| HttpMethod::parse(m)),
             path_arg: e.path_arg,
         })
         .collect();
     CompiledHttpClients { entries }
-}
-
-pub(super) fn parse_method(s: &str) -> Option<HttpMethod> {
-    Some(match s {
-        "GET" => HttpMethod::Get,
-        "POST" => HttpMethod::Post,
-        "PUT" => HttpMethod::Put,
-        "PATCH" => HttpMethod::Patch,
-        "DELETE" => HttpMethod::Delete,
-        "HEAD" => HttpMethod::Head,
-        "OPTIONS" => HttpMethod::Options,
-        "ANY" => HttpMethod::Any,
-        _ => return None,
-    })
 }
 
 /// `ContractKey::from_str` lives on the type, but the joiner

@@ -92,15 +92,26 @@ pub struct HttpRoute {
 fn extract_routes(pattern: &RoutePattern, content: &str, file_path: &str) -> Vec<HttpRoute> {
     const HANDLER_LOOKAHEAD: usize = 6;
 
+    let file_derived_path = if let Some(source) = pattern.source() {
+        let Some(p) = route_path_from_source(file_path, source) else {
+            return Vec::new();
+        };
+        p
+    } else {
+        None
+    };
+
     let lines: Vec<&str> = content.lines().collect();
     let mut routes = Vec::new();
 
     for (idx, line) in lines.iter().enumerate() {
-        let Some(path) = pattern
-            .path_regex()
-            .captures(line)
-            .and_then(|c| c.get(1))
+        let Some(caps) = pattern.path_regex().captures(line) else {
+            continue;
+        };
+        let Some(path) = caps
+            .get(1)
             .map(|m| m.as_str().to_string())
+            .or_else(|| file_derived_path.clone())
         else {
             continue;
         };
@@ -113,7 +124,7 @@ fn extract_routes(pattern: &RoutePattern, content: &str, file_path: &str) -> Vec
             .and_then(|re| re.captures(line))
             .and_then(|c| c.get(1))
             .map(|m| m.as_str().to_uppercase())
-            .map(method_from_str)
+            .map(|v| HttpMethod::parse(&v).unwrap_or(HttpMethod::Any))
             .unwrap_or_else(|| pattern.default_method());
 
         // Prefer a handler on the declaring line (Gin, Express);
@@ -144,6 +155,7 @@ fn extract_routes(pattern: &RoutePattern, content: &str, file_path: &str) -> Vec
             continue;
         }
 
+        let (method, path) = split_method_prefix(method, path);
         routes.push(HttpRoute {
             method,
             path,
@@ -155,16 +167,54 @@ fn extract_routes(pattern: &RoutePattern, content: &str, file_path: &str) -> Vec
     routes
 }
 
-fn method_from_str(s: String) -> HttpMethod {
-    match s.as_str() {
-        "GET" => HttpMethod::Get,
-        "POST" => HttpMethod::Post,
-        "PUT" => HttpMethod::Put,
-        "PATCH" => HttpMethod::Patch,
-        "DELETE" => HttpMethod::Delete,
-        "HEAD" => HttpMethod::Head,
-        "OPTIONS" => HttpMethod::Options,
-        _ => HttpMethod::Any,
+/// A verbless route whose path begins with an HTTP method (`GET /health`)
+/// takes that method. Go 1.22 mux patterns and tracing labels both carry the
+/// verb this way; the route itself is the path after it.
+fn split_method_prefix(method: HttpMethod, path: String) -> (HttpMethod, String) {
+    if method != HttpMethod::Any {
+        return (method, path);
+    }
+    if let Some((verb, rest)) = path.split_once(' ') {
+        match HttpMethod::parse(verb) {
+            Some(m) if m != HttpMethod::Any && rest.starts_with('/') => {
+                return (m, rest.to_string());
+            }
+            _ => {}
+        }
+    }
+    (method, path)
+}
+
+#[cfg(test)]
+mod method_prefix_tests {
+    use super::*;
+
+    #[test]
+    fn a_verbless_route_with_a_leading_method_takes_it() {
+        assert_eq!(
+            split_method_prefix(HttpMethod::Any, "GET /health".into()),
+            (HttpMethod::Get, "/health".into())
+        );
+    }
+
+    #[test]
+    fn a_route_with_its_own_verb_or_a_plain_path_is_unchanged() {
+        assert_eq!(
+            split_method_prefix(HttpMethod::Post, "GET /x".into()),
+            (HttpMethod::Post, "GET /x".into())
+        );
+        assert_eq!(
+            split_method_prefix(HttpMethod::Any, "/users".into()),
+            (HttpMethod::Any, "/users".into())
+        );
+    }
+
+    #[test]
+    fn a_method_word_without_a_path_is_not_split() {
+        assert_eq!(
+            split_method_prefix(HttpMethod::Any, "GET health".into()),
+            (HttpMethod::Any, "GET health".into())
+        );
     }
 }
 
@@ -230,7 +280,7 @@ pub fn nextjs_app_routes(path: &std::path::Path, content: &str) -> Vec<HttpRoute
             continue;
         };
         routes.push(HttpRoute {
-            method: method_from_str(verb.to_string()),
+            method: HttpMethod::parse(verb).unwrap_or(HttpMethod::Any),
             path: url_path.clone(),
             handler_path: path.to_string_lossy().to_string(),
             handler_name: verb.to_string(),
@@ -238,6 +288,50 @@ pub fn nextjs_app_routes(path: &std::path::Path, content: &str) -> Vec<HttpRoute
         });
     }
     routes
+}
+
+/// Check `file_path` against a pattern's `source` filter, and derive a
+/// file-based route path when `source` is a directory prefix (ends with `/`).
+///
+/// - For a file filter like `config/routes.rb`, returns `Some(None)` when
+///   `file_path` matches and `None` otherwise.
+/// - For a directory prefix like `pages/api/`, returns `Some(Some(url_path))`
+///   where `pages/api/x/y.ts` maps to `/api/x/y` and `pages/api/x/index.ts`
+///   maps to `/api/x` (reusing [`nextjs_segment`] for dynamic segments).
+fn route_path_from_source(file_path: &str, source: &str) -> Option<Option<String>> {
+    let normalized = file_path.replace('\\', "/");
+    let source = source.trim_start_matches('/');
+    if source.is_empty() {
+        return None;
+    }
+    let slashed = format!("/{source}");
+    if source.ends_with('/') {
+        let rest = normalized
+            .rsplit_once(&slashed)
+            .map(|(_, r)| r)
+            .or_else(|| normalized.strip_prefix(source))?;
+        let (stem, _ext) = rest.rsplit_once('.')?;
+        let stem = if stem == "index" {
+            ""
+        } else {
+            stem.strip_suffix("/index").unwrap_or(stem)
+        };
+        let trimmed = source.trim_end_matches('/');
+        let base_seg = trimmed.rsplit_once('/').map(|(_, b)| b).unwrap_or(trimmed);
+        let url_path = std::iter::once(format!("/{base_seg}"))
+            .chain(
+                stem.split('/')
+                    .filter(|seg| !seg.is_empty())
+                    .map(nextjs_segment),
+            )
+            .collect::<Vec<_>>()
+            .join("/");
+        Some(Some(url_path))
+    } else if normalized == source || normalized.ends_with(&slashed) {
+        Some(None)
+    } else {
+        None
+    }
 }
 
 /// The directory between `app/` and the `route.<ext>` file, or `None` for any
@@ -362,6 +456,12 @@ fn decorator_routes_with_queries(
         // the regex missed. An empty body (just a comment line)
         // skips tree-sitter entirely. The pre-parsed tree is
         // reused — `parse_for_lang` ran exactly once above.
+        if pattern
+            .source()
+            .is_some_and(|src| route_path_from_source(&path.to_string_lossy(), src).is_none())
+        {
+            continue;
+        }
         if let Some(ts) =
             try_treesitter_extract(patterns, key, content, path, parsed_tree.as_ref(), queries)
         {
@@ -504,7 +604,7 @@ fn try_treesitter_extract(
         };
 
         let method = verb_text
-            .map(|v| method_from_str(v.to_uppercase()))
+            .map(|v| HttpMethod::parse(&v.to_uppercase()).unwrap_or(HttpMethod::Any))
             .unwrap_or(HttpMethod::Any);
 
         let line = path_idx
@@ -512,9 +612,10 @@ fn try_treesitter_extract(
             .map(|n| n.start_position().row as u32 + 1)
             .unwrap_or(1);
 
+        let (method, route_path) = split_method_prefix(method, strip_quotes(path_text));
         routes.push(HttpRoute {
             method,
-            path: strip_quotes(path_text),
+            path: route_path,
             handler_path: path.to_string_lossy().into_owned(),
             handler_name: handler_text.to_string(),
             line,
@@ -941,6 +1042,109 @@ mod tests {
         assert_eq!(r[0].handler_name, "loginHandler");
     }
 
+    /// A logging call or a header setter is not a route, even though it
+    /// has the `obj.name('string', identifier)` shape. The live NAT UI run
+    /// turned `console.error('ERROR: …', err)` and
+    /// `headers.set('x-session-id', id)` into `ANY` routes.
+    #[test]
+    fn logging_and_header_calls_are_not_routes() {
+        let ts = "\
+console.error('ERROR: Invalid NEXT_INTERNAL_URL format:', target);
+response.headers.set('x-session-id', sessionId);
+";
+        let r = scan_file_for_routes(
+            std::path::Path::new("proxy/server.ts"),
+            ts,
+            Patterns::patterns(),
+        );
+        assert!(r.is_empty(), "non-route calls captured as routes: {r:?}");
+    }
+
+    /// Next.js pages-router API routes: `pages/api/mcp/clients.ts` serves
+    /// `/api/mcp/clients`. The live NAT UI has `pages/api/mcp/clients.ts`,
+    /// and its handler is the default export.
+    #[test]
+    fn nextjs_pages_api_files_are_routes() {
+        let src = "export default async function handler(req, res) { res.json({}); }\n";
+        let r = scan_file_for_routes(
+            std::path::Path::new("pages/api/mcp/clients.ts"),
+            src,
+            Patterns::patterns(),
+        );
+        assert_eq!(r.len(), 1, "pages/api file should be a route: {r:?}");
+        assert_eq!(r[0].path, "/api/mcp/clients");
+        assert_eq!(r[0].method, HttpMethod::Any);
+    }
+
+    /// Dynamic segments and the `src/` prefix: `src/pages/api/[id].ts`
+    /// serves `/api/:id`.
+    #[test]
+    fn nextjs_pages_api_dynamic_segments_and_src_prefix() {
+        let src = "export default function handler(req, res) {}\n";
+        let r = scan_file_for_routes(
+            std::path::Path::new("src/pages/api/[id].ts"),
+            src,
+            Patterns::patterns(),
+        );
+        assert_eq!(r.len(), 1, "{r:?}");
+        assert_eq!(r[0].path, "/api/:id");
+    }
+
+    /// Pages outside `pages/api` are not endpoints, and a helper module
+    /// under `pages/api` without a default export is not one either.
+    #[test]
+    fn nextjs_non_api_pages_and_helpers_are_not_routes() {
+        let page = "export default function Home() { return null; }\n";
+        assert!(scan_file_for_routes(
+            std::path::Path::new("pages/index.tsx"),
+            page,
+            Patterns::patterns()
+        )
+        .is_empty());
+        let helper = "export function parse(x) { return x; }\n";
+        assert!(scan_file_for_routes(
+            std::path::Path::new("pages/api/util.ts"),
+            helper,
+            Patterns::patterns()
+        )
+        .is_empty());
+    }
+
+    /// A repository can override or disable `nextjs-pages-route` through
+    /// `.lain/patterns/`.
+    #[test]
+    fn nextjs_pages_route_is_configurable_through_patterns() {
+        let root = tempfile::tempdir().unwrap();
+        let overrides = root.path().join(".lain/patterns");
+        std::fs::create_dir_all(&overrides).unwrap();
+        std::fs::write(
+            overrides.join("disable-nextjs-pages.yaml"),
+            "languages:\n  tsjs:\n    - id: nextjs-pages-route\n      kind: route\n",
+        )
+        .unwrap();
+        let patterns = Patterns::with_overrides(root.path()).unwrap();
+        let src = "export default function handler(req, res) {}\n";
+        let r = scan_file_for_routes(
+            std::path::Path::new("pages/api/mcp/clients.ts"),
+            src,
+            &patterns,
+        );
+        assert!(
+            r.is_empty(),
+            "overriding nextjs-pages-route without a path_regex disables it: {r:?}"
+        );
+    }
+
+    /// A real Express route still is one after the verb whitelist.
+    #[test]
+    fn express_route_with_a_path_is_still_a_route() {
+        let ts = "app.get(\"/api/items\", listItems);\n";
+        let r = scan_file_for_routes(std::path::Path::new("server.ts"), ts, Patterns::patterns());
+        assert_eq!(r.len(), 1, "express GET route should be found: {r:?}");
+        assert_eq!(r[0].method, HttpMethod::Get);
+        assert_eq!(r[0].path, "/api/items");
+    }
+
     #[test]
     fn gin_routes_work_with_any_receiver_name() {
         for src in [
@@ -1343,6 +1547,7 @@ async def update_order(id):
         );
     }
 
+    #[test]
     fn nextjs_app_route_path_comes_from_the_file_and_verb_from_the_export() {
         let r = nextjs_app_routes(
             std::path::Path::new("src/app/api/auth/login/route.ts"),

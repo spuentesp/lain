@@ -173,7 +173,12 @@ pub async fn get_call_chain(
         // Calls only: following Contains / CoChangedWith / Pattern edges
         // reported "app.py → helper" (a file containing a function) as a
         // call chain.
-        let is_call = |t: &EdgeType| matches!(t, EdgeType::Calls | EdgeType::CallsHttp);
+        let is_call = |t: &EdgeType| {
+            matches!(
+                t,
+                EdgeType::Calls | EdgeType::CallsHttp | EdgeType::CallsGraphql
+            )
+        };
         let mut targets = HashSet::new();
         if let Ok(edges) = graph.get_edges_from(&current_id) {
             for e in edges.into_iter().filter(|e| is_call(&e.edge_type)) {

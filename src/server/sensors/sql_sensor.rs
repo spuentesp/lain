@@ -926,7 +926,11 @@ fn extract_string_literal(s: &str) -> Option<String> {
 /// "typed traversal"); falls back to the file node for module-
 /// level SQL; returns `None` when neither exists (the sensor
 /// then skips the edge).
-fn enclosing_or_file(graph: &GraphDatabase, graph_path_str: &str, line: u32) -> Option<String> {
+pub(crate) fn enclosing_or_file(
+    graph: &GraphDatabase,
+    graph_path_str: &str,
+    line: u32,
+) -> Option<String> {
     if let Some(sym) = crate::server::sensors::util::enclosing_symbol(graph, graph_path_str, line) {
         return Some(sym.id.clone());
     }

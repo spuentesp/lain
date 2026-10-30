@@ -1,0 +1,22 @@
+# Snapshot-specific cross-file evidence; see README.md and provenance.json.
+# Install as <repo>/.lain/patterns/rust-grpc.yaml to enable this mapping.
+generated_type_pattern: '(^|::)[a-zA-Z_][a-zA-Z_0-9]*_client::[A-Z][a-zA-Z_0-9]*Client$'
+constructors: [new, with_interceptor, with_origin]
+async_constructors: [connect]
+deny_methods: [clone, ready, send_compressed, accept_compressed, max_decoding_message_size, max_encoding_message_size]
+accessors:
+  - receiver_type: openshell_sdk::OpenShellClient
+    method: raw_grpc
+    return_type: openshell_core::proto::open_shell_client::OpenShellClient
+    provenance: 'NVIDIA/OpenShell@6648bd0c290efbc41ba131ee9831ee45cd431f94 crates/openshell-sdk/src/client.rs:99-104 returns AuthedGrpcClient; src/raw.rs:22 reexports generated OpenShellClient as GrpcClient; src/raw.rs:39-44 aliases AuthedGrpcClient to GrpcClient<InterceptedService<Channel, EdgeAuthInterceptor>>'
+
+# Catalog comparison uses both generated module and type, plus an RPC name.
+client_module_template: "{service_snake}_client"
+client_type_template: "{service_camel}Client"
+
+tonic_dispatch_patterns:
+  - '\.unary\('
+  - '\.server_streaming\('
+  - '\.client_streaming\('
+  - '\.streaming\('
+rpc_path_pattern: 'PathAndQuery::from_static\("/(?P<service>[^/" ]+)/(?P<method>[^/" ]+)"\)'

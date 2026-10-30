@@ -51,7 +51,9 @@ fn main() -> Result<()> {
             workspace,
             no_process_attribution,
             embedding_model,
+            params,
         }) => {
+            lain::server::federation::config::set_run_param_overrides(&params)?;
             // The server is the only subcommand that needs a tokio
             // runtime. Build one on demand rather than wrapping the
             // whole binary.
@@ -177,6 +179,7 @@ fn main() -> Result<()> {
         }) => lain::cli::init::run_init(workspace.as_deref(), force, print),
         Some(Commands::Hooks { action }) => lain::cli::dispatch::run(action),
         Some(Commands::Schema { action }) => lain::cli::schema::run(action),
+        Some(Commands::Models { action }) => lain::cli::models::run(action),
         Some(Commands::Oneshot {
             workspace,
             tool,
@@ -259,7 +262,9 @@ fn main() -> Result<()> {
             config,
             workspace,
             verbose,
+            params,
         }) => {
+            lain::server::federation::config::set_run_param_overrides(&params)?;
             // `reindex` rebuilds the federation backend, which fans
             // out into parallel per-repo indexing tasks inside the
             // loader — same shape as `server`, so reuse the multi-thread

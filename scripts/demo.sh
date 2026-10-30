@@ -295,19 +295,25 @@ printf '  answering in %s ms, subject repo indexed in %s ms\n' "$BOOT_MS" "$INDE
 # ══ 1. Server + surface ═══════════════════════════════════════════════
 section "1. Server and advertised surface"
 
-TOOL_COUNT=$(_parse_mcp_resp "import json,sys; print(len(json.load(sys.stdin)['result']['tools']))" \
+TOOL_STATS=$(_parse_mcp_resp "import json,sys; t=json.load(sys.stdin)['result']['tools']; print(len(t), 1 if any(x['name']=='semantic_search' for x in t) else 0)" \
   -s -m 30 -X POST "$MCP" -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}')
-# The 13 contract-federation tools (PR 13) are model-independent and
-# always advertised on `full` profile. semantic_search toggles with
-# the embedding model: present when MODEL_ARGS is set, absent when
-# it is not.
-if [ -n "${MODEL_ARGS[*]:-}" ]; then
-  check "tools/list advertises the full surface" "94" "$TOOL_COUNT"
-else
-  # Wishlist #9: a tool that cannot answer is not offered.
-  check "tools/list hides semantic_search with no model" "93" "$TOOL_COUNT"
-fi
+TOOL_COUNT=${TOOL_STATS%% *}
+SEMANTIC_ADVERTISED=${TOOL_STATS##* }
+# On the `full` profile every registered tool is advertised, except the
+# ones that cannot answer here. `semantic_search` is the only one that
+# toggles (wishlist #9: a tool that cannot answer is not offered), and
+# it can answer only when an embedding model is loaded. The catalog
+# default may be installed on a developer machine even when MODEL_ARGS
+# is empty, so its presence is measured from the response rather than
+# inferred from the arguments.
+#
+# BASE_TOOL_COUNT is the surface without `semantic_search`. Bumping it is
+# the point of the check: a tool added to the surface without a demo
+# check must break the count here as well as the coverage check below.
+BASE_TOOL_COUNT=96
+EXPECTED_TOOL_COUNT=$((BASE_TOOL_COUNT + SEMANTIC_ADVERTISED))
+check "tools/list advertises the full surface" "$EXPECTED_TOOL_COUNT" "$TOOL_COUNT"
 
 # get_capabilities (AGENT_UX_ROADMAP M4): graph-independent, always
 # advertised regardless of model/index state -- the one tool the
@@ -990,10 +996,12 @@ except Exception:
 check_absent "list_services answers JSON-RPC"   "__RPC_ERROR__" "$(call list_services   "{\"snapshot\":\"$DEMO_SNAP\"}" || true)"
 check_absent "get_service answers JSON-RPC"     "__RPC_ERROR__" "$(call get_service     "{\"snapshot\":\"$DEMO_SNAP\"}" || true)"
 check_absent "list_contracts answers JSON-RPC"  "__RPC_ERROR__" "$(call list_contracts  "{\"snapshot\":\"$DEMO_SNAP\"}" || true)"
+check_absent "list_service_refs answers JSON-RPC" "__RPC_ERROR__" "$(call list_service_refs '{"snapshot":"live","limit":5}' || true)"
 check_absent "get_contract answers JSON-RPC"    "__RPC_ERROR__" "$(call get_contract    "{\"snapshot\":\"$DEMO_SNAP\"}" || true)"
 check_absent "list_unresolved answers JSON-RPC" "__RPC_ERROR__" "$(call list_unresolved "{\"snapshot\":\"$DEMO_SNAP\"}" || true)"
 check_absent "check_binding answers JSON-RPC"   "__RPC_ERROR__" "$(call check_binding   "{\"snapshot\":\"$DEMO_SNAP\",\"consumer\":\"x\",\"endpoint\":\"y\"}" || true)"
 check_absent "trace_impact answers JSON-RPC"    "__RPC_ERROR__" "$(call trace_impact    "{\"snapshot\":\"$DEMO_SNAP\",\"from\":\"x\"}" || true)"
+check_absent "trace_flow answers JSON-RPC"      "__RPC_ERROR__" "$(call trace_flow      "{\"snapshot\":\"$DEMO_SNAP\",\"from\":{\"symbol\":\"x\"}}" || true)"
 check_absent "get_coverage answers JSON-RPC"    "__RPC_ERROR__" "$(call get_coverage    "{\"snapshot\":\"$DEMO_SNAP\"}" || true)"
 check_absent "resolve_evidence answers JSON-RPC" "__RPC_ERROR__" "$(call resolve_evidence "{\"snapshot\":\"$DEMO_SNAP\",\"refs\":[\"x\"]}" || true)"
 check_absent "read_source answers JSON-RPC"     "__RPC_ERROR__" "$(call read_source     "{\"snapshot\":\"$DEMO_SNAP\",\"repo\":\"subject\",\"path\":\"x\",\"start\":0,\"end\":1}" || true)"
@@ -1004,6 +1012,21 @@ check_absent "get_snapshot answers JSON-RPC"    "__RPC_ERROR__" "$(call get_snap
 # reject the inputs — that's expected).
 out=$(call diff_contracts "{\"base\":\"$DEMO_SNAP\",\"head\":\"$DEMO_SNAP\"}" || true)
 check_absent "diff_contracts answers JSON-RPC" "__RPC_ERROR__" "$out"
+
+# apply_contract_context is the one contract tool that can write. It
+# refuses a non-live snapshot, and a dry run touches nothing, so the demo
+# exercises the read path only: the declaration comes back in the
+# response, and the file on disk is left alone. `subject` is the demo
+# repo's id, which counts as an implicit service (§4.1), so the
+# declaration validates against the live federation.
+ACC=$(call apply_contract_context '{"snapshot":"live","dry_run":true,"provides":[{"service":"subject","key":"http:GET /demo"}]}' || true)
+check_absent "apply_contract_context answers JSON-RPC" "__RPC_ERROR__" "$ACC"
+check_contains "apply_contract_context dry-runs the declaration" "dry run" "$ACC"
+ACC_YAML=$(_parse_mcp_resp "import json,sys; d=json.load(sys.stdin); print((((d.get('result') or {}).get('structuredContent') or {}).get('data') or {}).get('yaml',''))" \
+  -s -m 30 -X POST "$MCP" -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"apply_contract_context","arguments":{"snapshot":"live","dry_run":true,"provides":[{"service":"subject","key":"http:GET /demo"}]}}}')
+check_contains "apply_contract_context returns the YAML it would write" "http:GET /demo" "$ACC_YAML"
+check_absent "the dry run left repos.yaml alone" "http:GET /demo" "$(cat "$WORK/repos.yaml")"
 
 # ══ 14. Benchmark ═════════════════════════════════════════════════════
 if [ "$QUICK" = 0 ]; then

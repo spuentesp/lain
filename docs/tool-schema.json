@@ -1397,6 +1397,13 @@
                     "used_by": {
                       "$ref": "#/$defs/EntryPointList"
                     },
+                    "used_by_status": {
+                      "description": "The caller could not be resolved in the selected graph; used_by was not evaluated.",
+                      "enum": [
+                        "caller_unavailable"
+                      ],
+                      "type": "string"
+                    },
                     "used_by_truncated": {
                       "type": "boolean"
                     }
@@ -1668,6 +1675,223 @@
         "repos"
       ],
       "title": "get_snapshot output",
+      "type": "object"
+    }
+  },
+  {
+    "description": "URL literals in the federation's repos that name a declared service: where each one lives, what its host resolves to, and whether a sensor saw a call there. Live view only.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "description": "Input for `list_service_refs`. URL literals that name a declared service, per repo. Live view only.",
+      "properties": {
+        "cursor": {
+          "description": "Opaque paging cursor.",
+          "type": "string"
+        },
+        "limit": {
+          "description": "Max items per page (default 100, max 1000).",
+          "maximum": 1000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "min_score": {
+          "description": "Lowest score a suggestion may have. Default 0.6.",
+          "maximum": 1,
+          "minimum": 0,
+          "type": "number"
+        },
+        "outcome": {
+          "description": "Filter by what the host identifies.",
+          "enum": [
+            "resolved",
+            "ambiguous",
+            "unknown"
+          ],
+          "type": "string"
+        },
+        "repo": {
+          "description": "Filter by repo id.",
+          "type": "string"
+        },
+        "snapshot": {
+          "description": "Only `live` is served.",
+          "enum": [
+            "live"
+          ],
+          "type": "string"
+        },
+        "suggestions": {
+          "description": "Also return suggested routes for production references that match no route of their service. Suggestions are proposals with a score, never links. Needs an installed embedding model.",
+          "type": "boolean"
+        },
+        "usage": {
+          "description": "Filter by where the literal lives.",
+          "enum": [
+            "production",
+            "test",
+            "configuration",
+            "documentation"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "snapshot"
+      ],
+      "title": "list_service_refs input",
+      "type": "object"
+    },
+    "name": "list_service_refs",
+    "outputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "description": "`data` field of the `list_service_refs` envelope. Items sorted by (repo, path, line, value). A reference is evidence of a target, not of a call; `linked_to_call` says whether a sensor also saw a call at that line.",
+      "properties": {
+        "cursor": {
+          "type": "string"
+        },
+        "items": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "host": {
+                "type": "string"
+              },
+              "line": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "linked_to_call": {
+                "type": "boolean"
+              },
+              "outcome": {
+                "properties": {
+                  "kind": {
+                    "enum": [
+                      "resolved",
+                      "ambiguous",
+                      "unknown"
+                    ],
+                    "type": "string"
+                  },
+                  "service": {
+                    "type": "string"
+                  },
+                  "services": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              "path": {
+                "description": "Repo-relative path.",
+                "type": "string"
+              },
+              "repo": {
+                "type": "string"
+              },
+              "self_reference": {
+                "type": "boolean"
+              },
+              "usage": {
+                "enum": [
+                  "production",
+                  "test",
+                  "configuration",
+                  "documentation"
+                ],
+                "type": "string"
+              },
+              "value": {
+                "description": "The URL literal as written.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "repo",
+              "path",
+              "line",
+              "value",
+              "host",
+              "outcome",
+              "usage",
+              "self_reference",
+              "linked_to_call"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "scope": {
+          "type": "object"
+        },
+        "suggestions": {
+          "description": "Only when `suggestions` is true. Proposals, never links.",
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "line": {
+                "type": "integer"
+              },
+              "path": {
+                "type": "string"
+              },
+              "repo": {
+                "type": "string"
+              },
+              "route": {
+                "type": "string"
+              },
+              "score": {
+                "type": "number"
+              },
+              "service": {
+                "type": "string"
+              },
+              "suggested": {
+                "const": true,
+                "type": "boolean"
+              },
+              "url": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "repo",
+              "path",
+              "line",
+              "url",
+              "service",
+              "route",
+              "score",
+              "suggested"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "suggestions_status": {
+          "enum": [
+            "ok",
+            "no_server_context",
+            "no_contract_index",
+            "no_embedding_model"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "items",
+        "scope"
+      ],
+      "title": "list_service_refs data",
       "type": "object"
     }
   },
@@ -2243,6 +2467,254 @@
           ],
           "type": "object"
         },
+        "RustRpcCandidate": {
+          "additionalProperties": false,
+          "properties": {
+            "enclosing_name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "enclosing_start_line": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "evidence": {
+              "items": {
+                "$ref": "#/$defs/RustRpcEvidence"
+              },
+              "type": "array"
+            },
+            "generated_type": {
+              "type": "string"
+            },
+            "method": {
+              "type": "string"
+            },
+            "receiver": {
+              "type": "string"
+            },
+            "site": {
+              "$ref": "#/$defs/RustRpcSite"
+            }
+          },
+          "required": [
+            "method",
+            "receiver",
+            "generated_type",
+            "site",
+            "evidence",
+            "enclosing_name",
+            "enclosing_start_line"
+          ],
+          "type": "object"
+        },
+        "RustRpcDetail": {
+          "additionalProperties": false,
+          "properties": {
+            "candidate": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RustRpcCandidate"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "compatible_keys": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "contract_key": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "enclosing_symbol": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "error": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "identity_rule": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "provider_ids": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "semantic": {
+              "anyOf": [
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "candidate": {
+                      "anyOf": [
+                        {
+                          "$ref": "#/$defs/RustRpcCandidate"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "config_hash": {
+                      "type": "string"
+                    },
+                    "definitions": {
+                      "items": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "column": {
+                            "minimum": 0,
+                            "type": "integer"
+                          },
+                          "line": {
+                            "minimum": 0,
+                            "type": "integer"
+                          },
+                          "path": {
+                            "type": "string"
+                          },
+                          "source_hash": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "path",
+                          "line",
+                          "column",
+                          "source_hash"
+                        ],
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    "rpc_key": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "site_name": {
+                      "type": "string"
+                    },
+                    "source_hash": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "enum": [
+                        "resolved_definition",
+                        "unproven_definition"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "source_hash",
+                    "config_hash",
+                    "status",
+                    "definitions",
+                    "candidate",
+                    "site_name",
+                    "rpc_key"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "status": {
+              "enum": [
+                "resolved",
+                "unknown_identity",
+                "ambiguous_identity",
+                "missing_evidence",
+                "unproven_definition"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "candidate",
+            "contract_key",
+            "compatible_keys",
+            "enclosing_symbol",
+            "error",
+            "provider_ids",
+            "identity_rule"
+          ],
+          "type": "object"
+        },
+        "RustRpcEvidence": {
+          "additionalProperties": false,
+          "properties": {
+            "description": {
+              "type": "string"
+            },
+            "site": {
+              "$ref": "#/$defs/RustRpcSite"
+            }
+          },
+          "required": [
+            "description",
+            "site"
+          ],
+          "type": "object"
+        },
+        "RustRpcSite": {
+          "additionalProperties": false,
+          "properties": {
+            "column": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "end_byte": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "line": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "path": {
+              "type": "string"
+            },
+            "start_byte": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "path",
+            "start_byte",
+            "end_byte",
+            "line",
+            "column"
+          ],
+          "type": "object"
+        },
         "Scope": {
           "additionalProperties": false,
           "properties": {
@@ -2352,7 +2824,10 @@
                 "$ref": "#/$defs/EvidenceRef"
               },
               "host": {
-                "type": "string"
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "method": {
                 "type": "string"
@@ -2360,15 +2835,36 @@
               "reason": {
                 "enum": [
                   "no_route_in_service",
-                  "no_match"
+                  "no_match",
+                  "wrapper_unconfigured",
+                  "env_unmapped",
+                  "env_ambiguous",
+                  "rpc_stub_unknown",
+                  "graphql_no_op",
+                  "dynamic_url",
+                  "base_unknown",
+                  "dynamic_topic",
+                  "external_ref",
+                  "dynamic_sql",
+                  "orm_dynamic_query",
+                  "external_schema_ref"
                 ],
                 "type": "string"
               },
+              "rpc": {
+                "$ref": "#/$defs/RustRpcDetail"
+              },
               "target_service": {
-                "type": "string"
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "template": {
-                "type": "string"
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "url_expr": {
                 "type": "string"
@@ -2487,6 +2983,284 @@
     }
   },
   {
+    "description": "Declare the contract context the analyzer cannot see into the federation's repos.yaml: `provides` for an endpoint a service exposes (a runtime-configured route, a mesh spec), `host_aliases` for which service a host expression dials, and `bindings` for an explicit existing consumer to compatible endpoint mapping. Binding selectors must match exactly one current site; conflicting destinations are refused. Confirmed records a declaration, not human approval. Dry-run by default: returns the YAML that would be written. With dry_run=false it validates the whole result, writes atomically with a .bak, re-joins the contract index, and reports applied=true only when the declaration is served; a failed re-join restores the file.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "description": "Input for apply_contract_context. Merge provides, host_aliases and explicit bindings in the existing repos.yaml format. Bindings select exactly one current consumer and an existing compatible endpoint. Dry-run by default; snapshot must be live.",
+      "properties": {
+        "bindings": {
+          "description": "Explicit confirmed mappings using existing repos.yaml bindings entries. The repo/path/symbol/key selector must match exactly one current consumer; fanout is refused. Conflicting destinations are errors; identical mappings are idempotent. Apply revalidates current facts independently of check_binding. Confirmed means declared, not human-approved.",
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "consumer": {
+                "additionalProperties": false,
+                "properties": {
+                  "key": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "path": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "repo": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "site": {
+                    "description": "Optional exact consumer GlobalId returned by check_binding. Without site, apply requires a unique match for repo/path/symbol/key.",
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "symbol": {
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "repo",
+                  "path",
+                  "symbol",
+                  "key"
+                ],
+                "type": "object"
+              },
+              "provider": {
+                "additionalProperties": false,
+                "properties": {
+                  "key": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "service": {
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "service",
+                  "key"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "consumer",
+              "provider"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "dry_run": {
+          "default": true,
+          "description": "When true (the default), return the YAML that would be written and touch nothing.",
+          "type": "boolean"
+        },
+        "host_aliases": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "file": {
+                "description": "A repo-relative file. Every HTTP call in it whose host is unknown dials `service`.",
+                "type": "string"
+              },
+              "host": {
+                "description": "The host expression as the analyzer records it (`HostPart::Expr`), e.g. `UPSTREAM_HTTP_ORIGIN`.",
+                "type": "string"
+              },
+              "service": {
+                "description": "A declared service, or an implicit repo-id service.",
+                "type": "string"
+              },
+              "source": {
+                "description": "Where the mapping was established. Free-form.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "service"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "provides": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "key": {
+                "description": "Endpoint key in the shared grammar, e.g. `http:POST /chat/stream`.",
+                "type": "string"
+              },
+              "service": {
+                "description": "A declared service, or an implicit repo-id service.",
+                "type": "string"
+              },
+              "source": {
+                "description": "Where the declaration came from. Free-form.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "service",
+              "key"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "snapshot": {
+          "enum": [
+            "live"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "snapshot"
+      ],
+      "title": "apply_contract_context input",
+      "type": "object"
+    },
+    "name": "apply_contract_context",
+    "outputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "description": "`data` field of the `apply_contract_context` envelope.",
+      "properties": {
+        "added": {
+          "description": "The declared providers that were added.",
+          "items": {
+            "properties": {
+              "key": {
+                "type": "string"
+              },
+              "service": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "added_bindings": {
+          "description": "Explicit bindings newly added; empty for an identical declaration.",
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "consumer": {
+                "additionalProperties": false,
+                "properties": {
+                  "key": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "path": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "repo": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "site": {
+                    "description": "Optional exact consumer GlobalId returned by check_binding. Without site, apply requires a unique match for repo/path/symbol/key.",
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "symbol": {
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "repo",
+                  "path",
+                  "symbol",
+                  "key"
+                ],
+                "type": "object"
+              },
+              "provider": {
+                "additionalProperties": false,
+                "properties": {
+                  "key": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "service": {
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "service",
+                  "key"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "consumer",
+              "provider"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "added_host_aliases": {
+          "description": "The declared host aliases that were added.",
+          "items": {
+            "properties": {
+              "file": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "host": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "service": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "applied": {
+          "description": "True only when every requested declaration is currently served, including an already served no-op.",
+          "type": "boolean"
+        },
+        "backup": {
+          "description": "The .bak file holding the previous content (applied).",
+          "type": "string"
+        },
+        "config_path": {
+          "type": "string"
+        },
+        "dry_run": {
+          "type": "boolean"
+        },
+        "note": {
+          "type": "string"
+        },
+        "yaml": {
+          "description": "The full repos.yaml that would be written (dry run).",
+          "type": "string"
+        }
+      },
+      "title": "apply_contract_context data",
+      "type": "object"
+    }
+  },
+  {
     "description": "Provider and consumer changes between two snapshots, classified, with impact paths and coverage (§12). `live` is not allowed as base/head.",
     "inputSchema": {
       "$schema": "http://json-schema.org/draft-07/schema#",
@@ -2506,6 +3280,12 @@
           "description": "Snapshot id (`snap_<hex>`); must be `ready`. `live` is invalid (`invalid_argument`, `live_not_supported`).",
           "type": "string"
         },
+        "max_hops": {
+          "description": "Maximum impact path depth (default 10). Paths that reach the depth limit are marked truncated.",
+          "maximum": 100,
+          "minimum": 1,
+          "type": "integer"
+        },
         "min_impact": {
           "enum": [
             "NoKnownImpact",
@@ -2519,6 +3299,12 @@
         },
         "service": {
           "type": "string"
+        },
+        "timeout_ms": {
+          "description": "Cooperative timeout in milliseconds (server default: LAIN_DIFF_TIMEOUT_MS; cap: LAIN_DIFF_TIMEOUT_MAX_MS, at most 600000). Individual snapshot hydration, git diff and graph traversal operations cannot be interrupted; incomplete results are marked truncated.",
+          "maximum": 600000,
+          "minimum": 1,
+          "type": "integer"
         }
       },
       "required": [
@@ -2620,10 +3406,21 @@
           "type": "array"
         },
         "compatible_changes": {
+          "description": "Count observed so far; incomplete when truncated.",
           "type": "integer"
         },
         "coverage": {
           "type": "object"
+        },
+        "truncated": {
+          "description": "True when the analysis timed out and results are incomplete.",
+          "type": "boolean"
+        },
+        "truncation_reason": {
+          "enum": [
+            "timeout"
+          ],
+          "type": "string"
         }
       },
       "required": [
@@ -2771,6 +3568,257 @@
         "scope"
       ],
       "title": "trace_impact data",
+      "type": "object"
+    }
+  },
+  {
+    "description": "One path across the contract boundary: from an endpoint, symbol or table, follow Calls/Binds/CallsGraphql/SendsHttp/ReadsTable edges downstream (toward the data) or upstream (toward consumers). Returns ranked chains with per-hop provenance and explicit `gaps` where the chain stops and why. `strategy` picks `breadth` (default: everything one hop at a time, nearest first) or `depth` (follow each chain to its end before backtracking).",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "description": "Input for `trace_flow`. `from` takes exactly one of endpoint / symbol / table. `direction` defaults to `upstream` for a table and `downstream` otherwise.",
+      "properties": {
+        "cap": {
+          "maximum": 500,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "depth": {
+          "maximum": 12,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "direction": {
+          "enum": [
+            "downstream",
+            "upstream"
+          ],
+          "type": "string"
+        },
+        "from": {
+          "description": "Exactly one of `endpoint`, `symbol`, `table` must be set.",
+          "properties": {
+            "endpoint": {
+              "properties": {
+                "key": {
+                  "type": "string"
+                },
+                "service": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "repo_id": {
+              "description": "Restrict a symbol name to one repository.",
+              "type": "string"
+            },
+            "symbol": {
+              "description": "A node id, or a symbol name (ambiguous names are rejected with candidates).",
+              "type": "string"
+            },
+            "table": {
+              "description": "A table name, with or without the `table:` prefix.",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "snapshot": {
+          "type": "string"
+        },
+        "strategy": {
+          "description": "`breadth` (default): everything one hop at a time, nearest first, each node reached once. `depth`: follow each chain to its end (leaf, data sink or depth limit) before backtracking, so chains that share a node are all reported.",
+          "enum": [
+            "breadth",
+            "depth"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "from"
+      ],
+      "title": "trace_flow input",
+      "type": "object"
+    },
+    "name": "trace_flow",
+    "outputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "description": "`data` field of the `trace_flow` envelope (§10.2). Paths are root-to-leaf chains ranked by contract-boundary hops desc, min_confidence desc, length desc, leaf id. `gaps` lists where the chain stops and why.",
+      "properties": {
+        "direction": {
+          "enum": [
+            "downstream",
+            "upstream"
+          ],
+          "type": "string"
+        },
+        "from": {
+          "type": "object"
+        },
+        "gaps": {
+          "items": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "no_handler",
+                  "no_consumers",
+                  "unbound_consumer",
+                  "unlinked_call_site",
+                  "no_table_access",
+                  "no_data_sink",
+                  "dangling_edge",
+                  "consumers_pending"
+                ],
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "node": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "node",
+              "name",
+              "kind",
+              "reason"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "nodes_visited": {
+          "type": "integer"
+        },
+        "paths": {
+          "items": {
+            "properties": {
+              "boundary_hops": {
+                "type": "integer"
+              },
+              "hops": {
+                "items": {
+                  "properties": {
+                    "edge_type": {
+                      "description": "The edge that led to this hop; null for the seed.",
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "engine_fact": {
+                      "description": "True when the edge is a static/confirmed engine fact; false for heuristic, runtime or provenance-less edges. The seed is always true.",
+                      "type": "boolean"
+                    },
+                    "id": {
+                      "type": "string"
+                    },
+                    "line": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "node_type": {
+                      "type": "string"
+                    },
+                    "path": {
+                      "type": "string"
+                    },
+                    "provenance": {
+                      "type": [
+                        "object",
+                        "null"
+                      ]
+                    },
+                    "repo": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "name",
+                    "node_type",
+                    "edge_type",
+                    "engine_fact"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "min_confidence": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "min_confidence",
+              "boundary_hops",
+              "hops"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "repos_not_ready": {
+          "description": "Present only when the view lists repos still indexing (`scope.unreviewed`), as `repo (reason)`. A `no_consumers` gap becomes `consumers_pending` in that case: retry once the repos are ready.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "scope": {
+          "type": "object"
+        },
+        "seeds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "strategy": {
+          "description": "Present only when `strategy: depth` was requested; the default `breadth` walk omits it.",
+          "enum": [
+            "depth"
+          ],
+          "type": "string"
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "truncation_reasons": {
+          "items": {
+            "enum": [
+              "depth",
+              "cap",
+              "node_budget"
+            ],
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "from",
+        "direction",
+        "seeds",
+        "paths",
+        "gaps",
+        "truncated",
+        "truncation_reasons",
+        "nodes_visited",
+        "scope"
+      ],
+      "title": "trace_flow data",
       "type": "object"
     }
   },

@@ -32,6 +32,7 @@ reference, tuning options, and day-to-day operating notes.
 | `lain capabilities` | Print readiness of symbols, the call graph, git history and semantic search. Add `--json` for scripts. |
 | `lain status` | Print repository, index, and MCP readiness. Add `--json` for scripts. |
 | `lain schema` | Write the MCP tool schema used by schema-drift CI. |
+| `lain models` | List declared embedding models, install a model with `lain models install [name]`, or print the default model directory with `lain models path`. Installation verifies pinned SHA-256 hashes; the server never downloads models. |
 | `lain reindex` | Rebuild the federated graph from source after a schema bump. Backs up `federated_graph.bin` first. Add `--workspace <name>` to scope the rebuild. |
 
 Run `lain <command> --help` for flags. The generated MCP tool schema lives at
@@ -67,8 +68,8 @@ registry the server filters with.
 | `ops` | 9 | Server health, reload, LSP install, re-enrichment |
 | `federation` | 5 | Org-wide queries (shown automatically in federation mode) |
 | `workspace` | 4 | Workspace groups (shown automatically when configured) |
-| `contracts` | 13 | Service view across the federation (`list_services`, `get_service`); snapshot pinning (`prepare_snapshot`, `get_snapshot`); contract view (`list_contracts`, `get_contract`, `list_unresolved`, `check_binding`); analysis (`diff_contracts`, `trace_impact`, `get_coverage`); evidence (`resolve_evidence`, `read_source`) |
-| `full` | 97 | Every registered tool |
+| `contracts` | 16 | Service view across the federation (`list_services`, `get_service`); snapshot pinning (`prepare_snapshot`, `get_snapshot`); contract view (`list_contracts`, `get_contract`, `list_unresolved`, `check_binding`, `apply_contract_context`); service references (`list_service_refs`); analysis (`diff_contracts`, `trace_impact`, `trace_flow`, `get_coverage`); evidence (`resolve_evidence`, `read_source`) |
+| `full` | 100 | Every registered tool |
 
 ### Role recipes
 
@@ -177,6 +178,47 @@ lsp_prewarm_skip_extensions = ["js", "css"]
 Set `LAIN_LSP_PREWARM=false` to skip the warm-up without editing the file.
 `lain doctor --json` prints the repository's readiness report; `get_health`
 lists each language and whether its language server is installed.
+
+### Language servers
+
+Three environment variables decide how much language intelligence the
+indexer buys:
+
+| Variable | Default | Effect |
+|---|---|---|
+| `LAIN_DISABLE_LSP` | unset | `1` turns every language server off. The scanner falls back to tree-sitter and no `rust-analyzer` / `gopls` process is ever spawned. Unset, empty and `0` leave LSP on. |
+| `LAIN_LSP_LEAN` | unset | `1` keeps LSP but starts `rust-analyzer` in a memory-saving profile. Case-insensitive: `1`, `true`, `yes`, `on`. |
+| `LAIN_LSP_PREWARM` | unset | `false` skips the cold-boot warm-up. |
+
+`LAIN_DISABLE_LSP` and `LAIN_LSP_LEAN` are the two ends of one dial: the
+first buys memory by giving up *all* language intelligence, the second by
+giving up *some* of it.
+
+**The lean profile trades symbol fidelity for memory.** It starts
+`rust-analyzer` with proc-macro expansion, build scripts and the
+workspace member's own `default` feature switched off. rust-analyzer then
+resolves *less* than your build does:
+
+- `#[derive(...)]` generates no impl, so a derive-generated `impl Display`
+  is invisible to `textDocument/references` — "who implements `Display`?"
+  misses every derived type.
+- `env!("OUT_DIR")` and `include!` stay unresolved, because build scripts
+  never run.
+- Code behind your crate's `default` feature is not in the graph.
+
+The default profile keeps full fidelity: rust-analyzer expands proc macros
+and resolves the workspace exactly as you build it. The only options the
+default profile changes are the ones Lain never reads — rust-analyzer's own
+diagnostics and the `cargo check` it runs on save, which cost a rustc
+process per workspace and changed no symbol.
+
+`python3 scripts/lsp-memory-probe.py` measures the trade on your own
+repository: it starts a real rust-analyzer under each profile and compares
+peak RSS. On the Lain checkout itself the lean profile saves roughly
+500–600 MiB of peak RSS (~17–21%).
+
+`LAIN_DISABLE_LSP` silences the servers Lain *spawns*. A server bridged in
+from another process (`LspMultiplexer::with_server_url`) keeps answering.
 
 `state_lock_retry_interval_ms` sets the contention tail latency:
 with eight agents on one file, p99 on `claim_files` is roughly ten

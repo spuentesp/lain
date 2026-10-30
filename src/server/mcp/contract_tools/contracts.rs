@@ -458,7 +458,7 @@ async fn run_list_unresolved(
             }
         }
         let candidates = candidate_endpoints_for(&view, call_id, resolution);
-        items.push(json!({
+        let mut item = json!({
             "consumer": evidence_ref_from_call(call_id),
             "url_expr": url_expr_for(call_id),
             "method": method_label_for(call_id),
@@ -467,6 +467,63 @@ async fn run_list_unresolved(
             "reason": unresolved_reason_label(reason),
             "target_service": target_service.as_ref().map(|s| s.0.clone()),
             "candidates": candidates,
+        });
+        if let Some(detail) = view.rust_rpcs.get(call_id) {
+            item["rpc"] = json!(detail);
+            item["consumer"]["commit"] = json!(resolved
+                .commits()
+                .get(call_id.repo_id())
+                .cloned()
+                .unwrap_or_default());
+            if let Some(candidate) = &detail.candidate {
+                item["consumer"]["line"] = json!(candidate.site.line);
+                item["method"] = json!(candidate.method);
+            }
+        }
+        items.push(item);
+    }
+    // A source candidate with no unique proto identity has no consumer fact,
+    // but is still an explicit, inspectable coverage gap.
+    for (id, detail) in &view.rust_rpcs {
+        if detail.contract_key.is_some() {
+            continue;
+        }
+        if repo_filter
+            .as_ref()
+            .is_some_and(|repo| id.repo_id() != repo)
+        {
+            continue;
+        }
+        if let Some(svc) = &service_filter {
+            let Some(info) = view.services.get(svc) else {
+                continue;
+            };
+            if info.repo.as_str() != id.repo_id()
+                || (!info.paths.is_empty()
+                    && !info
+                        .paths
+                        .iter()
+                        .any(|p| id.path().is_some_and(|path| path.starts_with(p))))
+            {
+                continue;
+            }
+        }
+        let mut consumer = evidence_ref_from_call(id);
+        consumer["commit"] = json!(resolved
+            .commits()
+            .get(id.repo_id())
+            .cloned()
+            .unwrap_or_default());
+        if let Some(candidate) = &detail.candidate {
+            consumer["line"] = json!(candidate.site.line);
+        }
+        items.push(json!({
+            "consumer": consumer,
+            "url_expr": url_expr_for(id),
+            "method": detail.candidate.as_ref().map(|c| c.method.as_str()).unwrap_or(""),
+            "template": null, "host": null, "target_service": null,
+            "reason": "rpc_stub_unknown", "rpc": detail,
+            "candidates": rust_rpc_candidates(&view, detail),
         }));
     }
 
@@ -607,7 +664,6 @@ async fn run_check_binding(
     if resolution.is_none() {
         reasons.push("not_a_consumer");
     }
-    let consumer_repo = consumer_id.repo_id().to_string();
     if let Some(res) = &resolution {
         if res.service.0 == service_str {
             reasons.push("same_service");
@@ -740,10 +796,27 @@ async fn run_check_binding(
             }
         }
     };
+    // Emit the selector the confirmed joiner actually uses: the node's
+    // enclosing symbol and its own fact key, which can differ from the
+    // provider key for an HTTP template bridge. A fully dynamic consumer
+    // with no fact key cannot be represented by the existing bindings
+    // format and must not be advertised as a persistable confirmation.
+    let entry = render_bindings_entry(resolved.backend().as_ref(), &consumer_id, &endpoint_id)
+        .map_err(|e| {
+            error_outcome(
+                "internal",
+                format!("serialize bindings_entry: {e}"),
+                None,
+                &snap_label,
+                started,
+            )
+        })?;
+    if entry.is_none() && reasons.is_empty() {
+        reasons.push("not_a_consumer");
+    }
     let valid = reasons.is_empty() && endpoint_def.is_some();
 
     let data = if valid {
-        let entry = render_bindings_entry(&consumer_repo, &consumer_id, &key, &endpoint_id);
         json!({
             "valid": true,
             "reasons": [],
@@ -810,7 +883,10 @@ pub(crate) fn snapshot_label(args_map: &Map<String, Value>) -> String {
     view_snapshot_label(args_map)
 }
 
-fn parse_limit(args_map: &Map<String, Value>, started: Instant) -> Result<usize, ToolOutcome> {
+pub(crate) fn parse_limit(
+    args_map: &Map<String, Value>,
+    started: Instant,
+) -> Result<usize, ToolOutcome> {
     let snap = snapshot_label(args_map);
     let raw = args_map.get("limit").and_then(|v| v.as_u64());
     match raw {
@@ -833,7 +909,7 @@ fn parse_limit(args_map: &Map<String, Value>, started: Instant) -> Result<usize,
     }
 }
 
-fn parse_cursor(
+pub(crate) fn parse_cursor(
     args_map: &Map<String, Value>,
     started: Instant,
 ) -> Result<Option<super::paging::CursorPayload>, ToolOutcome> {
@@ -1134,6 +1210,16 @@ fn candidate_endpoints_for(
         Some(ts) => &ep_id.0 == ts,
         None => true,
     };
+    if let Some(detail) = view.rust_rpcs.get(call_id) {
+        return rust_rpc_candidates(view, detail);
+    }
+    // Other fact-keyed RPC consumers also need RPC suggestions, never HTTP.
+    if call_id
+        .name()
+        .is_some_and(|n| n.starts_with(crate::server::sensors::util::RPC_CALL_PREFIX))
+    {
+        return view.endpoints.keys().filter(|id| in_target(id) && matches!(id.1, ContractKey::Rpc { .. })).map(|id| json!({"endpoint": {"service": id.0.0, "key": id.1.to_string()}, "reason": "pattern"})).collect();
+    }
     // GraphQL consumers (`graphql-call:{op}:{field}`) carry no HTTP
     // method/template: `parse_consumer_call_shape` reads their name
     // as `Unknown`/no template, so the HTTP filter below would admit
@@ -1270,49 +1356,56 @@ fn parse_consumer_call_shape(
 ) {
     let name = call_id.name().unwrap_or_default();
     let parts: Vec<&str> = name.split_whitespace().collect();
-    let method = match parts.first().copied() {
-        Some("GET") => crate::federation::contracts::model::MethodSpec::Known(
-            crate::federation::contracts::model::HttpMethod::Get,
-        ),
-        Some("POST") => crate::federation::contracts::model::MethodSpec::Known(
-            crate::federation::contracts::model::HttpMethod::Post,
-        ),
-        Some("PUT") => crate::federation::contracts::model::MethodSpec::Known(
-            crate::federation::contracts::model::HttpMethod::Put,
-        ),
-        Some("PATCH") => crate::federation::contracts::model::MethodSpec::Known(
-            crate::federation::contracts::model::HttpMethod::Patch,
-        ),
-        Some("DELETE") => crate::federation::contracts::model::MethodSpec::Known(
-            crate::federation::contracts::model::HttpMethod::Delete,
-        ),
-        Some("HEAD") => crate::federation::contracts::model::MethodSpec::Known(
-            crate::federation::contracts::model::HttpMethod::Head,
-        ),
-        Some("OPTIONS") => crate::federation::contracts::model::MethodSpec::Known(
-            crate::federation::contracts::model::HttpMethod::Options,
-        ),
-        Some("ANY") => crate::federation::contracts::model::MethodSpec::Known(
-            crate::federation::contracts::model::HttpMethod::Any,
-        ),
-        _ => crate::federation::contracts::model::MethodSpec::Unknown,
-    };
+    let method = parts
+        .first()
+        .and_then(|v| crate::federation::contracts::model::HttpMethod::parse(v))
+        .map_or(
+            crate::federation::contracts::model::MethodSpec::Unknown,
+            crate::federation::contracts::model::MethodSpec::Known,
+        );
     (method, parts.get(1).map(|s| s.to_string()))
 }
 
 fn render_bindings_entry(
-    consumer_repo: &str,
+    backend: &dyn GraphBackend,
     consumer_id: &GlobalId,
-    key: &ContractKey,
     endpoint_id: &EndpointId,
-) -> String {
-    let symbol = consumer_id.name().unwrap_or_default();
-    let path = consumer_id.path().unwrap_or_default();
-    format!(
-        "- consumer:\n    repo: {consumer_repo}\n    path: {path}\n    symbol: {symbol}\n    key: \"{key}\"\n  provider:\n    service: {svc}\n    key: \"{pkey}\"\n",
-        svc = endpoint_id.0 .0,
-        pkey = endpoint_id.1,
-    )
+) -> Result<Option<String>, serde_yaml::Error> {
+    use crate::federation::contracts::config::{
+        ConfirmedBinding, ConfirmedBindingConsumer, ConfirmedBindingProvider,
+    };
+
+    let Ok(Some(node)) = backend.get_node(consumer_id.as_str()) else {
+        return Ok(None);
+    };
+    let keys: Vec<_> = node
+        .contract
+        .iter()
+        .flat_map(|fact| fact.consumer_keys())
+        .collect();
+    let Some(key) = keys
+        .iter()
+        .find(|key| *key == &endpoint_id.1)
+        .or_else(|| keys.iter().find(|key| keys_compatible(key, &endpoint_id.1)))
+    else {
+        return Ok(None);
+    };
+    let binding = ConfirmedBinding {
+        consumer: ConfirmedBindingConsumer {
+            site: Some(consumer_id.to_string()),
+            repo: consumer_id.repo_id().to_string(),
+            path: node.path,
+            symbol: node.container.unwrap_or(node.name),
+            key: key.to_string(),
+        },
+        provider: ConfirmedBindingProvider {
+            service: endpoint_id.0 .0.clone(),
+            key: endpoint_id.1.to_string(),
+        },
+    };
+    // Serialize the existing config type so YAML-significant source
+    // paths and symbols round-trip without changing the selector.
+    serde_yaml::to_string(&vec![binding]).map(Some)
 }
 
 // ─── renderers ────────────────────────────────────────────────────────
@@ -1461,19 +1554,88 @@ mod tests {
     }
 
     #[test]
-    fn render_bindings_entry_yamls_consumer_provider_pair() {
-        let consumer =
-            GlobalId::from_canonical("billing:HttpClientCall:src/main.py:fetch_order:20");
-        let key = ContractKey::Http {
-            method: MethodSpec::Known(HttpMethod::Get),
-            template: "/api/orders/{}".into(),
+    fn render_bindings_entry_uses_actual_consumer_key_and_container() {
+        use crate::federation::contracts::config::ConfirmedBinding;
+        use crate::federation::contracts::model::{
+            CallVia, ConsumerFact, ContractFact, HostPart, NormalizedUrl,
         };
-        let ep_id: EndpointId = (ServiceName("orders".into()), key.clone());
-        let entry = render_bindings_entry("billing", &consumer, &key, &ep_id);
-        assert!(entry.contains("repo: billing"));
-        assert!(entry.contains("symbol: fetch_order"));
-        assert!(entry.contains("service: orders"));
-        assert!(entry.contains("key:"));
+        use crate::federation::graph_backend::PetgraphBackend;
+        use crate::schema::{GraphNode, NodeType};
+
+        let dir = tempfile::tempdir().unwrap();
+        let backend = PetgraphBackend::new(dir.path()).unwrap();
+        let consumer = GlobalId::new(
+            &RepoId::new("billing").unwrap(),
+            NodeType::HttpClientCall,
+            "src/main: billing.py",
+            "GET /v1/api/orders/{}",
+            Some(20),
+        );
+        let mut node = GraphNode::new(
+            NodeType::HttpClientCall,
+            "GET /v1/api/orders/{}".into(),
+            "src/main: billing.py".into(),
+        );
+        node.id = consumer.as_str().into();
+        node.container = Some("fetch: order #1".into());
+        node.contract.push(ContractFact::Consumer(ConsumerFact {
+            method: MethodSpec::Known(HttpMethod::Get),
+            url: NormalizedUrl {
+                host: HostPart::None,
+                template: Some("/v1/api/orders/{}".into()),
+            },
+            via: CallVia::Library {
+                name: "requests".into(),
+            },
+            url_expr: "upstream".into(),
+            reads_complete: true,
+        }));
+        backend.upsert_node(node).unwrap();
+        let ep_id: EndpointId = (
+            ServiceName("orders".into()),
+            ContractKey::from_str("http:GET /api/orders/{}").unwrap(),
+        );
+        let entry = render_bindings_entry(&backend, &consumer, &ep_id)
+            .unwrap()
+            .unwrap();
+        let bindings: Vec<ConfirmedBinding> = serde_yaml::from_str(&entry).unwrap();
+        assert_eq!(bindings[0].consumer.repo, "billing");
+        assert_eq!(bindings[0].consumer.path, "src/main: billing.py");
+        assert_eq!(bindings[0].consumer.symbol, "fetch: order #1");
+        assert_eq!(bindings[0].consumer.key, "http:GET /v1/api/orders/{}");
+        assert_eq!(bindings[0].provider.key, "http:GET /api/orders/{}");
+    }
+
+    #[test]
+    fn render_bindings_entry_refuses_missing_or_unkeyed_consumer() {
+        use crate::federation::graph_backend::PetgraphBackend;
+        use crate::schema::{GraphNode, NodeType};
+        let dir = tempfile::tempdir().unwrap();
+        let backend = PetgraphBackend::new(dir.path()).unwrap();
+        let consumer = GlobalId::new(
+            &RepoId::new("billing").unwrap(),
+            NodeType::Function,
+            "src/main.py",
+            "fetch_order",
+            Some(20),
+        );
+        let endpoint = (
+            ServiceName("orders".into()),
+            ContractKey::from_str("rpc:orders/GetOrder").unwrap(),
+        );
+        assert!(render_bindings_entry(&backend, &consumer, &endpoint)
+            .unwrap()
+            .is_none());
+        let mut node = GraphNode::new(
+            NodeType::Function,
+            "fetch_order".into(),
+            "src/main.py".into(),
+        );
+        node.id = consumer.as_str().into();
+        backend.upsert_node(node).unwrap();
+        assert!(render_bindings_entry(&backend, &consumer, &endpoint)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -2002,4 +2164,11 @@ mod tests {
             "same-op fallback runs inside the target_service's endpoints"
         );
     }
+}
+
+fn rust_rpc_candidates(
+    view: &ContractIndex,
+    detail: &crate::federation::contracts::rust_rpc::RustRpcDetail,
+) -> Vec<Value> {
+    view.endpoints.keys().filter(|ep| detail.compatible_keys.contains(&ep.1.to_string())).map(|ep| json!({"endpoint": {"service": ep.0.0, "key": ep.1.to_string()}, "reason": "same_key"})).collect()
 }

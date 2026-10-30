@@ -22,6 +22,11 @@ pub struct FederationConfig {
     /// measurable speedup. See `server::parse_cache`.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub parse_cache_mb: usize,
+    /// Parameters lain runs with, as environment variables. A service's `env`
+    /// names resolve against these to the host it has in this environment
+    /// (see `contracts::service_refs::EnvScope`). Empty by default.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub params: std::collections::BTreeMap<String, String>,
     /// Whether this instance takes part in the shared-daemon pool
     /// (zero-config multi-agent, 2026-10-18). `false` = private
     /// instance: discovery skips it and `add_workspaces` refuses the
@@ -49,6 +54,49 @@ fn is_contract_block_default(c: &ContractFederationConfig) -> bool {
         && c.generic_keys.is_empty()
         && c.schemas.is_empty()
         && c.bindings.is_empty()
+        && c.databases.is_empty()
+        && c.provides.is_empty()
+        && c.host_aliases.is_empty()
+}
+
+/// Run parameters given on the command line (`--param KEY=VALUE`). They
+/// override the `params:` section of repos.yaml for this process.
+static RUN_PARAM_OVERRIDES: std::sync::RwLock<std::collections::BTreeMap<String, String>> =
+    std::sync::RwLock::new(std::collections::BTreeMap::new());
+
+/// Parse `KEY=VALUE` arguments and store them as run-parameter overrides.
+pub fn set_run_param_overrides(raw: &[String]) -> anyhow::Result<()> {
+    let mut map = std::collections::BTreeMap::new();
+    for item in raw {
+        let (key, value) = item
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("--param expects KEY=VALUE, got {item:?}"))?;
+        map.insert(key.trim().to_string(), value.trim().to_string());
+    }
+    *RUN_PARAM_OVERRIDES.write().expect("param overrides lock") = map;
+    Ok(())
+}
+
+impl FederationConfig {
+    /// The parameters in effect: repos.yaml `params:`, overridden by the
+    /// command-line values for this process.
+    pub fn effective_params(&self) -> std::collections::BTreeMap<String, String> {
+        let overrides = RUN_PARAM_OVERRIDES
+            .read()
+            .expect("param overrides lock")
+            .clone();
+        merge_params(&self.params, &overrides)
+    }
+}
+
+/// File parameters with the command-line values laid over them.
+fn merge_params(
+    file: &std::collections::BTreeMap<String, String>,
+    overrides: &std::collections::BTreeMap<String, String>,
+) -> std::collections::BTreeMap<String, String> {
+    let mut out = file.clone();
+    out.extend(overrides.iter().map(|(k, v)| (k.clone(), v.clone())));
+    out
 }
 
 impl Default for FederationConfig {
@@ -58,6 +106,7 @@ impl Default for FederationConfig {
             max_concurrent_indexers: default_max_concurrent_indexers(),
             ready_threshold: default_ready_threshold(),
             parse_cache_mb: 0,
+            params: Default::default(),
             share: true,
             git_sensor: None,
             repos: Vec::new(),
@@ -99,6 +148,13 @@ fn is_zero(n: &usize) -> bool {
 pub struct RepoConfig {
     pub id: String,
     pub source: SourceConfig,
+    /// Package names this repo publishes (npm, PyPI, crates.io, Go
+    /// module paths). A consumer repo that depends on one of them is
+    /// linked to this repo even when the name does not contain the
+    /// repo id — the npm scope and the hyphen in
+    /// `@nvidia/openshell-sdk` both defeat the token match.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub packages: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -156,6 +212,15 @@ impl FederationConfig {
             }
             if cfg.contract.bindings.is_empty() {
                 cfg.contract.bindings = top_level_contract.bindings;
+            }
+            if cfg.contract.databases.is_empty() {
+                cfg.contract.databases = top_level_contract.databases;
+            }
+            if cfg.contract.provides.is_empty() {
+                cfg.contract.provides = top_level_contract.provides;
+            }
+            if cfg.contract.host_aliases.is_empty() {
+                cfg.contract.host_aliases = top_level_contract.host_aliases;
             }
         }
         cfg.validate_unique_repo_ids()?;
@@ -240,6 +305,24 @@ impl FederationConfig {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn command_line_params_override_the_file_and_add_new_ones() {
+        let file: std::collections::BTreeMap<String, String> =
+            [("ORDERS_URL".to_string(), "http://orders-a".to_string())]
+                .into_iter()
+                .collect();
+        let cli: std::collections::BTreeMap<String, String> = [
+            ("ORDERS_URL".to_string(), "http://orders-b".to_string()),
+            ("BILLING_URL".to_string(), "http://billing".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        let merged = merge_params(&file, &cli);
+        assert_eq!(merged["ORDERS_URL"], "http://orders-b");
+        assert_eq!(merged["BILLING_URL"], "http://billing");
+        assert_eq!(merge_params(&file, &Default::default()), file);
+    }
+
     #[test]
     fn parse_cache_mb_is_written_only_when_enabled() {
         let off = FederationConfig::default();

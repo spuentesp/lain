@@ -300,7 +300,7 @@ pub struct GraphqlConsumerFact {
 /// Phase E (spec §8.3): one resolver-link from a GraphQL root
 /// field to its implementing handler. The sensor emits one per
 /// detected naming-convention match (Apollo resolver maps /
-/// graphql-java `DataFetcher` / gqlgen / Strawberry). The
+/// graphql-java `DataFetcher` / gqlgen / Strawberry / graphene). The
 /// joiner records the link on the corresponding
 /// `GraphqlProvider` so typed traversal `handler → function →
 /// graphql` is reachable.
@@ -322,6 +322,7 @@ pub enum GraphqlHandlerOrigin {
     GraphqlJava,
     Gqlgen,
     Strawberry,
+    Graphene,
 }
 
 // ─── WebSocket provider / consumer / handler (Phase F, Gap 19) ─────────
@@ -579,6 +580,24 @@ pub enum HttpMethod {
     Head,
     Options,
     Any,
+}
+
+impl HttpMethod {
+    /// The method named by its upper-case label, as HTTP writes it.
+    /// Anything else, including `UNKNOWN`, is `None`.
+    pub fn parse(label: &str) -> Option<Self> {
+        Some(match label {
+            "GET" => Self::Get,
+            "POST" => Self::Post,
+            "PUT" => Self::Put,
+            "PATCH" => Self::Patch,
+            "DELETE" => Self::Delete,
+            "HEAD" => Self::Head,
+            "OPTIONS" => Self::Options,
+            "ANY" => Self::Any,
+            _ => return None,
+        })
+    }
 }
 
 /// Which side of an HTTP exchange a `Schema` belongs to. `Payload`
@@ -1000,18 +1019,10 @@ fn method_label(method: &MethodSpec) -> &'static str {
 }
 
 fn parse_method_label(s: &str) -> Option<MethodSpec> {
-    Some(match s {
-        "GET" => MethodSpec::Known(HttpMethod::Get),
-        "POST" => MethodSpec::Known(HttpMethod::Post),
-        "PUT" => MethodSpec::Known(HttpMethod::Put),
-        "PATCH" => MethodSpec::Known(HttpMethod::Patch),
-        "DELETE" => MethodSpec::Known(HttpMethod::Delete),
-        "HEAD" => MethodSpec::Known(HttpMethod::Head),
-        "OPTIONS" => MethodSpec::Known(HttpMethod::Options),
-        "ANY" => MethodSpec::Known(HttpMethod::Any),
-        "UNKNOWN" => MethodSpec::Unknown,
-        _ => return None,
-    })
+    match s {
+        "UNKNOWN" => Some(MethodSpec::Unknown),
+        _ => HttpMethod::parse(s).map(MethodSpec::Known),
+    }
 }
 
 // ─── UnresolvedReason (unified; replaces the two-parallel-enums design) ──

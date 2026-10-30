@@ -88,6 +88,7 @@ LAIN_STDERR="$OUT_DIR/server.stderr"
 (
     XDG_STATE_HOME="$STATE_DIR" \
     LAIN_REINDEX_TIMEOUT=30 \
+    LAIN_INDEX_TIMEOUT=30 \
         "$LAIN_BIN" server --config "$REPOS_YAML" --transport http --port "$PORT" \
             >"$OUT_DIR/server.stdout" 2>"$LAIN_STDERR" &
     echo "$!" >"$OUT_DIR/server.pid"

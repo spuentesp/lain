@@ -11,6 +11,7 @@
 //! [`docs/CONTRIBUTING_AGENTS.md`](../../../docs/CONTRIBUTING_AGENTS.md#sensor-pattern-one-concern-per-file-one-trait-shared).
 
 pub mod codeowners_sensor;
+pub mod django_orm_sensor;
 pub mod dynamic_dispatch_sensor;
 pub mod entry_point_sensor;
 pub mod env_sensor;
@@ -343,6 +344,9 @@ pub fn run_all(
     counts
 }
 
+/// A sensor slower than this is logged at `info`; faster ones at `debug`.
+const SLOW_SENSOR_MS: u64 = 250;
+
 /// Shared inventory iteration behind [`run_all`] and the coverage
 /// ledger's `run_all_with_coverage`. Walks every registered
 /// [`Sensor`], sorts by `(phase, name)`, and asks each one for a
@@ -371,6 +375,7 @@ pub(crate) fn run_all_with_reports(
         });
         for entry in entries {
             let sensor = entry.0;
+            let started = std::time::Instant::now();
             let report = match sensor.scan_with_report_for_repo(graph, root, namespace, repo_id) {
                 Ok(r) => r,
                 Err(e) => {
@@ -382,11 +387,60 @@ pub(crate) fn run_all_with_reports(
                     }
                 }
             };
+            // Per-sensor wall time: the protocol-sensor phase dominates
+            // indexing on large repos, and without this the log cannot say
+            // which sensor to look at.
+            let elapsed_ms = started.elapsed().as_millis() as u64;
+            // Quiet by default (about thirty sensors run per pass); a slow
+            // one is worth a line at `info`.
+            if elapsed_ms >= SLOW_SENSOR_MS {
+                tracing::info!(
+                    sensor = sensor.name(),
+                    phase = sensor.phase(),
+                    elapsed_ms,
+                    emitted = report.emitted,
+                    "sensor finished (slow)"
+                );
+            } else {
+                tracing::debug!(
+                    sensor = sensor.name(),
+                    phase = sensor.phase(),
+                    elapsed_ms,
+                    emitted = report.emitted,
+                    "sensor finished"
+                );
+            }
             counts.add(sensor.count_field(), report.emitted);
             reports.push((sensor.name(), report));
         }
         (counts, reports)
     })
+}
+
+/// Throwaway harness: `LAIN_SENSOR_SANITY_ROOT=<repo> cargo test --release --lib
+/// run_all_timing -- --ignored --nocapture` runs every sensor over a real checkout
+/// on an empty graph and prints the per-sensor "sensor finished" log lines.
+#[cfg(test)]
+mod run_all_timing {
+    use super::*;
+
+    #[test]
+    #[ignore]
+    fn run_all_timing_over_a_real_checkout() {
+        let Ok(root) = std::env::var("LAIN_SENSOR_SANITY_ROOT") else {
+            return;
+        };
+        let root = std::path::PathBuf::from(root);
+        let _ = tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_ansi(false)
+            .try_init();
+        let tmp = tempfile::tempdir().unwrap();
+        let g = GraphDatabase::new(&tmp.path().join("db.bin")).unwrap();
+        let started = std::time::Instant::now();
+        let counts = run_all(&g, &root, &RepoNamespace::for_test(), "bench");
+        println!("run_all total {:?}: {counts:?}", started.elapsed());
+    }
 }
 
 #[cfg(test)]

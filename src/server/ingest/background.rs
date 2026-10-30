@@ -513,16 +513,22 @@ mod wiring_tests {
 
     /// Federated repos must be watched for re-index too.
     /// `RepoIndex::start_watcher` had a test but no production caller, so
-    /// each repo stayed frozen at the commit it was first indexed at —
-    /// while `cli/server.rs` carried a comment claiming "the watcher would
-    /// eventually pick up filesystem events".
+    /// each repo stayed frozen at the commit it was first indexed at.
+    /// The call now lives in `FederatedIndex::index_all`, which
+    /// `lain server` runs at startup.
     #[test]
     fn the_federation_bootstrap_watches_each_repo_for_reindex() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let src = std::fs::read_to_string(root.join("src/cli/server.rs")).unwrap();
+        let src =
+            std::fs::read_to_string(root.join("src/server/federation/federated_index.rs")).unwrap();
         assert!(
-            src.contains("start_watcher()"),
-            "`lain server` must start each repo's re-index watcher"
+            src.contains("repo.start_watcher()"),
+            "the federation index pass must start each repo's re-index watcher"
+        );
+        let server = std::fs::read_to_string(root.join("src/cli/server.rs")).unwrap();
+        assert!(
+            server.contains("fed.index_all()"),
+            "`lain server` must run the index pass that starts the watchers"
         );
     }
 

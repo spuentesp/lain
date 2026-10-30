@@ -38,6 +38,29 @@ use crate::schema::{EdgeProvenance, GraphNode, RouteMatch};
 /// recorded as a `StaleReason::IllFormedKeys` stale entry and binds
 /// nothing.
 #[allow(clippy::too_many_arguments)]
+/// The stale record for `binding` with the provider it was checked against.
+fn stale_binding(
+    binding: &ConfirmedBinding,
+    provider_service: ServiceName,
+    reason: StaleReason,
+) -> StaleBinding {
+    StaleBinding {
+        consumer: ConfirmedBindingKey {
+            site: binding.consumer.site.clone(),
+            repo: RepoId::new(&binding.consumer.repo)
+                .unwrap_or_else(|_| RepoId::new("unknown").unwrap()),
+            path: binding.consumer.path.clone(),
+            symbol: binding.consumer.symbol.clone(),
+            key: binding.consumer.key.clone(),
+        },
+        provider: ConfirmedBindingProviderKey {
+            service: provider_service,
+            key: binding.provider.key.clone(),
+        },
+        reason,
+    }
+}
+
 pub(crate) fn apply_confirmed_binding(
     binding: &ConfirmedBinding,
     binding_index: usize,
@@ -66,20 +89,11 @@ pub(crate) fn apply_confirmed_binding(
     // `http:POST /graphql`) invent a binding and bind nothing;
     // `validate()` rejects the same entry at load.
     if !keys_compatible(&consumer_key, &provider_key) {
-        stale_bindings.push(StaleBinding {
-            consumer: ConfirmedBindingKey {
-                repo: RepoId::new(&binding.consumer.repo)
-                    .unwrap_or_else(|_| RepoId::new("unknown").unwrap()),
-                path: binding.consumer.path.clone(),
-                symbol: binding.consumer.symbol.clone(),
-                key: binding.consumer.key.clone(),
-            },
-            provider: ConfirmedBindingProviderKey {
-                service: ServiceName(binding.provider.service.clone()),
-                key: binding.provider.key.clone(),
-            },
-            reason: StaleReason::IllFormedKeys,
-        });
+        stale_bindings.push(stale_binding(
+            binding,
+            ServiceName(binding.provider.service.clone()),
+            StaleReason::IllFormedKeys,
+        ));
         return;
     }
     let provider_svc = ServiceName(binding.provider.service.clone());
@@ -87,20 +101,11 @@ pub(crate) fn apply_confirmed_binding(
     let provider_id = match providers_for_endpoint.and_then(|v| v.first().map(|p| p.id.clone())) {
         Some(id) => id,
         None => {
-            stale_bindings.push(StaleBinding {
-                consumer: ConfirmedBindingKey {
-                    repo: RepoId::new(&binding.consumer.repo)
-                        .unwrap_or_else(|_| RepoId::new("unknown").unwrap()),
-                    path: binding.consumer.path.clone(),
-                    symbol: binding.consumer.symbol.clone(),
-                    key: binding.consumer.key.clone(),
-                },
-                provider: ConfirmedBindingProviderKey {
-                    service: provider_svc.clone(),
-                    key: binding.provider.key.clone(),
-                },
-                reason: StaleReason::NoEndpoint,
-            });
+            stale_bindings.push(stale_binding(
+                binding,
+                provider_svc.clone(),
+                StaleReason::NoEndpoint,
+            ));
             return;
         }
     };
@@ -133,6 +138,14 @@ pub(crate) fn apply_confirmed_binding(
         let Ok(gid) = GlobalId::parse(&node.id) else {
             continue;
         };
+        if binding
+            .consumer
+            .site
+            .as_ref()
+            .is_some_and(|site| site != gid.as_str())
+        {
+            continue;
+        }
         if gid.repo_id() != binding.consumer.repo {
             continue;
         }
@@ -215,19 +228,10 @@ pub(crate) fn apply_confirmed_binding(
         entry.insert(0, new_resolution);
     }
     if !matched_any {
-        stale_bindings.push(StaleBinding {
-            consumer: ConfirmedBindingKey {
-                repo: RepoId::new(&binding.consumer.repo)
-                    .unwrap_or_else(|_| RepoId::new("unknown").unwrap()),
-                path: binding.consumer.path.clone(),
-                symbol: binding.consumer.symbol.clone(),
-                key: binding.consumer.key.clone(),
-            },
-            provider: ConfirmedBindingProviderKey {
-                service: provider_svc.clone(),
-                key: binding.provider.key.clone(),
-            },
-            reason: StaleReason::NoConsumer,
-        });
+        stale_bindings.push(stale_binding(
+            binding,
+            provider_svc.clone(),
+            StaleReason::NoConsumer,
+        ));
     }
 }

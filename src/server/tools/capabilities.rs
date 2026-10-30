@@ -844,6 +844,13 @@ pub const CAPABILITIES: &[Capability] = &[
         "waiting on a prepare_snapshot you kicked off, or auditing a snapshot id",
     ),
     c(
+        "list_service_refs",
+        Package::Contracts,
+        Level::Power,
+        "URL literals that name a declared service, per repo, with usage and call linkage",
+        "checking which services a repo's code points at, or finding references the sensors did not turn into calls",
+    ),
+    c(
         "list_contracts",
         Package::Contracts,
         Level::Power,
@@ -872,6 +879,13 @@ pub const CAPABILITIES: &[Capability] = &[
         "reviewing or proposing a confirmed binding",
     ),
     c(
+        "apply_contract_context",
+        Package::Contracts,
+        Level::Power,
+        "declare providers the analyzer cannot see into repos.yaml (dry-run by default)",
+        "declaring a provider static analysis cannot see, without restarting",
+    ),
+    c(
         "diff_contracts",
         Package::Contracts,
         Level::Power,
@@ -884,6 +898,13 @@ pub const CAPABILITIES: &[Capability] = &[
         Level::Power,
         "impact paths from an endpoint, field, or symbol",
         "asking how a change in one place reaches the rest of the federation",
+    ),
+    c(
+        "trace_flow",
+        Package::Contracts,
+        Level::Power,
+        "one path from an endpoint, symbol or table across the contract boundary, with gaps",
+        "tracing a value from the table to its consumers (or back) and seeing where the chain breaks",
     ),
     c(
         "get_coverage",

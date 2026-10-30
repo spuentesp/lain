@@ -206,6 +206,14 @@ pub const CONTRACT_TOOL_DEFS: &[ToolDef] = &[
         output_schema: Some(include_str!("contract_tools/schemas/get_snapshot.out.json")),
     },
     ToolDef {
+        name: "list_service_refs",
+        description: "URL literals in the federation's repos that name a declared service: where each one lives, what its host resolves to, and whether a sensor saw a call there. Live view only.",
+        required_args: &["snapshot"],
+        optional_args: &["repo", "usage", "outcome", "cursor", "limit"],
+        input_schema: Some(include_str!("contract_tools/schemas/list_service_refs.in.json")),
+        output_schema: Some(include_str!("contract_tools/schemas/list_service_refs.out.json")),
+    },
+    ToolDef {
         name: "list_contracts",
         description: "Endpoints the federation exposes, filterable by service, repo, and kind (http/topic).",
         required_args: &["snapshot"],
@@ -238,6 +246,14 @@ pub const CONTRACT_TOOL_DEFS: &[ToolDef] = &[
         output_schema: Some(include_str!("contract_tools/schemas/check_binding.out.json")),
     },
     ToolDef {
+        name: "apply_contract_context",
+        description: "Declare the contract context the analyzer cannot see into the federation's repos.yaml: `provides` for an endpoint a service exposes (a runtime-configured route, a mesh spec), `host_aliases` for which service a host expression dials, and `bindings` for an explicit existing consumer to compatible endpoint mapping. Binding selectors must match exactly one current site; conflicting destinations are refused. Confirmed records a declaration, not human approval. Dry-run by default: returns the YAML that would be written. With dry_run=false it validates the whole result, writes atomically with a .bak, re-joins the contract index, and reports applied=true only when the declaration is served; a failed re-join restores the file.",
+        required_args: &["snapshot"],
+        optional_args: &["provides", "host_aliases", "bindings", "dry_run"],
+        input_schema: Some(include_str!("contract_tools/schemas/apply_contract_context.in.json")),
+        output_schema: Some(include_str!("contract_tools/schemas/apply_contract_context.out.json")),
+    },
+    ToolDef {
         name: "diff_contracts",
         description: "Provider and consumer changes between two snapshots, classified, with impact paths and coverage (§12). `live` is not allowed as base/head.",
         required_args: &["base", "head"],
@@ -252,6 +268,14 @@ pub const CONTRACT_TOOL_DEFS: &[ToolDef] = &[
         optional_args: &["depth", "min_confidence", "cap"],
         input_schema: Some(include_str!("contract_tools/schemas/trace_impact.in.json")),
         output_schema: Some(include_str!("contract_tools/schemas/trace_impact.out.json")),
+    },
+    ToolDef {
+        name: "trace_flow",
+        description: "One path across the contract boundary: from an endpoint, symbol or table, follow Calls/Binds/CallsGraphql/SendsHttp/ReadsTable edges downstream (toward the data) or upstream (toward consumers). Returns ranked chains with per-hop provenance and explicit `gaps` where the chain stops and why. `strategy` picks `breadth` (default: everything one hop at a time, nearest first) or `depth` (follow each chain to its end before backtracking).",
+        required_args: &["from"],
+        optional_args: &["snapshot", "direction", "strategy", "depth", "cap"],
+        input_schema: Some(include_str!("contract_tools/schemas/trace_flow.in.json")),
+        output_schema: Some(include_str!("contract_tools/schemas/trace_flow.out.json")),
     },
     ToolDef {
         name: "get_coverage",

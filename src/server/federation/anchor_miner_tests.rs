@@ -1725,3 +1725,57 @@ fn malformed_anchor_override_degrades_to_bundled_with_warning() {
         "bundled fallback must keep classifying queue literals: {got:?}"
     );
 }
+
+// ─── no whole-graph clones ────────────────────────────────────────────
+
+/// The mint pass used to clone every node (`list_nodes`) and every edge
+/// (`all_edges`) and seed a `HashSet` with both endpoint ids of every
+/// existing edge. It now visits by reference and dedupes through the
+/// backend's indexed `edges_to`. A counting backend proves neither clone
+/// happens, and the second run proves the indexed dedupe still sees the
+/// edges the first run minted: nothing re-minted, nothing retracted.
+#[test]
+fn mint_pass_makes_no_whole_graph_clone_and_still_dedupes() {
+    use super::graph_backend_tests::HashMapBackend;
+    let backend = HashMapBackend::new();
+    let ledger = repo("ledger-svc");
+    let bind_queue = spanned_node(
+        &ledger,
+        NodeType::Function,
+        "src/ledger.py",
+        "bind_queue",
+        (8, 10),
+    );
+    backend.upsert_node(bind_queue).unwrap();
+    let occ = [
+        occurrence(
+            "ledger-svc",
+            "src/ledger.py",
+            9,
+            AnchorKind::Queue,
+            "order-events",
+        ),
+        occurrence(
+            "orders-svc",
+            "amqp.toml",
+            2,
+            AnchorKind::Queue,
+            "order-events",
+        ),
+    ];
+
+    let first = mint_cross_repo_observations(&backend, &occ, &[]).expect("first mint");
+    assert_eq!(first.anchor_edges, 2, "both directions: {first:?}");
+
+    let second = mint_cross_repo_observations(&backend, &occ, &[]).expect("second mint");
+    assert_eq!(second.anchor_edges, 0, "already present: {second:?}");
+    assert_eq!(second.retracted_edges, 0, "still desired: {second:?}");
+    assert_eq!(
+        backend.edges_to_total_for_test(),
+        2,
+        "no duplicate edges after the second pass"
+    );
+
+    assert_eq!(backend.all_edges_calls(), 0, "cloned every edge");
+    assert_eq!(backend.list_nodes_calls(), 0, "cloned every node");
+}

@@ -27,7 +27,7 @@ HTTP+GraphQL to all six kinds (Task 3).
 | `topic` | `event_sensor` | `resolve_topic_consumer` | yes | `Produces`, `Consumes`, `PayloadSchema` |
 | `rpc` | `grpc_provider_sensor`, `grpc_consumer_sensor`, `grpc_handler_link_sensor`, `proto_sensor` | `resolve_rpc_consumer` | yes | — (nodes only) |
 | `websocket` | `websocket_sensor` | `resolve_websocket_consumer` | yes | — (nodes only) |
-| `table` | `sql_sensor` | `resolve_table_consumer` | yes | — (nodes only) |
+| `table` | `sql_sensor`, `django_orm_sensor` | `resolve_table_consumer` | yes | — (nodes only) |
 
 "Dashboard view edges" lists the workspace-graph edge types
 (`WORKSPACE_GRAPH_EDGE_TYPES` — `Calls`, `Imports`,
@@ -42,11 +42,18 @@ each kind and are backlog, not silence.
 ## http
 
 - **Sensors.** `http_sensor` (routes), `http_client_sensor` (call
-  sites), `openapi_sensor` (spec-derived routes and schemas).
+  sites), `openapi_sensor` (spec-derived routes and schemas). The client
+  sensor resolves a URL's host expression through the file's assignments —
+  a name, a template, a member expression, a constructor argument — to the
+  environment variable that configures it, so a host built from
+  `process.env.X` is a known env host rather than an unresolved expression.
 - **Resolver.** The HTTP ladder (`consumer_http.rs`) — §7.3 tier by
   tier: exact route, prefix-stripped template, `http_clients`
   wrapper registry, host evidence, env-var dispatch, unbound-host
-  heuristic.
+  heuristic. A declared `host_aliases:` entry routes a consumer whose
+  host the analyzer cannot follow: a known path binds like any other
+  target, a dynamic path resolves to `no_route_in_service` with the
+  service attached.
 - **Bindings.** `http:<METHOD> <template>` (the shortened
   `<METHOD> <template>` form is accepted in `provider.key`
   position). Same-kind template bridges are supported
@@ -70,6 +77,22 @@ each kind and are backlog, not silence.
   operator sees a `Coverage.unresolved_refs` entry they can act
   on (inline the schema or onboard the foreign file).
 - **Status.** Complete: detected, joined, confirmable, visible.
+- **Measured on real repositories** (2026-10-29, Lain `559ab953`,
+  `scripts/eval/nat-http-contract-smoke.sh`, NVIDIA NeMo-Agent-Toolkit,
+  -UI and -Examples, three repos `ready`): 12 HTTP endpoints; 1 bound
+  consumer, a test client calling the declared `http:POST /chat/stream`;
+  43 unresolved (`no_match` 29, `no_route_in_service` 10, `graphql_no_op` 2,
+  `env_unmapped` 2). The garbage `ANY` routes went from 8 to 0. The UI's
+  Next.js `pages/api/mcp/clients.ts` is now `http:ANY /api/mcp/clients`.
+  The UI proxy (`proxy/server.js`) is attributed to the `nat` service by a
+  declared `host_aliases:` entry: it resolves to `no_route_in_service`
+  with the service attached, not to a bind — a transparent proxy forwards
+  whatever the client asked for, so the route is dynamic. The alias names
+  the host expression `UPSTREAM_HTTP_ORIGIN`; the analyzer reaches it
+  because a `const` in an enclosing scope is visible in a nested closure.
+  Declared providers come from `provides:` (or
+  `apply_contract_context`), since NAT registers its routes from a
+  runtime config file.
 
 ## graphql
 
@@ -144,6 +167,22 @@ each kind and are backlog, not silence.
   (`RequestSchema`/`ResponseSchema`/`HasField`) are outside the
   dashboard filter. **Backlog.**
 - **Status.** Detected, joined, confirmable.
+- **Measured on real repositories** (2026-10-29, Lain `4b6cafad`,
+  `scripts/eval/openshell-contract-smoke.sh`, NVIDIA/OpenShell,
+  NVIDIA/NeMo-Fabric and NVIDIA/NemoClaw shallow clones, three repos
+  `ready` in about 230 s): 120 RPC contracts from the `openshell.v1`
+  proto services, 21 with a bound consumer. The bound consumers come
+  from the Python SDK's `self._stub` / `stub` handles. Their channel
+  resolves through the file's gateway-shaped env read
+  (`OPENSHELL_GATEWAY`, chosen over `XDG_CONFIG_HOME`). That var names
+  a gateway, so the bind is service-level, not a verified dial address.
+  NeMo-Fabric's Rust provider is a cross-repo dependent through call
+  edges: 42 of its functions call OpenShell's `parse_sandbox_policy`.
+  That call-graph edge is the accepted result for this dependency. The
+  Rust provider calls OpenShell through the SDK wrapper
+  (`OpenShellClient`), not generated stubs, so it is not an RPC contract
+  consumer. A Rust gRPC consumer detector, with a wrapper-to-RPC mapping,
+  is not built. Re-run the script to reproduce.
 
 ## websocket
 
@@ -169,6 +208,15 @@ each kind and are backlog, not silence.
 - **Sensors.** `sql_sensor` — literal SQL and ORM call sites, one
   `TableConsumer` fact per site listing every table the statement
   touches (SELECT, CTEs, subselects, joins, and the DML verbs).
+  `django_orm_sensor` — Django models: it maps each model class to its
+  table (`Meta.db_table`, else `<app_label>_<classname>`) and emits
+  `ReadsTable` / `WritesTable` edges from the functions that run
+  `Model.objects…` chains, `get_object_or_404`, or save an instance it
+  can bind in the same function. Its `Table` nodes sit at the model's
+  file and share the contract key with raw SQL on the same table name.
+  A chain with only custom manager methods is a heuristic read
+  (confidence 0.6); what it cannot resolve lands on the ledger as
+  `OrmDynamicQuery`. SQLAlchemy and Prisma are not covered.
 - **Resolver.** `resolve_table_consumer` — tables are identified by
   name alone; ownership (which service's endpoint table a `Table`
   lands in) comes from `databases[]` in `repos.yaml`, widened by

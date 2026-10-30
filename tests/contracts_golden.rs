@@ -1,4 +1,4 @@
-//! Golden tests for the 13 contract-federation MCP tools (§15.3).
+//! Golden tests for the 14 contract-federation MCP tools (§15.3).
 //!
 //! Each tool has a hand-written `*.out.json` schema under
 //! `src/server/mcp/contract_tools/schemas/`. These tests build the
@@ -33,7 +33,7 @@ fn envelope_schema() -> &'static Validator {
 fn validate_envelope(envelope: &Value) -> Result<(), String> {
     let result = envelope_schema().validate(envelope);
     if let Err(error) = result {
-        return Err(format!("{}: {}", error.instance_path, error));
+        return Err(format!("{}: {}", error.instance_path(), error));
     }
     Ok(())
 }
@@ -561,6 +561,9 @@ fn data_schema_for(tool: &str) -> &'static Validator {
         "trace_impact" => compile(include_str!(
             "../src/server/mcp/contract_tools/schemas/trace_impact.out.json"
         )),
+        "trace_flow" => compile(include_str!(
+            "../src/server/mcp/contract_tools/schemas/trace_flow.out.json"
+        )),
         "get_coverage" => compile(include_str!(
             "../src/server/mcp/contract_tools/schemas/get_coverage.out.json"
         )),
@@ -751,6 +754,38 @@ fn golden_trace_impact_data_matches_per_tool_schema() {
         &json!({
             "paths": [],
             "truncated": false,
+            "scope": {"reviewed": [], "unreviewed": [], "configured_only": true}
+        }),
+    );
+}
+
+#[test]
+fn golden_trace_flow_data_matches_per_tool_schema() {
+    assert_data_matches_schema(
+        "trace_flow",
+        &json!({
+            "from": {"symbol": "resolve_product"},
+            "direction": "downstream",
+            "seeds": ["api:Method:api/schema.py:resolve_product:40"],
+            "paths": [{
+                "min_confidence": 1.0,
+                "boundary_hops": 1,
+                "hops": [
+                    {"id": "a", "name": "resolve_product", "node_type": "Method",
+                     "repo": "api", "path": "api/schema.py", "line": 40,
+                     "edge_type": null, "provenance": null, "engine_fact": true},
+                    {"id": "b", "name": "product", "node_type": "Table",
+                     "repo": "api", "path": "api/db.py", "line": 0,
+                     "edge_type": "ReadsTable",
+                     "provenance": {"kind": "static", "confidence": 1.0},
+                     "engine_fact": true}
+                ]
+            }],
+            "gaps": [{"node": "a", "name": "resolve_product", "kind": "no_data_sink",
+                      "reason": "no table reached"}],
+            "truncated": true,
+            "truncation_reasons": ["depth"],
+            "nodes_visited": 2,
             "scope": {"reviewed": [], "unreviewed": [], "configured_only": true}
         }),
     );

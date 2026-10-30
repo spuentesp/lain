@@ -246,6 +246,50 @@ pub(super) fn resolve_consumer(
         }
     }
 
+    // A declared host alias says which service an unknown host dials: by
+    // host expression, or by file for a call whose host the analyzer cannot
+    // follow. A known path is matched like any other target. A dynamic path
+    // (a transparent proxy forwards whatever the client asked for) is "known
+    // service, unknown route", not a bind.
+    let call_path = call_id.path().unwrap_or_default();
+    let alias = config
+        .host_aliases
+        .iter()
+        .find(|a| match &consumer.url.host {
+            HostPart::Expr(expr) => {
+                a.host.as_deref() == Some(expr.as_str())
+                    || a.file.as_deref() == Some(call_path.as_str())
+            }
+            HostPart::None => a.file.as_deref() == Some(call_path.as_str()),
+            _ => false,
+        });
+    if let Some(alias) = alias {
+        let svc = ServiceName(alias.service.clone());
+        if target_template.is_none() {
+            return ConsumerResolution {
+                call_id: call_id.clone(),
+                service: own_service.clone(),
+                target: Some(ConsumerTarget::Unresolved {
+                    reason: UnresolvedReason::NoRouteInService,
+                    target_service: Some(svc),
+                }),
+                bound_endpoints: Vec::new(),
+                reads_complete: consumer.reads_complete,
+            };
+        }
+        return match_one_service(
+            call_id,
+            consumer,
+            own_service,
+            svc,
+            &target_method,
+            target_template.as_deref(),
+            true,
+            endpoints,
+            binds,
+        );
+    }
+
     if target_template.is_none() {
         return ConsumerResolution {
             call_id: call_id.clone(),
@@ -257,6 +301,31 @@ pub(super) fn resolve_consumer(
             bound_endpoints: Vec::new(),
             reads_complete: consumer.reads_complete,
         };
+    }
+
+    // A relative URL (`fetch("/api/x")`, no host) is same-origin: it calls the
+    // service that serves the code. Match that service's own endpoints as an
+    // `Internal` resolution only when the match is certain (known HTTP method
+    // and non-prefix-stripped route, confidence == 1.0), never a cross-service
+    // `Binds` edge (I5).
+    if matches!(consumer.url.host, HostPart::None) {
+        if let Some(tmpl) = target_template.as_deref() {
+            if tmpl.starts_with('/') {
+                if let Some((key, detail)) =
+                    best_provider_for(own_service, &target_method, Some(tmpl), endpoints)
+                {
+                    if (detail.confidence - 1.0).abs() < f32::EPSILON {
+                        return ConsumerResolution {
+                            call_id: call_id.clone(),
+                            service: own_service.clone(),
+                            target: Some(ConsumerTarget::Internal),
+                            bound_endpoints: vec![(own_service.clone(), key)],
+                            reads_complete: consumer.reads_complete,
+                        };
+                    }
+                }
+            }
+        }
     }
 
     let generic_keys: BTreeSet<ContractKey> = config

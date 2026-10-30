@@ -82,6 +82,16 @@ type TopicIdioms = (
     Vec<util::CompiledIdiom>,
 );
 
+/// Whole-file prefilters for one language's idioms (see [`util::IdiomGate`]):
+/// `producers` gates the wrapper pre-pass, `all` gates site detection.
+struct IdiomGates {
+    producers: util::IdiomGate,
+    all: util::IdiomGate,
+}
+
+/// A language's compiled idioms plus the gates built from them.
+type LangIdioms = (Lang, TopicIdioms, IdiomGates);
+
 #[cfg(test)]
 thread_local! {
     static IDIOM_SET_COMPILE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -183,7 +193,7 @@ pub fn scan_workspace_event_with_report(
 
     // Load once per scan so every site uses the same repo-local patterns.
     let patterns = Patterns::with_overrides(root)?;
-    let mut idioms: Vec<(Lang, TopicIdioms)> = Vec::new();
+    let mut idioms: Vec<LangIdioms> = Vec::new();
 
     let mut all_nodes: Vec<GraphNode> = Vec::new();
     let mut all_edges: Vec<GraphEdge> = Vec::new();
@@ -195,6 +205,8 @@ pub fn scan_workspace_event_with_report(
     let mut producer_gaps = ProducerGaps::default();
     // The env sensor runs first (phase 0), so its scalar channel is populated.
     let env = env_sensor::scalar_bindings_for(root);
+    let phase_started = std::time::Instant::now();
+    let mut stage = SiteStageTimes::default();
     // Go package scope is read from every `.go` file before the site walk, so a
     // reference to another package's value resolves regardless of walk order.
     let go_files: Vec<(std::path::PathBuf, String)> = util::scan_files(root, |p| {
@@ -203,9 +215,13 @@ pub fn scan_workspace_event_with_report(
     .map(|(p, c, _)| (p, c))
     .collect();
     let go_scopes = go_constant_scopes(root, &go_files, &env);
+    stage.go_scopes = phase_started.elapsed();
     // Wrappers are read in a pass of their own, so a call site in one file
     // resolves against a wrapper defined in any other file.
+    let wrappers_started = std::time::Instant::now();
     let wrappers = collect_wrappers(root, &patterns, &mut idioms);
+    stage.wrappers = wrappers_started.elapsed();
+    let wrapper_gate = util::IdiomGate::for_literals(wrappers.keys().map(String::as_str));
 
     for (path, content, ext) in crate::server::sensors::util::scan_files(root, file_extension) {
         let ext = ext.as_str();
@@ -213,9 +229,18 @@ pub fn scan_workspace_event_with_report(
             continue;
         };
         let index = topic_idioms_index(&mut idioms, &patterns, lang);
+        // A file no idiom (and no wrapper name) can match yields no sites:
+        // skip the per-line walk entirely.
+        if !idioms[index].2.all.may_match(&content) && !wrapper_gate.may_match(&content) {
+            stage.skipped += 1;
+            continue;
+        }
+        stage.scanned += 1;
         let path_str = graph_path(root, &path);
+        let t = std::time::Instant::now();
         let mut constants = collect_same_file_constants(&content, ext, &env);
         let mut gaps = collect_env_gaps(&content, ext, &env);
+        stage.constants += t.elapsed();
         if ext == "go" {
             if let Some(scope) = go_scopes.get(&dir_key(root, &path)) {
                 for (key, value) in &scope.values {
@@ -229,6 +254,7 @@ pub fn scan_workspace_event_with_report(
             }
         }
         let mut unresolved_producers: Vec<(u32, Option<String>)> = Vec::new();
+        let t = std::time::Instant::now();
         let sites = detect_sites(
             &content,
             ext,
@@ -237,6 +263,7 @@ pub fn scan_workspace_event_with_report(
             &wrappers,
             &mut unresolved_producers,
         );
+        stage.detect += t.elapsed();
         for (line, identifier) in unresolved_producers {
             let reason = identifier
                 .as_ref()
@@ -245,8 +272,10 @@ pub fn scan_workspace_event_with_report(
                 .unwrap_or(UnresolvedReason::DynamicTopic);
             producer_gaps.record(reason, format!("{path_str}:{line}"));
         }
+        let t = std::time::Instant::now();
         let (nodes, edges) =
             emit_sites(&sites, &path_str, namespace, graph, &mut emitted_topic_ids);
+        stage.emit += t.elapsed();
         all_nodes.extend(nodes);
         all_edges.extend(edges);
     }
@@ -283,14 +312,45 @@ pub fn scan_workspace_event_with_report(
     // Payload schemas ride the same EventSensor batch, scanned after
     // site emission so a schema's `topic` can bind to a `Topic` node
     // minted in this very scan.
+    let t = std::time::Instant::now();
     scan_payload_schemas(&mut all_nodes, &mut all_edges, root, namespace);
+    stage.payload_schemas = t.elapsed();
 
+    let t = std::time::Instant::now();
     graph.replace_sensor_output(SensorOwner::EventSensor, &all_nodes, &all_edges)?;
+    stage.replace = t.elapsed();
+    tracing::info!(
+        go_scopes_ms = stage.go_scopes.as_millis() as u64,
+        wrappers_ms = stage.wrappers.as_millis() as u64,
+        constants_ms = stage.constants.as_millis() as u64,
+        detect_ms = stage.detect.as_millis() as u64,
+        emit_ms = stage.emit.as_millis() as u64,
+        payload_schemas_ms = stage.payload_schemas.as_millis() as u64,
+        replace_ms = stage.replace.as_millis() as u64,
+        files_scanned = stage.scanned,
+        files_skipped = stage.skipped,
+        "event sensor stages"
+    );
     Ok(ScanReport {
         emitted: all_nodes.len(),
         error: None,
         unresolved: producer_gaps.into_records(),
     })
+}
+
+/// Wall time per stage of one event-sensor scan, logged once at the end so a
+/// slow scan says which stage to look at.
+#[derive(Default)]
+struct SiteStageTimes {
+    go_scopes: std::time::Duration,
+    wrappers: std::time::Duration,
+    constants: std::time::Duration,
+    detect: std::time::Duration,
+    emit: std::time::Duration,
+    payload_schemas: std::time::Duration,
+    replace: std::time::Duration,
+    scanned: u64,
+    skipped: u64,
 }
 
 /// Producer sites whose topic did not resolve, by the reason each earns: an
@@ -501,7 +561,7 @@ fn collect_same_file_constants(
 fn dir_key(root: &Path, path: &Path) -> String {
     path.parent()
         .and_then(|p| p.strip_prefix(root).ok())
-        .map(|p| p.to_string_lossy().into_owned())
+        .map(crate::server::path_util::posix_string)
         .unwrap_or_default()
 }
 
@@ -864,18 +924,19 @@ fn applicable(idioms: &[util::CompiledIdiom], content: &str) -> Vec<util::Compil
 }
 
 /// The index of `lang`'s topic idioms in `idioms`, compiling them on first use.
-fn topic_idioms_index(
-    idioms: &mut Vec<(Lang, TopicIdioms)>,
-    patterns: &Patterns,
-    lang: Lang,
-) -> usize {
+fn topic_idioms_index(idioms: &mut Vec<LangIdioms>, patterns: &Patterns, lang: Lang) -> usize {
     idioms
         .iter()
-        .position(|(cached_lang, _)| *cached_lang == lang)
+        .position(|(cached_lang, ..)| *cached_lang == lang)
         .unwrap_or_else(|| {
             #[cfg(test)]
             IDIOM_SET_COMPILE_COUNT.with(|count| count.set(count.get() + 1));
-            idioms.push((lang, util::topic_idioms_for(patterns, lang)));
+            let set = util::topic_idioms_for(patterns, lang);
+            let gates = IdiomGates {
+                producers: util::IdiomGate::new(&[&set.0]),
+                all: util::IdiomGate::new(&[&set.0, &set.1, &set.2]),
+            };
+            idioms.push((lang, set, gates));
             idioms.len() - 1
         })
 }
@@ -885,7 +946,7 @@ fn topic_idioms_index(
 fn collect_wrappers(
     root: &Path,
     patterns: &Patterns,
-    idioms: &mut Vec<(Lang, TopicIdioms)>,
+    idioms: &mut Vec<LangIdioms>,
 ) -> WrapperIndex {
     let mut found: BTreeMap<String, Vec<WrapperDef>> = BTreeMap::new();
     for (_path, content, ext) in util::scan_files(root, file_extension) {
@@ -893,6 +954,9 @@ fn collect_wrappers(
             continue;
         };
         let index = topic_idioms_index(idioms, patterns, lang);
+        if !idioms[index].2.producers.may_match(&content) {
+            continue;
+        }
         let producers = applicable(&idioms[index].1 .0, &content);
         for (name, def) in
             event_wrappers::wrappers_in_file(&content, lang, &producers, DEFAULT_BROKER)
@@ -1335,6 +1399,124 @@ fn emit_sites(
 
 #[cfg(test)]
 mod tests {
+    // ─── IdiomGate: the prefilter may only ever err toward "yes" ────────
+
+    const GATE_CORPUS: &[&str] = &[
+        "producer.send({ topic: 'orders', messages: [] })\n",
+        "await consumer.subscribe({ topic: 'orders' })\n",
+        "producer.send(\"orders\", value)\n",
+        "@shared_task\ndef nightly():\n    pass\n",
+        "@app.task\ndef work():\n    pass\n",
+        "cron.schedule('0 0 1 * *', report);\n",
+        "kafkaTemplate.send(\"orders\", payload);\n",
+        "@KafkaListener(topics = \"orders\")\nvoid on(String m) {}\n",
+        "def add(a, b):\n    return a + b\n",
+        "const x = 1;\nfunction f() { return x; }\n",
+        "package main\nfunc main() {}\n",
+        "",
+    ];
+    const GATE_EXTS: &[&str] = &["py", "ts", "js", "go", "java", "rb", "kt", "cs", "rs"];
+
+    fn gate_fixture(ext: &str) -> (Lang, TopicIdioms, IdiomGates) {
+        let dir = tempfile::tempdir().unwrap();
+        let patterns = Patterns::with_overrides(dir.path()).unwrap();
+        let lang = ext_to_lang(ext).unwrap();
+        let mut idioms: Vec<LangIdioms> = Vec::new();
+        let i = topic_idioms_index(&mut idioms, &patterns, lang);
+        idioms.swap_remove(i)
+    }
+
+    #[test]
+    fn idiom_gate_never_hides_a_site_the_line_walk_would_find() {
+        let mut positives = 0;
+        for ext in GATE_EXTS {
+            let (_, idioms, gates) = gate_fixture(ext);
+            for content in GATE_CORPUS {
+                let mut unresolved = Vec::new();
+                let sites = detect_sites(
+                    content,
+                    ext,
+                    &BTreeMap::new(),
+                    &idioms,
+                    &WrapperIndex::new(),
+                    &mut unresolved,
+                );
+                if !gates.all.may_match(content) {
+                    assert!(
+                        sites.is_empty() && unresolved.is_empty(),
+                        "gate hid a site: ext={ext} content={content:?}"
+                    );
+                } else if !sites.is_empty() {
+                    positives += 1;
+                }
+            }
+        }
+        assert!(positives > 0, "corpus must exercise at least one real site");
+    }
+
+    #[test]
+    fn idiom_gate_skips_a_file_with_no_candidates() {
+        let (_, _, gates) = gate_fixture("py");
+        assert!(!gates.all.may_match("def add(a, b):\n    return a + b\n"));
+        assert!(!gates.producers.may_match(""));
+    }
+
+    #[test]
+    fn idiom_gate_always_passes_crlf_files() {
+        let (_, _, gates) = gate_fixture("py");
+        assert!(gates
+            .all
+            .may_match("def add(a, b):\r\n    return a + b\r\n"));
+    }
+
+    #[test]
+    fn literal_gate_matches_wrapper_names_anywhere() {
+        let gate = util::IdiomGate::for_literals(["publish_order", "emit.event"]);
+        assert!(gate.may_match("x = publish_order(1)\n"));
+        assert!(gate.may_match("emit.event(2)\n"));
+        assert!(
+            !gate.may_match("emitXevent(2)\n"),
+            "names are escaped, not regexes"
+        );
+        assert!(!util::IdiomGate::for_literals(std::iter::empty()).may_match("anything"));
+    }
+
+    /// Throwaway timing harness: `LAIN_SENSOR_SANITY_ROOT=<repo> cargo test
+    /// --lib sensor_stage_timing -- --ignored --nocapture`. Runs the sensor
+    /// over a real checkout on an empty graph and prints the stage log line.
+    #[test]
+    #[ignore]
+    fn sensor_stage_timing_over_a_real_checkout() {
+        let Ok(root) = std::env::var("LAIN_SENSOR_SANITY_ROOT") else {
+            return;
+        };
+        let root = std::path::PathBuf::from(root);
+        let _ = tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_ansi(false)
+            .try_init();
+        let tmp = tempfile::tempdir().unwrap();
+        let g = GraphDatabase::new(&tmp.path().join("db.bin")).unwrap();
+        let started = std::time::Instant::now();
+        let report = util::with_workspace_scan_cache(&root, || {
+            scan_workspace_event_with_report(&g, &root, &RepoNamespace::for_test())
+        })
+        .unwrap();
+        use std::hash::{Hash, Hasher};
+        let mut ids: Vec<String> = g.get_all_nodes().into_iter().map(|n| n.id).collect();
+        ids.sort();
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        ids.hash(&mut h);
+        let unresolved: usize = report.unresolved.iter().map(|u| u.count).sum();
+        println!(
+            "event sensor total {:?}, emitted {}, unresolved {}, node-id fingerprint {:016x}",
+            started.elapsed(),
+            report.emitted,
+            unresolved,
+            h.finish()
+        );
+    }
+
     use super::*;
     use crate::federation::contracts::model::ContractFact;
     use crate::schema::{GraphNode, NodeType, RepoNamespace};

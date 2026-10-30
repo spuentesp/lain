@@ -971,8 +971,8 @@ fn hub_keeps_one_consumes_edge_per_site() {
     let ns = RepoNamespace::for_test();
     let graph = GraphDatabase::new(&root.join("graph.bin")).expect("open graph");
     let mut fn_node = GraphNode::new(NodeType::Function, "start".into(), "consumer.ts".into());
-    fn_node.id = GraphNode::generate_id(&NodeType::Function, "consumer.ts", "start", Some(2), &ns);
-    fn_node.line_start = Some(2);
+    fn_node.id = GraphNode::generate_id(&NodeType::Function, "consumer.ts", "start", Some(1), &ns);
+    fn_node.line_start = Some(1);
     fn_node.line_end = Some(5);
     graph.upsert_node(fn_node.clone()).expect("seed symbol");
 

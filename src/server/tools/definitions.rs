@@ -132,11 +132,14 @@ pub fn readiness_requirement(name: &str) -> Option<ReadinessRequirement> {
             // `from_snapshot` projection (named snapshots); both
             // require the graph to be indexed.
             | "list_contracts"
+            | "list_service_refs"
             | "get_contract"
             | "list_unresolved"
             | "check_binding"
+            | "apply_contract_context"
             | "diff_contracts"
             | "trace_impact"
+            | "trace_flow"
             | "get_coverage"
             | "resolve_evidence"
             | "read_source"

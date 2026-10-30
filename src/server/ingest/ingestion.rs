@@ -809,6 +809,17 @@ impl LainServer {
         if sensor_counts.total() > 0 {
             info!("Protocol sensors contributed {:?}", sensor_counts);
         }
+        if let Err(error) = crate::server::sensors::grpc_consumer_sensor::semantic::enrich(
+            self.ingest().graph(),
+            &self.ingest().config().workspace,
+            self.ingest().id_namespace(),
+            self.ingest().lsp_pool(),
+            &cancel,
+        )
+        .await
+        {
+            tracing::warn!("Rust RPC LSP enrichment unavailable: {error}");
+        }
 
         // 4. Temporal Analysis Phase: Co-changes
         if cancel.is_cancelled() {
@@ -1495,8 +1506,8 @@ pub async fn relink_cross_repo(
     // indexing passes: the gate goes down while this pass re-resolves the
     // cross-repo edges and comes back up once they are in the table.
     graph.clear_calls_published();
-    let refs = if let Some(cached) = graph.get_cached_static_refs() {
-        cached
+    let (refs, rebuilt) = if let Some(cached) = graph.get_cached_static_refs() {
+        (cached, false)
     } else {
         let git_sensor = Arc::clone(git);
         let files = offthread(cancel.clone(), move || {
@@ -1546,14 +1557,18 @@ pub async fn relink_cross_repo(
             },
         )
         .await?;
-        graph.set_cached_static_refs(extracted.clone());
-        extracted
+        (extracted, true)
     };
     let external: Vec<GraphEdge> =
         super::resolve::resolve_static_edges(graph, &refs, Some(resolver), Some(source_repo))
             .into_iter()
             .filter(|e| !graph.has_node(&e.target_id))
             .collect();
+    // A rebuilt set moves into the cache (one copy, not a clone beside it)
+    // before the edges are inserted, so the next relink is served from it.
+    if rebuilt {
+        graph.set_cached_static_refs(refs);
+    }
     let n = external.len();
     graph.insert_edges_batch(&external)?;
     // The relink pass is complete — same stamp semantics as the indexing
@@ -1733,6 +1748,18 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<IndexOutcome, L
         if let Some(ref last) = last_commit {
             if last == &latest_commit {
                 info!("[federation] {:?} already up to date at {}", path, last);
+                if !mode.skips_lsp() {
+                    if let Some(pool) = lsp_pool {
+                        if let Err(error) =
+                            crate::server::sensors::grpc_consumer_sensor::semantic::enrich(
+                                graph, path, namespace, pool, cancel,
+                            )
+                            .await
+                        {
+                            tracing::warn!("Rust RPC LSP enrichment unavailable: {error}");
+                        }
+                    }
+                }
                 return Ok(IndexOutcome {
                     sensor_counts: crate::server::sensors::SensorCounts::default(),
                     sensor_reports: Vec::new(),
@@ -1979,8 +2006,6 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<IndexOutcome, L
         let tracked_rel: HashSet<String> = tracked.iter().map(|p| graph_path(path, p)).collect();
         graph.update_cached_static_refs(&scanned_rel, &tracked_rel, &all_static_refs);
         all_static_refs.extend(refs_into_rescanned(path, graph, &files_to_scan, &tracked));
-    } else {
-        graph.set_cached_static_refs(all_static_refs.clone());
     }
     let static_edges = super::resolve::resolve_static_edges(
         graph,
@@ -1988,6 +2013,14 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<IndexOutcome, L
         resolver_for_resolve,
         source_repo,
     );
+    // A full pass hands its refs to the cache instead of cloning them: one
+    // copy exists, not two, while a large repo indexes (about 97 MB on
+    // saleor). The cache is set before the edges are inserted so a failing
+    // insert leaves it as it always did. A snapshot graph is never
+    // relinked (no cross-repo resolver runs on it), so it keeps none.
+    if !(last_commit.is_some() && !force) && !mode.skips_lsp() {
+        graph.set_cached_static_refs(all_static_refs);
+    }
     info!(
         "[federation] {:?}: ingesting {} static tree-sitter edges",
         path,
@@ -2043,6 +2076,20 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<IndexOutcome, L
             "[federation] {:?}: protocol sensors contributed {:?}",
             path, sensor_counts
         );
+    }
+
+    if !mode.skips_lsp() {
+        if let Some(pool) = lsp_pool {
+            if let Err(error) = crate::server::sensors::grpc_consumer_sensor::semantic::enrich(
+                graph, path, namespace, pool, &cancel,
+            )
+            .await
+            {
+                tracing::warn!("Rust RPC LSP enrichment unavailable: {error}");
+            }
+        }
+    } else {
+        graph.clear_rust_rpc_semantics();
     }
 
     // Co-change analysis — F2: use the `try_*` variant (same rationale
@@ -3232,6 +3279,216 @@ mod relink_calls_published_tests {
             Some("commit-a"),
             "relink must re-stamp the gate for the graph's indexed commit when it finishes"
         );
+    }
+}
+
+#[cfg(test)]
+mod static_ref_cache_tests {
+    //! The per-repo `StaticFileRef` cache is the largest retained structure
+    //! of an index pass (about 97 MB on saleor). It must exist exactly where
+    //! `relink_cross_repo` reads it (live repos), hold exactly what a fresh
+    //! extraction finds, and not be kept for snapshot graphs, which are
+    //! never relinked.
+    use super::*;
+    use crate::federation::cross_repo::CrossRepoResolver;
+    use crate::federation::repo_id::{GlobalId, RepoId};
+    use crate::git::GitSensorMode;
+
+    const LIB_RS: &str = "pub fn entry() -> u32 { helper(1) + foreign_callee(2) }\n\
+pub fn helper(x: u32) -> u32 { x + 1 }\n";
+
+    struct ForeignResolver;
+    impl CrossRepoResolver for ForeignResolver {
+        fn resolve_cross_repo(
+            &self,
+            _source_repo: &RepoId,
+            name: Option<&str>,
+            _hint_path: Option<&Path>,
+            _hint_line: Option<u32>,
+        ) -> Option<GlobalId> {
+            (name == Some("foreign_callee"))
+                .then(|| GlobalId::from_canonical("other:Function:src/other.rs:foreign_callee:1"))
+        }
+    }
+
+    fn git_repo() -> tempfile::TempDir {
+        let root = tempfile::tempdir().expect("tempdir");
+        let run = |args: &[&str]| {
+            assert!(std::process::Command::new("git")
+                .args(args)
+                .current_dir(root.path())
+                .status()
+                .unwrap()
+                .success());
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "cache-test@lain"]);
+        run(&["config", "user.name", "cache-test"]);
+        std::fs::write(root.path().join("lib.rs"), LIB_RS).unwrap();
+        run(&["add", "-A"]);
+        run(&["commit", "-q", "-m", "fixture"]);
+        root
+    }
+
+    async fn index(root: &Path, db: &GraphDatabase, mode: IndexMode) {
+        let git = AnyGitSensor::new(root, GitSensorMode::InProcess).expect("git");
+        let source_repo = RepoId::new("source").expect("repo id");
+        let namespace = crate::schema::RepoNamespace::from_repo_id(&source_repo);
+        let cancel = CancellationToken::new();
+        index_one_repo(IndexRequest {
+            path: root,
+            graph: db,
+            lsp_pool: None,
+            git: &git,
+            overlay: None,
+            resolver: None,
+            source_repo: Some(&source_repo),
+            namespace: &namespace,
+            force: true,
+            cancel: &cancel,
+            mode,
+        })
+        .await
+        .expect("index");
+    }
+
+    fn keys(refs: &[StaticFileRef]) -> Vec<(String, u32, String)> {
+        let mut k: Vec<_> = refs
+            .iter()
+            .map(|r| (r.file_path.clone(), r.source_line, r.target_name.clone()))
+            .collect();
+        k.sort();
+        k
+    }
+
+    /// What the cache must hold: an independent extraction of the repo.
+    fn expected(root: &Path) -> Vec<(String, u32, String)> {
+        let abs = root.join("lib.rs");
+        let rel = graph_path(root, &abs);
+        let mut k: Vec<_> = crate::treesitter::extract_refs(&abs, LIB_RS)
+            .into_iter()
+            .map(|r| (rel.clone(), r.source_line, r.target_name))
+            .collect();
+        k.sort();
+        k
+    }
+
+    #[tokio::test]
+    async fn a_live_index_caches_exactly_what_a_fresh_extraction_finds() {
+        let root = git_repo();
+        let dir = tempfile::tempdir().unwrap();
+        let db = GraphDatabase::new(&dir.path().join("graph.bin")).unwrap();
+        index(root.path(), &db, IndexMode::Live).await;
+        let cached = db.get_cached_static_refs().expect("live index must cache");
+        let want = expected(root.path());
+        assert!(
+            want.iter().any(|k| k.2 == "foreign_callee"),
+            "fixture must reference foreign_callee: {want:?}"
+        );
+        assert_eq!(keys(&cached), want);
+    }
+
+    /// A snapshot graph is never relinked (no cross-repo resolver runs on
+    /// it), so caching its refs only holds memory for the life of the job.
+    /// RED before the fix: snapshot indexing cached them too.
+    #[tokio::test]
+    async fn a_snapshot_index_does_not_keep_the_static_refs() {
+        let root = git_repo();
+        let dir = tempfile::tempdir().unwrap();
+        let db = GraphDatabase::new(&dir.path().join("graph.bin")).unwrap();
+        index(root.path(), &db, IndexMode::Snapshot).await;
+        assert!(
+            db.get_cached_static_refs().is_none(),
+            "snapshot graphs must not retain the static-ref cache"
+        );
+    }
+
+    /// The cache stays after indexing because later relinks (startup second
+    /// pass, stale-repo reindex, an added repo) read it. With the file gone
+    /// from disk a relink can only succeed from the cache; freeing it would
+    /// force a re-parse of every tracked file and find nothing.
+    #[tokio::test]
+    async fn a_later_relink_is_served_from_the_cache_not_a_reparse() {
+        let root = git_repo();
+        let dir = tempfile::tempdir().unwrap();
+        let db = GraphDatabase::new(&dir.path().join("graph.bin")).unwrap();
+        index(root.path(), &db, IndexMode::Live).await;
+        let git = Arc::new(AnyGitSensor::new(root.path(), GitSensorMode::InProcess).unwrap());
+        let source_repo = RepoId::new("source").unwrap();
+        let cancel = CancellationToken::new();
+
+        let first = relink_cross_repo(
+            root.path(),
+            &db,
+            &git,
+            &ForeignResolver,
+            &source_repo,
+            &cancel,
+        )
+        .await
+        .expect("relink");
+        assert!(first >= 1, "the foreign call must link, got {first}");
+
+        std::fs::remove_file(root.path().join("lib.rs")).unwrap();
+        let second = relink_cross_repo(
+            root.path(),
+            &db,
+            &git,
+            &ForeignResolver,
+            &source_repo,
+            &cancel,
+        )
+        .await
+        .expect("relink");
+        assert_eq!(second, first, "the second relink must read the cache");
+    }
+
+    /// With no cache (a repo whose index predates it), relink rebuilds it
+    /// once, stores it, and the same refs then serve the next relink.
+    #[tokio::test]
+    async fn relink_rebuilds_a_missing_cache_and_stores_it() {
+        let root = git_repo();
+        let dir = tempfile::tempdir().unwrap();
+        let db = GraphDatabase::new(&dir.path().join("graph.bin")).unwrap();
+        // A relink resolves refs from files the graph already knows.
+        let rel = graph_path(root.path(), &root.path().join("lib.rs"));
+        db.insert_nodes_batch(&[crate::schema::GraphNode::new(
+            crate::schema::NodeType::File,
+            "lib.rs".into(),
+            rel,
+        )])
+        .unwrap();
+        assert!(db.get_cached_static_refs().is_none());
+        let git = Arc::new(AnyGitSensor::new(root.path(), GitSensorMode::InProcess).unwrap());
+        let source_repo = RepoId::new("source").unwrap();
+        let cancel = CancellationToken::new();
+
+        let first = relink_cross_repo(
+            root.path(),
+            &db,
+            &git,
+            &ForeignResolver,
+            &source_repo,
+            &cancel,
+        )
+        .await
+        .expect("relink");
+        assert!(first >= 1);
+        let cached = db.get_cached_static_refs().expect("rebuild must be stored");
+        assert_eq!(keys(&cached), expected(root.path()));
+
+        std::fs::remove_file(root.path().join("lib.rs")).unwrap();
+        let second = relink_cross_repo(
+            root.path(),
+            &db,
+            &git,
+            &ForeignResolver,
+            &source_repo,
+            &cancel,
+        )
+        .await
+        .expect("relink");
+        assert_eq!(second, first);
     }
 }
 

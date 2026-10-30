@@ -16,6 +16,7 @@ use crate::federation::contracts::clients::{
     build_client_def, detect_clients, ClientDef, ClientRegistry,
 };
 use crate::federation::contracts::config::ContractFederationConfig;
+use crate::federation::contracts::config::DECLARED_PROVIDER_PATH_PREFIX;
 use crate::federation::contracts::index::ContractIndex;
 use crate::federation::contracts::joiner::ContractJoiner;
 use crate::federation::graph_backend::GraphBackend;
@@ -31,6 +32,7 @@ use dashmap::DashMap;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 /// The global id a node gets once its owning repo is known: `GlobalId::new`
@@ -100,6 +102,18 @@ pub struct FederatedIndex {
     /// `(source, target) -> source declares a dependency on target`;
     /// see [`Self::repo_depends_on`].
     depends_cache: DashMap<(String, String), bool>,
+    /// Package names each repo publishes (`repos[].packages`), keyed by
+    /// repo id. Read by [`Self::repo_depends_on`] as extra identifiers.
+    declared_packages: DashMap<String, Vec<String>>,
+    /// The `repos.yaml` the federation was loaded from; see [`Self::set_config_path`].
+    config_path: RwLock<Option<std::path::PathBuf>>,
+    /// Repo index passes running right now, and the most that ran at
+    /// once. Bounded by `max_concurrent_indexers`; see [`Self::index_all`].
+    index_concurrency_now: AtomicUsize,
+    index_concurrency_peak: AtomicUsize,
+    /// Bound on concurrent repo index passes. Set by the loader from
+    /// `FederationConfig::max_concurrent_indexers`.
+    max_concurrent_indexers: AtomicUsize,
     /// Set by `project_nodes` / `project_edges` whenever the
     /// projected graph could change `Binds` outcomes. Cleared by
     /// `rejoin_contracts_if_dirty` after the join lands (§5.3).
@@ -111,6 +125,16 @@ pub struct FederatedIndex {
     /// The active contract config. Set via `set_contract_config`;
     /// the joiner reads it inside `rejoin_contracts_if_dirty`.
     contract_config: RwLock<Option<Arc<ContractFederationConfig>>>,
+    /// Run parameters (`params:` in repos.yaml) that resolve service env names.
+    service_params: RwLock<std::collections::BTreeMap<String, String>>,
+    /// Service references per repo, recomputed each time the repo is projected,
+    /// so they follow the same revision as the rest of the view.
+    service_refs: RwLock<
+        std::collections::BTreeMap<
+            RepoId,
+            Vec<crate::federation::contracts::service_refs::ServiceRef>,
+        >,
+    >,
     /// Atomic `(contract_index, binds)` pair (TLA+ RejoinProtocol
     /// variant (c) — epoch-stamped atomic publish). The rejoin
     /// produces both halves in one write-lock acquisition; readers
@@ -186,10 +210,19 @@ impl FederatedIndex {
             persist_lock: parking_lot::Mutex::new(()),
             projection_lock: parking_lot::Mutex::new(()),
             depends_cache: DashMap::new(),
+            declared_packages: DashMap::new(),
+            config_path: RwLock::new(None),
+            index_concurrency_now: AtomicUsize::new(0),
+            index_concurrency_peak: AtomicUsize::new(0),
+            max_concurrent_indexers: AtomicUsize::new(
+                crate::federation::config::FederationConfig::default().max_concurrent_indexers,
+            ),
             load_errors: RwLock::new(Vec::new()),
             contracts_dirty: crate::sync::DirtyFlag::new(false),
             contract_node_ids: DashMap::new(),
             contract_config: RwLock::new(None),
+            service_params: RwLock::new(std::collections::BTreeMap::new()),
+            service_refs: RwLock::new(std::collections::BTreeMap::new()),
             contract_snapshot: RwLock::new(None),
             client_defs_cache: DashMap::new(),
         }
@@ -212,6 +245,17 @@ impl FederatedIndex {
     /// opt out (the test harness typically does).
     pub fn set_manifest_path(&self, path: Option<std::path::PathBuf>) {
         *self.manifest_path.write() = path;
+    }
+
+    /// Record the `repos.yaml` this federation was loaded from. The
+    /// runtime contract write path (`apply_contract_context`) edits it.
+    pub fn set_config_path(&self, path: std::path::PathBuf) {
+        *self.config_path.write() = Some(path);
+    }
+
+    /// The `repos.yaml` this federation was loaded from, if any.
+    pub fn config_path(&self) -> Option<std::path::PathBuf> {
+        self.config_path.read().clone()
     }
 
     /// Snapshot the federation's current membership to the configured
@@ -331,7 +375,7 @@ impl FederatedIndex {
         if let Some(overlay) = self.federation_overlay.read().clone() {
             index.set_overlay(overlay);
         }
-        let mut replaced = None;
+        let replaced;
         {
             let _guard = self.projection_lock.lock();
             // Clone `id` before the insert moves it, so the
@@ -388,6 +432,7 @@ impl FederatedIndex {
                 .filter(|id| id.starts_with(&prefix))
                 .collect();
             self.backend.remove_nodes(&ids)?;
+            self.service_refs.write().remove(id);
             if let Some(repo) = self.repos.write().remove(id) {
                 repo.deactivate();
             }
@@ -524,6 +569,7 @@ impl FederatedIndex {
     pub async fn project_repo(&self, id: &RepoId) -> Result<(), LainError> {
         self.project_nodes(id).await?;
         self.project_edges(id).await?;
+        self.refresh_service_refs(id);
         Ok(())
     }
 
@@ -595,13 +641,14 @@ impl FederatedIndex {
         // graph had dropped it. Scoped by the repo's global-id prefix, which is
         // unambiguous because `RepoId` forbids `:`.
         let prefix = format!("{}:", id.as_str());
-        let mut stale: Vec<String> = self
-            .backend
-            .list_nodes()?
-            .into_iter()
-            .map(|n| n.id)
-            .filter(|gid| gid.starts_with(&prefix) && !live.contains(gid))
-            .collect();
+        // Visit by reference: `list_nodes()` cloned every node of every repo
+        // (about 77 MB on Saleor) to keep the ids of this one repo's stale ones.
+        let mut stale: Vec<String> = Vec::new();
+        self.backend.visit_nodes(&mut |n| {
+            if n.id.starts_with(&prefix) && !live.contains(&n.id) {
+                stale.push(n.id.clone());
+            }
+        })?;
         if !stale.is_empty() {
             // Federation-only nodes the anchor miner materialized as
             // edge endpoints (config-only anchors whose files have no
@@ -614,12 +661,12 @@ impl FederatedIndex {
             // edges (its own reconcile) and the pass after that
             // retracts the node here.
             let mut anchored: std::collections::HashSet<String> = std::collections::HashSet::new();
-            for e in self.backend.all_edges()? {
-                if crate::federation::anchor_miner::is_minted_edge(&e) {
-                    anchored.insert(e.source_id);
-                    anchored.insert(e.target_id);
+            self.backend.visit_edges(&mut |e| {
+                if crate::federation::anchor_miner::is_minted_edge(e) {
+                    anchored.insert(e.source_id.clone());
+                    anchored.insert(e.target_id.clone());
                 }
-            }
+            })?;
             stale.retain(|gid| !anchored.contains(gid));
         }
         if !stale.is_empty() {
@@ -904,33 +951,35 @@ impl FederatedIndex {
         let prefix = format!("{}:", id.as_str());
         let new_keys: std::collections::HashSet<_> =
             batch.iter().map(crate::graph::edge_identity_key).collect();
-        let stale: Vec<crate::schema::GraphEdge> = self
-            .backend
-            .all_edges()?
-            .into_iter()
-            .filter(|e| e.source_id.starts_with(&prefix))
-            .filter(|e| {
-                !(e.edge_type == crate::schema::EdgeType::Calls
+        // Visit by reference and clone only the stale edges: `all_edges()`
+        // cloned every edge in the federation (about 44 MB plus strings on
+        // Saleor) on each repo's reconciliation to keep a handful.
+        let mut stale: Vec<crate::schema::GraphEdge> = Vec::new();
+        self.backend.visit_edges(&mut |e| {
+            let is_stale = e.source_id.starts_with(&prefix)
+                && !(e.edge_type == crate::schema::EdgeType::Calls
                     && !e.target_id.starts_with(&prefix))
-            })
-            // PR 7 (§5.3): `Binds` is federation-only. The
-            // joiner owns it; the per-repo projection never
-            // writes `Binds` edges, so its reconciliation
-            // must skip them by type. Skipping by
-            // cross-repo would let a same-repo `Binds`
-            // (legitimate when two services share a repo,
-            // §4.1) silently disappear.
-            .filter(|e| e.edge_type != crate::schema::EdgeType::Binds)
-            // The anchor miner's edges are federation-only too
-            // (`anchor:*` / `cochange` / `commit-ref` heuristic
-            // provenance). The per-repo projection never reproduces
-            // them, so reconciliation must not retract them as
-            // stale — a watcher-triggered reproject owns none of
-            // them. The mint pass reconciles its own set (adds and
-            // retracts) when it runs.
-            .filter(|e| !crate::federation::anchor_miner::is_minted_edge(e))
-            .filter(|e| !new_keys.contains(&crate::graph::edge_identity_key(e)))
-            .collect();
+                // PR 7 (§5.3): `Binds` is federation-only. The
+                // joiner owns it; the per-repo projection never
+                // writes `Binds` edges, so its reconciliation
+                // must skip them by type. Skipping by
+                // cross-repo would let a same-repo `Binds`
+                // (legitimate when two services share a repo,
+                // §4.1) silently disappear.
+                && e.edge_type != crate::schema::EdgeType::Binds
+                // The anchor miner's edges are federation-only too
+                // (`anchor:*` / `cochange` / `commit-ref` heuristic
+                // provenance). The per-repo projection never reproduces
+                // them, so reconciliation must not retract them as
+                // stale — a watcher-triggered reproject owns none of
+                // them. The mint pass reconciles its own set (adds and
+                // retracts) when it runs.
+                && !crate::federation::anchor_miner::is_minted_edge(e)
+                && !new_keys.contains(&crate::graph::edge_identity_key(e));
+            if is_stale {
+                stale.push(e.clone());
+            }
+        })?;
         if !stale.is_empty() {
             // `remove_edges` matches on `(source_id, target_id,
             // edge_type)`, so a stale site-variant sharing its triple
@@ -1045,6 +1094,141 @@ impl FederatedIndex {
     /// consumes. The federation owns the config so a hot reload can
     /// swap it atomically: a config-load failure on the hot path
     /// leaves the previous config in place (§7.1).
+    /// Install the run parameters that resolve service env names to hosts.
+    pub fn set_service_params(&self, params: std::collections::BTreeMap<String, String>) {
+        *self.service_params.write() = params;
+    }
+
+    /// Service references found in one repo, as of its last projection.
+    pub fn service_refs(
+        &self,
+        id: &RepoId,
+    ) -> Vec<crate::federation::contracts::service_refs::ServiceRef> {
+        self.service_refs
+            .read()
+            .get(id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Recompute the service references of one repo from its workspace, the
+    /// deployment config, and the call sites the graph already holds.
+    pub fn refresh_service_refs(&self, id: &RepoId) {
+        use crate::federation::contracts::service_refs::scan_workspace;
+        let Some(repo) = self.get_repo(id) else {
+            self.service_refs.write().remove(id);
+            return;
+        };
+        let services = self
+            .contract_config
+            .read()
+            .as_ref()
+            .map(|c| c.services.clone())
+            .unwrap_or_default();
+        let owner = services
+            .iter()
+            .find(|s| s.repo == id.as_str())
+            .map(|s| crate::federation::contracts::model::ServiceName(s.name.clone()));
+        let call_sites: std::collections::HashSet<(String, u32)> = repo
+            .db()
+            .get_all_nodes()
+            .into_iter()
+            .filter(|n| n.node_type == crate::schema::NodeType::HttpClientCall)
+            .map(|n| (n.path.clone(), n.line_start.unwrap_or(0)))
+            .collect();
+        let params = self.service_params.read().clone();
+        let refs = scan_workspace(
+            repo.source().local_path(),
+            &services,
+            &params,
+            owner.as_ref(),
+            &call_sites,
+        );
+        self.service_refs.write().insert(id.clone(), refs);
+    }
+
+    /// Set the bound on concurrent repo index passes.
+    pub fn set_max_concurrent_indexers(&self, limit: usize) {
+        self.max_concurrent_indexers.store(limit, Ordering::SeqCst);
+    }
+
+    /// The bound on concurrent repo index passes.
+    pub fn max_concurrent_indexers(&self) -> usize {
+        self.max_concurrent_indexers.load(Ordering::SeqCst)
+    }
+
+    /// The most repo index passes that ran at the same time. Lets the
+    /// concurrency limit be tested without timing assertions.
+    pub fn observed_index_concurrency(&self) -> usize {
+        self.index_concurrency_peak.load(Ordering::SeqCst)
+    }
+
+    /// Mark the start of a repo index pass. The returned guard ends it
+    /// on drop, so the peak is recorded without a timing assertion.
+    pub fn enter_index_pass(self: &Arc<Self>) -> IndexPassGuard {
+        let now = self.index_concurrency_now.fetch_add(1, Ordering::SeqCst) + 1;
+        self.index_concurrency_peak.fetch_max(now, Ordering::SeqCst);
+        IndexPassGuard { fed: self.clone() }
+    }
+
+    /// Index every repo concurrently, bounded by
+    /// `max_concurrent_indexers`, then project each one. Returns at the
+    /// barrier: every repo is indexed (or degraded) when this resolves,
+    /// so the caller can run the cross-repo glue pass next. The old
+    /// sequential loop let one repo whose language server monopolised
+    /// the runtime starve every repo behind it.
+    pub async fn index_all(self: &Arc<Self>) {
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(
+            self.max_concurrent_indexers().max(1),
+        ));
+        let mut handles = Vec::new();
+        for (id, _) in self.list_repos() {
+            let Some(repo) = self.get_repo(&id) else {
+                continue;
+            };
+            let fed = self.clone();
+            let semaphore = semaphore.clone();
+            handles.push(tokio::spawn(async move {
+                let _permit = semaphore
+                    .acquire_owned()
+                    .await
+                    .expect("index semaphore is never closed");
+                tracing::info!("lain server: indexing repo '{}'", id.as_str());
+                let pass = fed.enter_index_pass();
+                let indexed = repo.index().await;
+                drop(pass);
+                match indexed {
+                    Ok(()) => {
+                        if let Err(e) = fed.project_repo(&id).await {
+                            tracing::warn!(
+                                "lain server: project_repo for '{}' after indexing failed: {e}",
+                                id.as_str()
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        // Demote here too: the demotion must not depend on
+                        // `RepoIndex::index` doing it.
+                        repo.set_health(RepoHealth::Degraded);
+                        tracing::warn!(
+                            "lain server: indexing repo '{}' failed: {e} (marking Degraded)",
+                            id.as_str()
+                        );
+                    }
+                }
+                if let Err(e) = repo.start_watcher().await {
+                    tracing::warn!(
+                        "lain server: could not watch repo '{}' for re-index: {e}",
+                        id.as_str()
+                    );
+                }
+            }));
+        }
+        for handle in handles {
+            let _ = handle.await;
+        }
+    }
+
     pub fn set_contract_config(&self, config: ContractFederationConfig) {
         *self.contract_config.write() = Some(Arc::new(config));
         // A config change invalidates the current join.
@@ -1155,6 +1339,19 @@ impl FederatedIndex {
         self.contract_snapshot.read().clone()
     }
 
+    /// Run a read against the published contract snapshot while holding the
+    /// projection lock. The backend nodes belong to the same projected
+    /// generation for the duration of the closure, so callers cannot combine
+    /// an old contract index with nodes being replaced by a reindex.
+    pub fn with_contract_snapshot<T>(
+        &self,
+        read: impl FnOnce(&ContractSnapshot, &dyn GraphBackend) -> T,
+    ) -> Option<T> {
+        let _guard = self.projection_lock.lock();
+        let snapshot = self.contract_snapshot.read().clone()?;
+        Some(read(&snapshot, self.backend.as_ref()))
+    }
+
     /// Recompute the desired `Binds` set and `ContractIndex` when
     /// any of `project_nodes`, `project_edges`, the loader's Phase
     /// 2, the refresh-loop tick, hot-reload apply, `add_repo`, or
@@ -1254,6 +1451,50 @@ impl FederatedIndex {
             self.contract_node_ids.remove(&r);
         }
 
+        let (rust_nodes, rust_details) =
+            crate::federation::contracts::rust_rpc::resolve_with_semantics(
+                self.backend.as_ref(),
+                |repo, path| {
+                    let id =
+                        RepoId::new(repo).map_err(|e| LainError::InvalidRepoId(e.to_string()))?;
+                    let Some(repo) = self.get_repo(&id) else {
+                        return Ok(None);
+                    };
+                    let root = repo.local_path();
+                    let full = root.join(path);
+                    // Graph paths and configuration are workspace-relative; do not
+                    // follow a symlink out of the owning source checkout.
+                    let full = match dunce::canonicalize(&full) {
+                        Ok(p) => p,
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                        Err(e) => return Err(e.into()),
+                    };
+                    if !full.starts_with(dunce::canonicalize(root)?) {
+                        return Err(LainError::Other(
+                            "Rust RPC source escaped repository".into(),
+                        ));
+                    }
+                    if std::fs::metadata(&full)?.len()
+                        > crate::federation::contracts::coverage::SIZE_CAP_BYTES
+                    {
+                        return Err(LainError::Other("Rust RPC source exceeds size cap".into()));
+                    }
+                    Ok(Some(std::fs::read_to_string(full)?))
+                },
+                |repo, path| {
+                    RepoId::new(repo)
+                        .ok()
+                        .and_then(|id| self.get_repo(&id))
+                        .map(|repo| repo.db().rust_rpc_semantics(path))
+                        .unwrap_or_default()
+                },
+            )?;
+        contract_nodes.retain(|n| {
+            !n.name
+                .starts_with(crate::server::sensors::grpc_consumer_sensor::RUST_RPC_PREFIX)
+        });
+        contract_nodes.extend(rust_nodes.into_iter().filter(|n| !n.contract.is_empty()));
+
         // Collect the contract-bearing edges the joiner needs:
         // `HasField`, `RequestSchema`, `ResponseSchema`, and
         // `ReadsFrom` (the §7.5 input). Reading every edge and
@@ -1284,7 +1525,7 @@ impl FederatedIndex {
             })
             .collect();
 
-        let out = {
+        let mut out = {
             // S3 fix: build the per-repo Phase B + Phase C
             // inputs (ClientRegistry + EnvBindingIndex) and
             // route the joiner through
@@ -1305,12 +1546,15 @@ impl FederatedIndex {
             )
         };
 
+        crate::federation::contracts::rust_rpc::attach(&mut out.index, rust_details);
+
         // Diff against current backend `Binds`. Build the desired
         // set keyed by `(consumer_id, provider_id)`; build the
         // stored set the same way. Adds and removes are batched.
         let desired: std::collections::BTreeSet<(String, String)> = out
             .binds
             .iter()
+            .filter(|b| !is_declared_provider(&b.provider))
             .map(|b| {
                 (
                     b.consumer.as_str().to_string(),
@@ -1332,6 +1576,7 @@ impl FederatedIndex {
         let to_add: Vec<GraphEdge> = out
             .binds
             .iter()
+            .filter(|b| !is_declared_provider(&b.provider))
             .filter(|b| {
                 !stored.contains(&(
                     b.consumer.as_str().to_string(),
@@ -1526,6 +1771,15 @@ fn parse_node_type(s: &str) -> NodeType {
 }
 
 impl FederatedIndex {
+    /// Record the package names `repo` publishes. A declaration can
+    /// link repos the directory and manifest names cannot, so the
+    /// cached dependency answers are dropped.
+    pub fn set_declared_packages(&self, repo: &RepoId, packages: Vec<String>) {
+        self.declared_packages
+            .insert(repo.as_str().to_string(), packages);
+        self.depends_cache.clear();
+    }
+
     /// Whether `source` declares a dependency on `target` in its manifests
     /// (go.mod, package.json, Cargo.toml, pyproject.toml, requirements,
     /// pom.xml, Gradle, Gemfile, composer.json, …): one of `target`'s
@@ -1545,7 +1799,12 @@ impl FederatedIndex {
             true
         } else {
             let text = manifests.to_lowercase();
-            declared_identifiers(target, tgt.source().local_path())
+            let packages = self
+                .declared_packages
+                .get(target.as_str())
+                .map(|p| p.value().clone())
+                .unwrap_or_default();
+            declared_identifiers_with_packages(target, tgt.source().local_path(), &packages)
                 .iter()
                 .any(|id| contains_token(&text, id))
         };
@@ -1615,11 +1874,28 @@ fn read_manifests(root: &Path) -> String {
 
 /// Names another repo would use to depend on `repo`: its id, its directory,
 /// and the module / package name it declares for itself.
-fn declared_identifiers(repo: &RepoId, root: &Path) -> Vec<String> {
+/// The names another repo would use to depend on `repo`: its id, its
+/// directory, the package names it declares, and the module / package
+/// name its root manifest declares for itself.
+fn declared_identifiers_with_packages(
+    repo: &RepoId,
+    root: &Path,
+    packages: &[String],
+) -> Vec<String> {
     let mut ids = vec![repo.as_str().to_lowercase()];
     if let Some(dir) = root.file_name() {
         ids.push(dir.to_string_lossy().to_lowercase());
     }
+    // Declared package names are the identifiers a consumer's manifest
+    // actually mentions. The npm scope and the hyphen in
+    // `@nvidia/openshell-sdk` both defeat the token match against the
+    // repo id, so the declaration is what makes the link intentional.
+    ids.extend(
+        packages
+            .iter()
+            .map(|p| p.trim().to_lowercase())
+            .filter(|p| !p.is_empty()),
+    );
     let read = |f: &str| std::fs::read_to_string(root.join(f)).unwrap_or_default();
     // go.mod: `module github.com/spf13/pflag` — the full path and its last segment.
     if let Some(module) = read("go.mod")
@@ -1766,6 +2042,27 @@ impl crate::federation::cross_repo::CrossRepoResolver for FederatedIndex {
     }
 }
 
+/// A declared provider (`repos.yaml#provides`) has no graph node, so a bind
+/// to it stays in the contract index and is not written as a graph edge.
+fn is_declared_provider(provider: &GlobalId) -> bool {
+    provider
+        .path()
+        .is_some_and(|path| path.starts_with(DECLARED_PROVIDER_PATH_PREFIX))
+}
+
+/// Ends a repo index pass when dropped. See [`FederatedIndex::enter_index_pass`].
+pub struct IndexPassGuard {
+    fed: Arc<FederatedIndex>,
+}
+
+impl Drop for IndexPassGuard {
+    fn drop(&mut self) {
+        self.fed
+            .index_concurrency_now
+            .fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 #[cfg(test)]
 mod phase_b_c_tests {
     use super::*;
@@ -1909,7 +2206,8 @@ mod dependency_tests {
             "module github.com/spf13/pflag\n\ngo 1.12\n",
         )
         .unwrap();
-        let ids = declared_identifiers(&RepoId::new("flags").unwrap(), dir.path());
+        let ids =
+            declared_identifiers_with_packages(&RepoId::new("flags").unwrap(), dir.path(), &[]);
         assert!(ids.contains(&"pflag".to_string()), "{ids:?}");
         assert!(
             ids.contains(&"github.com/spf13/pflag".to_string()),
@@ -1922,7 +2220,89 @@ mod dependency_tests {
             "{\n  \"name\": \"@acme/core\",\n}",
         )
         .unwrap();
-        let ids = declared_identifiers(&RepoId::new("core").unwrap(), dir.path());
+        let ids =
+            declared_identifiers_with_packages(&RepoId::new("core").unwrap(), dir.path(), &[]);
         assert!(ids.contains(&"@acme/core".to_string()), "{ids:?}");
+    }
+
+    /// A repo that publishes `@nvidia/openshell-sdk` from a directory
+    /// named `openshell` is linkable only through that declaration: the
+    /// hyphen defeats the bare-token match on `openshell`.
+    #[test]
+    fn declared_package_names_participate_in_the_dependency_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("sdk/typescript")).unwrap();
+        let ids = declared_identifiers_with_packages(
+            &RepoId::new("openshell").unwrap(),
+            dir.path(),
+            &["@nvidia/openshell-sdk".to_string()],
+        );
+        assert!(ids.iter().any(|i| i == "@nvidia/openshell-sdk"), "{ids:?}");
+
+        let manifest = "\"dependencies\": { \"@nvidia/openshell-sdk\": \"^1.0\" }";
+        assert!(contains_token(manifest, "@nvidia/openshell-sdk"));
+        assert!(!contains_token(manifest, "openshell"));
+    }
+
+    /// The package gate reads the declared packages, not only the repo
+    /// id, so a consumer that depends on the package links to the repo.
+    #[tokio::test]
+    async fn declared_packages_link_a_consumer_to_its_provider_repo() {
+        let root = tempfile::tempdir().unwrap();
+        let provider = root.path().join("openshell");
+        let consumer = root.path().join("nemoclaw");
+        std::fs::create_dir_all(&provider).unwrap();
+        std::fs::create_dir_all(&consumer).unwrap();
+        std::fs::write(
+            consumer.join("package.json"),
+            "{ \"name\": \"nemoclaw\", \"dependencies\": { \"@nvidia/openshell-sdk\": \"^1.0\" } }",
+        )
+        .unwrap();
+        std::fs::write(provider.join("README.md"), "openshell\n").unwrap();
+        for dir in [&provider, &consumer] {
+            for args in [
+                vec!["init", "-q"],
+                vec!["add", "-A"],
+                vec![
+                    "-c",
+                    "user.email=t@example.com",
+                    "-c",
+                    "user.name=t",
+                    "commit",
+                    "-q",
+                    "-m",
+                    "init",
+                ],
+            ] {
+                let status = std::process::Command::new("git")
+                    .args(&args)
+                    .current_dir(dir)
+                    .status()
+                    .unwrap();
+                assert!(status.success(), "git {args:?} failed");
+            }
+        }
+        let backend: Arc<dyn crate::federation::graph_backend::GraphBackend> = Arc::new(
+            crate::federation::graph_backend::PetgraphBackend::new(root.path()).expect("backend"),
+        );
+        let fed = FederatedIndex::new(backend);
+        let (provider_id, consumer_id) = (
+            RepoId::new("openshell").unwrap(),
+            RepoId::new("nemoclaw").unwrap(),
+        );
+        for (id, dir) in [(&provider_id, &provider), (&consumer_id, &consumer)] {
+            let source: Box<dyn crate::federation::repo_source::RepoSource> = Box::new(
+                crate::federation::repo_source::WorkspaceDirSource::with_config(
+                    id.clone(),
+                    dir.clone(),
+                    crate::federation::config::SourceConfig::WorkspaceDir { path: dir.clone() },
+                )
+                .unwrap(),
+            );
+            fed.add_repo(source, root.path()).await.unwrap();
+        }
+        assert!(!fed.repo_depends_on(&consumer_id, &provider_id));
+        fed.set_declared_packages(&provider_id, vec!["@nvidia/openshell-sdk".into()]);
+        assert!(fed.repo_depends_on(&consumer_id, &provider_id));
     }
 }

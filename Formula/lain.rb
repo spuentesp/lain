@@ -4,26 +4,26 @@
 class Lain < Formula
   desc "Structural code intelligence for AI agents"
   homepage "https://github.com/spuentesp/lain"
-  version "0.13.0"
+  version "0.14.0"
 
   on_macos do
     on_arm do
-      url "https://github.com/spuentesp/lain/releases/download/v0.13.0/lain-0.13.0-aarch64-apple-darwin.tar.gz"
-      sha256 "699685aa3e990412f74476d2bda6696a46bf6ac727d9caf1e8e8fd6e01003b0e"
+      url "https://github.com/spuentesp/lain/releases/download/v0.14.0/lain-0.14.0-aarch64-apple-darwin.tar.gz"
+      sha256 "11dd9e00fe134322490e31397995962d8dcaa7a0ced303437d30948041675cd0"
     end
   end
 
   on_linux do
     on_intel do
-      url "https://github.com/spuentesp/lain/releases/download/v0.13.0/lain-0.13.0-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "a30892c3162003f03cad4dc33d18d8ac5106a727215c11211524dd84cc9122fe"
+      url "https://github.com/spuentesp/lain/releases/download/v0.14.0/lain-0.14.0-x86_64-unknown-linux-gnu.tar.gz"
+      sha256 "901a393c6e7fb4cd42f838ec0d25189b2f979ae85f9a86c55f7d585361940f8b"
     end
   end
 
   on_windows do
     on_intel do
-      url "https://github.com/spuentesp/lain/releases/download/v0.13.0/lain-0.13.0-x86_64-pc-windows-msvc.tar.gz"
-      sha256 "c93792b4a08446c7b2b64948f621ded6439f1f5686dd4de8fb18cf5ae8817d49"
+      url "https://github.com/spuentesp/lain/releases/download/v0.14.0/lain-0.14.0-x86_64-pc-windows-msvc.tar.gz"
+      sha256 "16687aaa81acc039b5293d53d20fddabae45dad381b75e9863883e125977d87e"
     end
   end
 
@@ -40,6 +40,10 @@ class Lain < Formula
 
       For the full subcommand list (server, mcp, workspaces, repos, query, hooks, doctor):
             lain --help
+
+      Semantic search needs an embedding model, which Homebrew does not fetch.
+      Install the default one once:
+            lain models install
     EOS
   end
 

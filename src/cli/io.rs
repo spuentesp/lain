@@ -37,6 +37,72 @@ pub fn write_file_atomic(path: &Path, bytes: impl AsRef<[u8]>) -> io::Result<()>
     fs::rename(&tmp, path)
 }
 
+/// A file written in a stream and published atomically.
+///
+/// Bytes go to a uniquely named sibling temp file through a buffered writer,
+/// so a caller can encode a large value straight to disk instead of building
+/// it in memory first. Nothing reaches `dest` until [`Self::commit`] has
+/// flushed and fsynced the temp file and renamed it over `dest`; dropping the
+/// writer without committing (an encode error, a panic, a full disk) removes
+/// the temp file and leaves whatever was at `dest` untouched. A reader
+/// therefore sees the old file or the whole new one, never a prefix.
+pub struct AtomicWriter {
+    tmp: PathBuf,
+    dest: PathBuf,
+    out: Option<io::BufWriter<fs::File>>,
+}
+
+impl AtomicWriter {
+    /// Buffer size for the temp file: large enough that a 100 MB encode is
+    /// a few hundred writes, small enough to be noise next to the data.
+    const BUFFER_BYTES: usize = 1 << 20;
+
+    /// Open the temp file beside `dest`, creating the parent directory.
+    pub fn create(dest: &Path) -> io::Result<Self> {
+        if let Some(parent) = dest.parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent)?;
+            }
+        }
+        let tmp = tmp_sibling(dest);
+        let file = fs::File::create(&tmp)?;
+        Ok(Self {
+            tmp,
+            dest: dest.to_path_buf(),
+            out: Some(io::BufWriter::with_capacity(Self::BUFFER_BYTES, file)),
+        })
+    }
+
+    /// Flush, fsync and rename the temp file over `dest`.
+    pub fn commit(mut self) -> io::Result<()> {
+        let out = self.out.take().expect("commit consumes the writer once");
+        let file = out.into_inner().map_err(|e| e.into_error())?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&self.tmp, &self.dest)
+        // `self` drops with `out == None`, which skips the cleanup below.
+    }
+}
+
+impl io::Write for AtomicWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.out.as_mut().expect("writer is open").write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.out.as_mut().expect("writer is open").flush()
+    }
+}
+
+impl Drop for AtomicWriter {
+    fn drop(&mut self) {
+        // Still open means `commit` never ran: discard the partial file.
+        if self.out.take().is_some() {
+            let _ = fs::remove_file(&self.tmp);
+        }
+    }
+}
+
 /// Async counterpart to `write_file_atomic` for callers running
 /// inside a Tokio runtime. Currently consumed by
 /// `server::graph::save_to_disk`.
@@ -96,6 +162,60 @@ mod tests {
             leftovers.is_empty(),
             "tmp siblings left behind: {leftovers:?}"
         );
+    }
+
+    #[test]
+    fn atomic_writer_publishes_only_on_commit() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("graph.bin");
+        let mut w = AtomicWriter::create(&path).unwrap();
+        w.write_all(b"whole ").unwrap();
+        w.write_all(b"file").unwrap();
+        assert!(!path.exists(), "nothing is published before commit");
+        w.commit().unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"whole file");
+        let leftovers: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".tmp."))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temp file renamed away: {leftovers:?}"
+        );
+    }
+
+    /// A write that stops part way (an encode error, a panic, a full disk)
+    /// must leave the previous good file in place and clean up its temp.
+    #[test]
+    fn a_partial_write_never_replaces_the_good_file() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("graph.bin");
+        fs::write(&path, b"GOOD").unwrap();
+        {
+            let mut w = AtomicWriter::create(&path).unwrap();
+            w.write_all(b"half a graph").unwrap();
+            w.flush().unwrap(); // bytes really are on disk in the temp file
+                                // dropped without commit: the encode "failed" here
+        }
+        assert_eq!(fs::read(&path).unwrap(), b"GOOD");
+        let entries = fs::read_dir(dir.path()).unwrap().count();
+        assert_eq!(entries, 1, "the partial temp file must be removed");
+    }
+
+    #[test]
+    fn atomic_writer_replaces_an_existing_file_whole() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("graph.bin");
+        fs::write(&path, b"old and much longer than the new contents").unwrap();
+        let mut w = AtomicWriter::create(&path).unwrap();
+        w.write_all(b"new").unwrap();
+        w.commit().unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"new");
     }
 
     #[tokio::test]

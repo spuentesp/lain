@@ -70,6 +70,8 @@ async fn build_min_federation(root: &Path) -> Arc<FederatedIndex> {
     let fed = Arc::new(FederatedIndex::new(backend));
 
     let cfg = ContractFederationConfig {
+        host_aliases: Vec::new(),
+        provides: Vec::new(),
         services: vec![
             lain::federation::contracts::config::ServiceDecl {
                 name: "orders".into(),

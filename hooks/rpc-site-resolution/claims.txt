@@ -1,0 +1,21 @@
+Root owns call-site selectors and bounded live LSP RPC identity enrichment.
+src/server/federation/contracts/{config,context,index,index_tests,joiner_tests,scenario_tests,rust_rpc}.rs
+src/server/federation/contracts/joiner/{confirmed,mod}.rs
+src/server/mcp/contract_tools/{context,contracts}.rs
+src/server/mcp/contract_tools/schemas/apply_contract_context.{in,out}.json
+docs/tool-schema.json
+tests/use_cases/confirmed_bindings_mcp.rs
+tests/rust_grpc_contracts.rs
+src/server/lsp.rs
+src/server/ingest/ingestion.rs
+src/server/sensors/grpc_consumer_sensor.rs
+src/server/sensors/grpc_consumer_sensor/semantic.rs
+docs/CONFIRMED_BINDINGS_MCP.md
+docs/RUST_GRPC_CONTRACTS.md
+CHANGELOG.md
+src/server/graph/mod.rs
+src/server/federation/federated_index.rs
+src/server/federation/contracts/mod.rs
+tests/fixtures/contracts/analyzer_digest.txt
+src/server/mcp/contract_tools/schemas/list_unresolved.out.json
+src/server/sensors/grpc_consumer_sensor/rust.rs

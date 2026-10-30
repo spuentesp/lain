@@ -8,7 +8,7 @@ use crate::federation::contracts::config::{
     HttpClientDecl, SchemaDecl, ServiceDecl,
 };
 use crate::federation::contracts::index::{
-    ConsumerTarget, EndpointId, FieldRefResolution, StaleReason, UnresolvedReason,
+    ConsumerTarget, EndpointId, StaleReason, UnresolvedReason,
 };
 use crate::federation::contracts::joiner::{parse_contract_key, ContractJoiner, JoinOutput};
 use crate::federation::contracts::model::{
@@ -22,7 +22,6 @@ use crate::federation::repo_id::{GlobalId, RepoId};
 use crate::schema::{
     EdgeProvenance, EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace, RouteMatch,
 };
-use std::collections::BTreeSet;
 
 // ─── Builders ─────────────────────────────────────────────────────────
 
@@ -94,6 +93,8 @@ fn consumer_node(
 
 fn default_config() -> ContractFederationConfig {
     ContractFederationConfig {
+        host_aliases: Vec::new(),
+        provides: Vec::new(),
         services: vec![ServiceDecl {
             name: "orders".into(),
             repo: "orders".into(),
@@ -405,6 +406,8 @@ fn rule_3_target_service_via_http_clients_binds_with_static_confidence() {
         },
     );
     let cfg = ContractFederationConfig {
+        host_aliases: Vec::new(),
+        provides: Vec::new(),
         services: default_config().services,
         http_clients: vec![HttpClientDecl {
             call: "ordersClient.{method}".into(),
@@ -775,8 +778,9 @@ fn dynamic_path_with_external_literal_host_lands_in_external_not_unnormalized() 
 
 #[test]
 fn rule_6_own_service_skip() {
-    // A billing consumer calling billing's own route should NOT
-    // produce a Binds edge (own-service skip).
+    // A billing consumer calling billing's own route via a relative
+    // URL resolves as Internal (own-service endpoint recorded, no
+    // cross-service Binds edge per I5).
     let p = provider_node(
         "billing",
         "src/billing.py",
@@ -799,10 +803,64 @@ fn rule_6_own_service_skip() {
     let mut cfg = default_config();
     cfg.services[0].name = "billing".into();
     cfg.services[0].repo = "billing".into();
-    let out = ContractJoiner::run(&[p, c], &[], &cfg);
-    // The own-service skip fires for rule 6; the call is
-    // unresolved no_match.
+    let out = ContractJoiner::run(&[p, c.clone()], &[], &cfg);
     assert!(out.binds.is_empty(), "own-service call is not a contract");
+    let call_id = GlobalId::parse(&c.id).expect("parse");
+    let resolution = out.index.consumer(&call_id).expect("consumer resolution");
+    assert!(
+        matches!(resolution.target, Some(ConsumerTarget::Internal)),
+        "same-service relative HTTP call must resolve Internal, got {:?}",
+        resolution.target
+    );
+    assert_eq!(resolution.bound_endpoints.len(), 1);
+    assert_eq!(
+        resolution.bound_endpoints[0].0,
+        ServiceName("billing".into())
+    );
+}
+
+#[test]
+fn rule_6_own_service_unknown_method_stays_unresolved() {
+    // An unknown-method relative call (`fetch("/api/ping", { method: verb })`)
+    // has heuristic confidence (0.6) and must not be promoted to a certain
+    // `Internal` binding.
+    let p = provider_node(
+        "billing",
+        "src/billing.py",
+        "do_it",
+        10,
+        HttpMethod::Get,
+        "/api/ping",
+    );
+    let c = consumer_node(
+        "billing",
+        "src/billing.py",
+        "ping_self_unknown_method",
+        1,
+        MethodSpec::Unknown,
+        url_with_host_method(HostPart::None, Some("/api/ping")),
+        CallVia::Library {
+            name: "requests".into(),
+        },
+    );
+    let mut cfg = default_config();
+    cfg.services[0].name = "billing".into();
+    cfg.services[0].repo = "billing".into();
+    let out = ContractJoiner::run(&[p, c.clone()], &[], &cfg);
+    assert!(out.binds.is_empty());
+    let call_id = GlobalId::parse(&c.id).expect("parse");
+    let resolution = out.index.consumer(&call_id).expect("consumer resolution");
+    assert!(
+        matches!(
+            resolution.target,
+            Some(ConsumerTarget::Unresolved {
+                reason: UnresolvedReason::NoMatch,
+                ..
+            })
+        ),
+        "unknown-method same-service call must remain Unresolved, got {:?}",
+        resolution.target
+    );
 }
 
 #[test]
@@ -957,12 +1015,15 @@ fn confirmed_binding_matches_consumer_and_records_provenance() {
     );
     c.container = Some("create_order".into()); // enclosing symbol
     let cfg = ContractFederationConfig {
+        host_aliases: Vec::new(),
+        provides: Vec::new(),
         services: default_config().services,
         http_clients: vec![],
         generic_keys: vec![],
         schemas: vec![],
         bindings: vec![ConfirmedBinding {
             consumer: ConfirmedBindingConsumer {
+                site: None,
                 repo: "billing".into(),
                 path: "src/orders_api.py".into(),
                 symbol: "create_order".into(),
@@ -1052,12 +1113,15 @@ fn confirmed_binding_reads_complete_comes_from_the_matched_fact() {
     );
 
     let make_cfg = |key: &str| ContractFederationConfig {
+        host_aliases: Vec::new(),
+        provides: Vec::new(),
         services: multi_service_config(&[("orders", &[]), ("billing", &[])]).services,
         http_clients: vec![],
         generic_keys: vec![],
         schemas: vec![],
         bindings: vec![ConfirmedBinding {
             consumer: ConfirmedBindingConsumer {
+                site: None,
                 repo: "billing".into(),
                 path: "src/sub.py".into(),
                 symbol: "on_orders".into(),
@@ -1124,12 +1188,15 @@ fn confirmed_binding_reads_complete_comes_from_the_matched_fact() {
 #[test]
 fn confirmed_binding_no_endpoint_marks_stale() {
     let cfg = ContractFederationConfig {
+        host_aliases: Vec::new(),
+        provides: Vec::new(),
         services: default_config().services,
         http_clients: vec![],
         generic_keys: vec![],
         schemas: vec![],
         bindings: vec![ConfirmedBinding {
             consumer: ConfirmedBindingConsumer {
+                site: None,
                 repo: "billing".into(),
                 path: "src/orders_api.py".into(),
                 symbol: "create_order".into(),
@@ -1162,12 +1229,15 @@ fn confirmed_binding_no_consumer_marks_stale() {
         "/api/orders",
     );
     let cfg = ContractFederationConfig {
+        host_aliases: Vec::new(),
+        provides: Vec::new(),
         services: default_config().services,
         http_clients: vec![],
         generic_keys: vec![],
         schemas: vec![],
         bindings: vec![ConfirmedBinding {
             consumer: ConfirmedBindingConsumer {
+                site: None,
                 repo: "billing".into(),
                 path: "src/orders_api.py".into(),
                 symbol: "create_order".into(),
@@ -1195,12 +1265,15 @@ fn confirmed_binding_no_consumer_marks_stale() {
 /// it via `bindings[0]`.
 fn config_with_graphql_binding() -> ContractFederationConfig {
     ContractFederationConfig {
+        host_aliases: Vec::new(),
+        provides: Vec::new(),
         services: multi_service_config(&[("api", &[]), ("storefront", &[])]).services,
         http_clients: vec![],
         generic_keys: vec![],
         schemas: vec![],
         bindings: vec![ConfirmedBinding {
             consumer: ConfirmedBindingConsumer {
+                site: None,
                 repo: "storefront".into(),
                 path: "src/gql.ts".into(),
                 symbol: "graphql-call:query:product".into(),
@@ -1286,12 +1359,15 @@ fn confirmed_binding_cross_kind_keys_marks_stale_and_does_not_bind() {
     let consumer =
         graphql_consumer_node("storefront", "src/gql.ts", GraphqlOp::Query, "product", 20);
     let cfg = ContractFederationConfig {
+        host_aliases: Vec::new(),
+        provides: Vec::new(),
         services: multi_service_config(&[("api", &[]), ("storefront", &[])]).services,
         http_clients: vec![],
         generic_keys: vec![],
         schemas: vec![],
         bindings: vec![ConfirmedBinding {
             consumer: ConfirmedBindingConsumer {
+                site: None,
                 repo: "storefront".into(),
                 path: "src/gql.ts".into(),
                 symbol: "graphql-call:query:product".into(),
@@ -1352,12 +1428,15 @@ fn confirmed_binding_template_bridge_binds() {
     );
     c.container = Some("create_order".into());
     let cfg = ContractFederationConfig {
+        host_aliases: Vec::new(),
+        provides: Vec::new(),
         services: default_config().services,
         http_clients: vec![],
         generic_keys: vec![],
         schemas: vec![],
         bindings: vec![ConfirmedBinding {
             consumer: ConfirmedBindingConsumer {
+                site: None,
                 repo: "billing".into(),
                 path: "src/orders_api.py".into(),
                 symbol: "create_order".into(),
@@ -1414,12 +1493,15 @@ fn confirmed_binding_equivalent_key_spelling_binds() {
     );
     c.container = Some("create_order".into());
     let cfg = ContractFederationConfig {
+        host_aliases: Vec::new(),
+        provides: Vec::new(),
         services: default_config().services,
         http_clients: vec![],
         generic_keys: vec![],
         schemas: vec![],
         bindings: vec![ConfirmedBinding {
             consumer: ConfirmedBindingConsumer {
+                site: None,
                 repo: "billing".into(),
                 path: "src/orders_api.py".into(),
                 symbol: "create_order".into(),
@@ -1491,6 +1573,8 @@ fn confirmed_binding_merges_into_multi_fact_consumers_vec() {
     ];
 
     let cfg = ContractFederationConfig {
+        host_aliases: Vec::new(),
+        provides: Vec::new(),
         services: multi_service_config(&[("orders", &[]), ("billing", &[])]).services,
         http_clients: vec![],
         generic_keys: vec![],
@@ -1499,6 +1583,7 @@ fn confirmed_binding_merges_into_multi_fact_consumers_vec() {
         // subscription must survive.
         bindings: vec![ConfirmedBinding {
             consumer: ConfirmedBindingConsumer {
+                site: None,
                 repo: "billing".into(),
                 path: "src/sub.py".into(),
                 symbol: "sub_two".into(),
@@ -1901,6 +1986,8 @@ fn t9_consumer_protocol_websocket_foreign_host_no_endpoint_pair() {
     // host, and the endpoint table carries no candidate.
     let consumer = ws_consumer_node("billing", "api.thirdparty.com", "/feed", 7);
     let cfg = ContractFederationConfig {
+        host_aliases: Vec::new(),
+        provides: Vec::new(),
         services: vec![ServiceDecl {
             name: "orders".into(),
             repo: "orders".into(),
@@ -1947,6 +2034,8 @@ fn t9_consumer_protocol_websocket_two_providers_ambiguous() {
     let provider_a = ws_provider_node("api", "/ws", 12);
     let provider_b = ws_provider_node("notifications", "/ws", 12);
     let cfg = ContractFederationConfig {
+        host_aliases: Vec::new(),
+        provides: Vec::new(),
         services: vec![
             ServiceDecl {
                 name: "api".into(),
@@ -2126,6 +2215,8 @@ fn provider_node_with_operation_id(
 fn sdk_wrapper_config() -> ContractFederationConfig {
     use crate::federation::contracts::config::HttpClientDecl;
     ContractFederationConfig {
+        host_aliases: Vec::new(),
+        provides: Vec::new(),
         services: default_config().services,
         http_clients: vec![HttpClientDecl {
             call: "client.orders.{method}".into(),
@@ -2451,6 +2542,8 @@ fn topic_consumer_node(
 
 fn two_service_topic_config() -> ContractFederationConfig {
     ContractFederationConfig {
+        host_aliases: Vec::new(),
+        provides: Vec::new(),
         services: vec![
             ServiceDecl {
                 name: "orders".into(),
@@ -2724,6 +2817,8 @@ fn topic_join_skips_own_service_endpoint() {
         "orders.created",
     );
     let cfg = ContractFederationConfig {
+        host_aliases: Vec::new(),
+        provides: Vec::new(),
         services: vec![ServiceDecl {
             name: "orders".into(),
             repo: "orders".into(),
@@ -3005,10 +3100,6 @@ fn topic_payload_schema_and_consumer_field_read_binds() {
     );
 }
 
-// Silence unused-imports from churn.
-#[allow(dead_code)]
-fn _silence(_: &RepoId, _: &GlobalId, _: &BTreeSet<FieldRefResolution>) {}
-
 // ─── WebSocket consumers need host evidence and ambiguity refusal ────
 //
 // `resolve_websocket_consumer` used to build its key from `route` only
@@ -3060,6 +3151,8 @@ fn ws_consumer_node(service: &str, host: &str, route: &str, line: u32) -> GraphN
 
 fn ws_config(service: &str, host: &str) -> ContractFederationConfig {
     ContractFederationConfig {
+        host_aliases: Vec::new(),
+        provides: Vec::new(),
         services: vec![ServiceDecl {
             name: service.into(),
             repo: service.into(),
@@ -3109,6 +3202,8 @@ fn ws_consumer_with_two_matching_providers_stays_unresolved() {
     let p2 = ws_provider_node("billing", "/ws", 30);
     let consumer = ws_consumer_node("reports", "orders.internal", "/ws", 20);
     let cfg = ContractFederationConfig {
+        host_aliases: Vec::new(),
+        provides: Vec::new(),
         services: vec![
             ServiceDecl {
                 name: "orders".into(),
@@ -3212,6 +3307,8 @@ fn table_shared_with_widens_ownership_to_named_service() {
     // Pre-fix: only `orders` saw the endpoint.
     let t = table_node("orders", "src/orders.sql", "orders", 1);
     let cfg = ContractFederationConfig {
+        host_aliases: Vec::new(),
+        provides: Vec::new(),
         services: vec![
             ServiceDecl {
                 name: "orders".into(),
@@ -3279,6 +3376,8 @@ fn table_ownership_keys_on_db_name_not_just_table_name() {
     // the `services[]` list).
     let t = table_node("reports", "src/etl.sql", "analytics_metrics", 1);
     let cfg = ContractFederationConfig {
+        host_aliases: Vec::new(),
+        provides: Vec::new(),
         services: vec![
             ServiceDecl {
                 name: "orders".into(),
@@ -3603,6 +3702,8 @@ fn topic_payload_schema_binds_when_schema_repo_differs_from_service_name() {
     );
 
     let cfg = ContractFederationConfig {
+        host_aliases: Vec::new(),
+        provides: Vec::new(),
         services: vec![ServiceDecl {
             name: "payments-api".into(),
             repo: "revisions".into(),
@@ -3849,6 +3950,8 @@ fn rpc_consumer_node(
 /// service mapping) with optional `hosts` for channel resolution.
 fn multi_service_config(services: &[(&str, &[&str])]) -> ContractFederationConfig {
     ContractFederationConfig {
+        host_aliases: Vec::new(),
+        provides: Vec::new(),
         services: services
             .iter()
             .map(|(name, hosts)| ServiceDecl {

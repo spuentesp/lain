@@ -407,7 +407,7 @@ fn process_outbound_match(
     } else {
         String::new()
     };
-    let enclosing_fn_line = enclosing_function_line(call);
+    let enclosing_scope = enclosing_scope_offset(call);
 
     // Library classification. The order matters: a bound client
     // wins over a known-library match (so `client = httpx.Client(...)`
@@ -441,7 +441,7 @@ fn process_outbound_match(
             src,
             ctx,
             base_url_opt,
-            enclosing_fn_line,
+            enclosing_scope,
             path,
             framework,
             &verb_text,
@@ -482,7 +482,7 @@ fn process_outbound_match(
             src,
             ctx,
             base_url_opt,
-            enclosing_fn_line,
+            enclosing_scope,
             path,
             framework,
             &verb_text,
@@ -539,7 +539,7 @@ fn process_outbound_match(
             src,
             ctx,
             base_url_opt,
-            enclosing_fn_line,
+            enclosing_scope,
             path,
             framework,
             &verb_text,
@@ -575,7 +575,7 @@ fn process_outbound_match(
             src,
             ctx,
             base_url_opt,
-            enclosing_fn_line,
+            enclosing_scope,
             path,
             framework,
             &verb_text,
@@ -600,7 +600,7 @@ fn synthetic_url_call(
         "{}://dynamic",
         framework.effective_id()
     ))];
-    let host = host_for(&raw_parts);
+    let host = host_for(&raw_parts, None);
     let normalized = normalize(&raw_parts);
     let final_url = if matches!(host, HostPart::None) {
         normalized
@@ -638,17 +638,21 @@ fn build_call(
     src: &[u8],
     ctx: &FileContext,
     base_url_opt: Option<&str>,
-    enclosing_fn_line: Option<u32>,
+    enclosing_scope: Option<u32>,
     path: &str,
     _framework: &FrameworkDef,
     _verb_text: &str,
 ) -> Option<HttpClientCall> {
     let call_line = (call.start_position().row as u32) + 1;
     let raw_parts = match url {
-        Some(u) => parts_from_node(u, src, ctx, enclosing_fn_line, base_url_opt),
+        Some(u) => parts_from_node(u, src, ctx, enclosing_scope, base_url_opt),
         None => Vec::new(),
     };
-    let host = host_for(&raw_parts);
+    // The scope chain of the *use* site. A name assigned in an enclosing
+    // scope is visible here, which is what lets a host expression resolve
+    // through the handler it was built in.
+    let url_scope_chain = url.map(scope_chain).unwrap_or_default();
+    let host = host_for(&raw_parts, Some((ctx, &url_scope_chain)));
     let normalized = normalize(&raw_parts);
     let final_url = if matches!(host, HostPart::None) {
         normalized
@@ -987,7 +991,10 @@ struct FileContext {
     /// occurrences in the same walk so that two assignments to the
     /// same name leave the name unresolvable.
     module_assign_counts: BTreeMap<String, u32>,
-    /// Per-function assignments keyed by `(function_start_line, name)`.
+    /// Per-function assignments keyed by `(scope_offset, name)`, where
+    /// the offset is the enclosing scope's start byte. A byte offset
+    /// and not a line number: two scopes can start on the same line,
+    /// and one key must not stand for both.
     /// A name resolves at a call site when there is exactly one
     /// assignment with that name in the enclosing function.
     fn_assignments: BTreeMap<(u32, String), String>,
@@ -1032,21 +1039,28 @@ impl FileContext {
         ctx
     }
 
-    fn resolve_identifier(&self, name: &str, enclosing_fn_line: Option<u32>) -> Option<String> {
-        // Same-function wins when unique.
-        if let Some(line) = enclosing_fn_line {
-            for ((l, n), c) in &self.fn_assign_counts {
-                if *l == line && n == name && *c == 1 {
-                    let key = (*l, name.to_string());
-                    return self.fn_assignments.get(&key).cloned();
-                }
-            }
+    fn resolve_identifier(&self, name: &str, scope_chain: &[u32]) -> Option<String> {
+        // The scope chain is searched innermost first: a name assigned
+        // in an enclosing scope is visible in a nested closure, which is
+        // the lexical rule every one of these languages follows.
+        for scope in scope_chain {
+            let key = (*scope, name.to_string());
+            let Some(count) = self.fn_assign_counts.get(&key) else {
+                continue; // not bound in this scope — look further out
+            };
+            // The name IS bound here, so it shadows every outer scope.
+            // A name assigned twice in this scope stays unresolved: it
+            // must not resolve to an outer scope's value, which would
+            // attribute the call to a host it never dials.
+            return if *count == 1 {
+                self.fn_assignments.get(&key).cloned()
+            } else {
+                None
+            };
         }
         // Module-level: single assignment only.
-        if let Some(c) = self.module_assign_counts.get(name) {
-            if *c == 1 {
-                return self.module_assignments.get(name).cloned();
-            }
+        if self.module_assign_counts.get(name) == Some(&1) {
+            return self.module_assignments.get(name).cloned();
         }
         None
     }
@@ -1065,7 +1079,7 @@ fn collect_python_context(root: Node, src: &[u8], ctx: &mut FileContext) {
                     if is_module_level(node) {
                         ctx.module_assignments.insert(name.clone(), value.clone());
                         *ctx.module_assign_counts.entry(name).or_insert(0) += 1;
-                    } else if let Some(fn_line) = enclosing_function_line(node) {
+                    } else if let Some(fn_line) = enclosing_scope_offset(node) {
                         let key = (fn_line, name.clone());
                         ctx.fn_assignments
                             .entry(key.clone())
@@ -1200,25 +1214,24 @@ fn is_client_ctor(lib: &str, ctor: &str) -> bool {
 fn collect_tsjs_context(root: Node, src: &[u8], ctx: &mut FileContext) {
     walk(root, &mut |node| match node.kind() {
         "lexical_declaration" | "variable_declaration" => {
-            if !is_module_level(node) {
-                return;
-            }
+            // A declaration inside a function is in that function's
+            // scope; one at the top level is module level. Before,
+            // only module-level declarations were recorded, so a
+            // `const` in a request handler never resolved.
+            let scope = assignment_scope(node);
             let mut cursor = node.walk();
             for child in node.named_children(&mut cursor) {
                 if child.kind() == "variable_declarator" {
                     if let Some((name, value)) = read_var_declarator(child, src) {
-                        ctx.module_assignments.insert(name.clone(), value);
-                        *ctx.module_assign_counts.entry(name).or_insert(0) += 1;
+                        record_assignment(ctx, &scope, &name, &value);
                     }
                 }
             }
         }
         "assignment_expression" => {
-            // Bare `BASE = "..."` (no keyword) at module level. Some
-            // grammars also emit `assignment`; we accept both.
-            if !is_module_level(node) {
-                return;
-            }
+            // Bare `BASE = "..."` (no keyword). Some grammars also
+            // emit `assignment`; we accept both.
+            let scope = assignment_scope(node);
             let left = match node.child_by_field_name("left") {
                 Some(l) => l,
                 None => return,
@@ -1231,14 +1244,11 @@ fn collect_tsjs_context(root: Node, src: &[u8], ctx: &mut FileContext) {
                 None => return,
             };
             if let (Some(name), Some(value)) = (text_of(left, src), text_of(right, src)) {
-                ctx.module_assignments.insert(name.clone(), value);
-                *ctx.module_assign_counts.entry(name).or_insert(0) += 1;
+                record_assignment(ctx, &scope, &name, &value);
             }
         }
         "assignment" => {
-            if !is_module_level(node) {
-                return;
-            }
+            let scope = assignment_scope(node);
             let left = match node.child_by_field_name("left") {
                 Some(l) => l,
                 None => return,
@@ -1251,12 +1261,32 @@ fn collect_tsjs_context(root: Node, src: &[u8], ctx: &mut FileContext) {
                 None => return,
             };
             if let (Some(name), Some(value)) = (text_of(left, src), text_of(right, src)) {
-                ctx.module_assignments.insert(name.clone(), value);
-                *ctx.module_assign_counts.entry(name).or_insert(0) += 1;
+                record_assignment(ctx, &scope, &name, &value);
             }
         }
         _ => {}
     });
+}
+
+/// Record an assignment in the scope it belongs to. A name assigned
+/// twice in the same scope is counted twice, so it stays unresolved —
+/// the §6.3 rule, applied per scope.
+fn record_assignment(ctx: &mut FileContext, scope: &AssignmentScope, name: &str, value: &str) {
+    match scope {
+        AssignmentScope::Module => {
+            ctx.module_assignments
+                .insert(name.to_string(), value.to_string());
+            *ctx.module_assign_counts
+                .entry(name.to_string())
+                .or_insert(0) += 1;
+        }
+        AssignmentScope::Function(line) => {
+            let key = (*line, name.to_string());
+            ctx.fn_assignments.insert(key.clone(), value.to_string());
+            *ctx.fn_assign_counts.entry(key).or_insert(0) += 1;
+        }
+        AssignmentScope::Skip => {}
+    }
 }
 
 fn read_var_declarator(node: Node, src: &[u8]) -> Option<(String, String)> {
@@ -1295,7 +1325,7 @@ fn collect_java_context(root: Node, src: &[u8], ctx: &mut FileContext) {
             let value = find_builder_url_arg(child, src)
                 .and_then(|arg| text_of(arg, src))
                 .unwrap_or(value);
-            if let Some(fn_line) = enclosing_function_line(node) {
+            if let Some(fn_line) = enclosing_scope_offset(node) {
                 let key = (fn_line, name.clone());
                 ctx.fn_assignments
                     .entry(key.clone())
@@ -1352,17 +1382,79 @@ fn is_module_level(node: Node) -> bool {
     true
 }
 
-fn enclosing_function_line(node: Node) -> Option<u32> {
+/// The scope chain of a node: the innermost enclosing function-like
+/// ancestor first, then outward. A name assigned in an enclosing
+/// scope is visible in a nested closure — the lexical rule.
+///
+/// Each entry is the scope's start byte, so two scopes that begin on
+/// the same source line keep separate identities.
+///
+/// Python's `lambda` and Java's nested class are scopes here too, so
+/// the chain means the same thing in every language the sensor
+/// reads.
+fn scope_chain(node: Node) -> Vec<u32> {
+    let mut out = Vec::new();
+    let mut cur = node.parent();
+    while let Some(p) = cur {
+        if is_scope_kind(p.kind()) {
+            out.push(p.start_byte() as u32);
+        }
+        cur = p.parent();
+    }
+    out
+}
+
+/// The kinds that open a scope. JavaScript's are the ones the TS/JS
+/// grammar emits; Python's and Java's are here so the chain means the
+/// same thing in every language.
+fn is_scope_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "function_definition" // Python
+        | "async_function_definition" // Python
+        | "lambda" // Python
+        | "method_declaration" // Java
+        | "arrow_function" // JS/TS
+        | "function" // JS/TS (grammar-generic)
+        | "function_expression" // JS/TS
+        | "function_declaration" // JS/TS
+        | "generator_function_declaration" // JS/TS
+        | "method_definition" // JS/TS
+    )
+}
+
+/// Where an assignment lives: the module level, the innermost
+/// enclosing function, or nowhere we track (a class body).
+enum AssignmentScope {
+    Module,
+    /// The enclosing scope's start byte.
+    Function(u32),
+    Skip,
+}
+
+fn assignment_scope(node: Node) -> AssignmentScope {
+    if is_module_level(node) {
+        return AssignmentScope::Module;
+    }
+    match scope_chain(node).first().copied() {
+        Some(line) => AssignmentScope::Function(line),
+        // Inside a class body, or any other construct that opens a
+        // block but not a scope we resolve names in.
+        None => AssignmentScope::Skip,
+    }
+}
+
+fn enclosing_scope_offset(node: Node) -> Option<u32> {
     let mut cur = node.parent();
     while let Some(p) = cur {
         match p.kind() {
             "function_definition" | "async_function_definition" => {
-                return Some(p.start_position().row as u32);
+                return Some(p.start_byte() as u32);
             }
             // Java: locals live inside a `method_declaration`; the
-            // per-function assignment table is keyed by this line.
+            // per-function assignment table is keyed by this scope.
             "method_declaration" => {
-                return Some(p.start_position().row as u32);
+                return Some(p.start_byte() as u32);
             }
             _ => {}
         }
@@ -1515,10 +1607,10 @@ fn parts_from_node(
     node: Node,
     src: &[u8],
     ctx: &FileContext,
-    enclosing_fn_line: Option<u32>,
+    enclosing_scope: Option<u32>,
     base_url: Option<&str>,
 ) -> Vec<UrlPart> {
-    let raw = parts_from_node_inner(node, src, ctx, enclosing_fn_line);
+    let raw = parts_from_node_inner(node, src, ctx, enclosing_scope);
     apply_base_url(raw, base_url)
 }
 
@@ -1526,7 +1618,7 @@ fn parts_from_node_inner(
     node: Node,
     src: &[u8],
     ctx: &FileContext,
-    enclosing_fn_line: Option<u32>,
+    enclosing_scope: Option<u32>,
 ) -> Vec<UrlPart> {
     match node.kind() {
         // Python string / TS string literal — strip them and produce a
@@ -1557,7 +1649,7 @@ fn parts_from_node_inner(
                             }
                         }
                         "interpolation" => {
-                            let inner = parts_from_node_inner(child, src, ctx, enclosing_fn_line);
+                            let inner = parts_from_node_inner(child, src, ctx, enclosing_scope);
                             if !inner.is_empty() {
                                 out.extend(inner);
                             }
@@ -1598,11 +1690,11 @@ fn parts_from_node_inner(
             let mut out = Vec::new();
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
-                out.extend(parts_from_node_inner(child, src, ctx, enclosing_fn_line));
+                out.extend(parts_from_node_inner(child, src, ctx, enclosing_scope));
             }
             out
         }
-        "template_string" => template_string_parts(node, src, ctx, enclosing_fn_line),
+        "template_string" => template_string_parts(node, src, ctx, enclosing_scope),
         "binary_expression" => {
             // Only the `+` operator concatenates. Any other binary op
             // yields a Hole with the full expression.
@@ -1614,10 +1706,10 @@ fn parts_from_node_inner(
             }
             let mut out = Vec::new();
             if let Some(lhs) = node.child_by_field_name("left") {
-                out.extend(parts_from_node_inner(lhs, src, ctx, enclosing_fn_line));
+                out.extend(parts_from_node_inner(lhs, src, ctx, enclosing_scope));
             }
             if let Some(rhs) = node.child_by_field_name("right") {
-                out.extend(parts_from_node_inner(rhs, src, ctx, enclosing_fn_line));
+                out.extend(parts_from_node_inner(rhs, src, ctx, enclosing_scope));
             }
             out
         }
@@ -1627,7 +1719,7 @@ fn parts_from_node_inner(
         "substitution" | "template_substitution" => {
             let mut cursor = node.walk();
             if let Some(child) = node.named_children(&mut cursor).next() {
-                return parts_from_node_inner(child, src, ctx, enclosing_fn_line);
+                return parts_from_node_inner(child, src, ctx, enclosing_scope);
             }
             Vec::new()
         }
@@ -1638,7 +1730,7 @@ fn parts_from_node_inner(
                 if matches!(child.kind(), "format_specifier") {
                     continue;
                 }
-                return parts_from_node_inner(child, src, ctx, enclosing_fn_line);
+                return parts_from_node_inner(child, src, ctx, enclosing_scope);
             }
             Vec::new()
         }
@@ -1650,12 +1742,12 @@ fn parts_from_node_inner(
             // exists, and never fall back to `node` itself (which
             // would recurse on the same kind → stack overflow).
             if let Some(value) = node.child_by_field_name("value") {
-                parts_from_node_inner(value, src, ctx, enclosing_fn_line)
+                parts_from_node_inner(value, src, ctx, enclosing_scope)
             } else {
                 let mut cursor = node.walk();
                 let next = node.named_children(&mut cursor).next();
                 match next {
-                    Some(child) => parts_from_node_inner(child, src, ctx, enclosing_fn_line),
+                    Some(child) => parts_from_node_inner(child, src, ctx, enclosing_scope),
                     None => Vec::new(),
                 }
             }
@@ -1664,10 +1756,10 @@ fn parts_from_node_inner(
         // base then "/p". Both Python stdlib `urljoin` and TS `URL`
         // ctor. We detect either form and split into base + path.
         "call" | "call_expression" | "new_expression" => {
-            call_urljoin_parts(node, src, ctx, enclosing_fn_line)
+            call_urljoin_parts(node, src, ctx, enclosing_scope)
         }
         // Identifier: resolve once if possible.
-        "identifier" => identifier_parts(node, src, ctx, enclosing_fn_line),
+        "identifier" => identifier_parts(node, src, ctx),
         // Python attribute / TS member expression: emit as a Hole with
         // its full source text.
         "attribute" | "member_expression" | "subscript" | "subscript_expression" => {
@@ -1688,7 +1780,7 @@ fn parts_from_node_inner(
                 if key_text == "url" {
                     let value = child.child_by_field_name("value");
                     if let Some(v) = value {
-                        out.extend(parts_from_node_inner(v, src, ctx, enclosing_fn_line));
+                        out.extend(parts_from_node_inner(v, src, ctx, enclosing_scope));
                     }
                 }
             }
@@ -1705,7 +1797,7 @@ fn parts_from_node_inner(
         // and stays a hole carrying the whole text.
         "method_invocation" | "object_creation_expression" => {
             if let Some(arg) = find_builder_url_arg(node, src) {
-                return parts_from_node_inner(arg, src, ctx, enclosing_fn_line);
+                return parts_from_node_inner(arg, src, ctx, enclosing_scope);
             }
             vec![UrlPart::Hole(text_of(node, src).unwrap_or_default())]
         }
@@ -1718,7 +1810,7 @@ fn template_string_parts(
     node: Node,
     src: &[u8],
     ctx: &FileContext,
-    enclosing_fn_line: Option<u32>,
+    enclosing_scope: Option<u32>,
 ) -> Vec<UrlPart> {
     // JS grammar emits `template_string`'s named children as
     // `template_substitution` (one per `${…}`) and `string_fragment`
@@ -1728,7 +1820,7 @@ fn template_string_parts(
     for child in node.named_children(&mut cursor) {
         match child.kind() {
             "template_substitution" => {
-                let inner = parts_from_node_inner(child, src, ctx, enclosing_fn_line);
+                let inner = parts_from_node_inner(child, src, ctx, enclosing_scope);
                 if inner.is_empty() {
                     out.push(UrlPart::Hole(String::new()));
                 } else {
@@ -1762,7 +1854,7 @@ fn call_urljoin_parts(
     node: Node,
     src: &[u8],
     ctx: &FileContext,
-    enclosing_fn_line: Option<u32>,
+    enclosing_scope: Option<u32>,
 ) -> Vec<UrlPart> {
     // `new URL(...)` exposes the constructor under the `constructor`
     // field rather than `function`. `call` / `call_expression` use
@@ -1812,26 +1904,24 @@ fn call_urljoin_parts(
     let path_arg = args.get(path_idx).copied();
     let mut out = Vec::new();
     if let Some(b) = base_arg {
-        out.extend(parts_from_node_inner(b, src, ctx, enclosing_fn_line));
+        out.extend(parts_from_node_inner(b, src, ctx, enclosing_scope));
     }
     if let Some(p) = path_arg {
-        out.extend(parts_from_node_inner(p, src, ctx, enclosing_fn_line));
+        out.extend(parts_from_node_inner(p, src, ctx, enclosing_scope));
     }
     out
 }
 
-fn identifier_parts(
-    node: Node,
-    src: &[u8],
-    ctx: &FileContext,
-    enclosing_fn_line: Option<u32>,
-) -> Vec<UrlPart> {
+fn identifier_parts(node: Node, src: &[u8], ctx: &FileContext) -> Vec<UrlPart> {
     let name = match text_of(node, src) {
         Some(n) => n,
         None => return Vec::new(),
     };
-    match ctx.resolve_identifier(&name, enclosing_fn_line) {
-        Some(resolved) => parts_from_node_inner_string(&resolved, ctx, enclosing_fn_line),
+    // The scope chain of the *use* site: a name assigned in an
+    // enclosing scope is visible here.
+    let chain = scope_chain(node);
+    match ctx.resolve_identifier(&name, &chain) {
+        Some(resolved) => parts_from_node_inner_string(&resolved, ctx, &chain),
         None => vec![UrlPart::Hole(name)],
     }
 }
@@ -1843,7 +1933,7 @@ fn identifier_parts(
 fn parts_from_node_inner_string(
     text: &str,
     ctx: &FileContext,
-    enclosing_fn_line: Option<u32>,
+    scope_chain: &[u32],
 ) -> Vec<UrlPart> {
     let bytes = text.as_bytes();
     if bytes.len() >= 2 {
@@ -1864,9 +1954,9 @@ fn parts_from_node_inner_string(
     // Strip and treat as identifier again (one-step chains are out
     // of scope; we only resolve once).
     let trimmed = text.trim();
-    if let Some(resolved) = ctx.resolve_identifier(trimmed, enclosing_fn_line) {
+    if let Some(resolved) = ctx.resolve_identifier(trimmed, scope_chain) {
         if resolved != text {
-            return parts_from_node_inner_string(&resolved, ctx, enclosing_fn_line);
+            return parts_from_node_inner_string(&resolved, ctx, scope_chain);
         }
     }
     vec![UrlPart::Hole(text.to_string())]
@@ -1929,15 +2019,20 @@ fn apply_base_url(parts: Vec<UrlPart>, base_url: Option<&str>) -> Vec<UrlPart> {
 /// §6.3 patterns. The result is the host field of the normalized URL;
 /// we don't mutate the parts — the normalizer's host step handles
 /// the literal host extraction.
-fn host_for(parts: &[UrlPart]) -> HostPart {
-    // Find the longest prefix of holes at the start.
-    let mut hole_text = String::new();
-    for part in parts {
-        match part {
-            UrlPart::Hole(h) => hole_text.push_str(h),
-            UrlPart::Literal(_) => break,
-        }
-    }
+///
+/// The hole usually *names* the host rather than being it — `${BASE_URL}/v1`,
+/// a reverse proxy's `${UPSTREAM_HTTP_ORIGIN}` — so `origin`, when given,
+/// carries the file's assignment context and the scope chain of the use
+/// site, and the hole is followed to the environment variable that
+/// configures it (see [`resolve_host_env`]).
+fn host_for(parts: &[UrlPart], origin: Option<(&FileContext, &[u32])>) -> HostPart {
+    // The host is the first hole. A second hole right after it starts the
+    // path (`${UPSTREAM_HTTP_ORIGIN}${backendPath}`), so the two are not
+    // one host expression.
+    let hole_text = match parts.first() {
+        Some(UrlPart::Hole(h)) => h.clone(),
+        _ => String::new(),
+    };
     if hole_text.is_empty() {
         return HostPart::None;
     }
@@ -1946,7 +2041,169 @@ fn host_for(parts: &[UrlPart]) -> HostPart {
     if let Some(name) = crate::server::sensors::util::host_env_name(t) {
         return HostPart::Env(vec![name.to_string()]);
     }
+    // The hole names a value. Follow it to the env var that configures
+    // the host, when the file's assignments say what it is.
+    if let Some((ctx, scope_chain)) = origin {
+        if let Some(var) = resolve_host_env(t, ctx, scope_chain, 0) {
+            return HostPart::Env(vec![var]);
+        }
+    }
     HostPart::Expr(hole_text)
+}
+
+/// Follow a URL's host expression to the environment variable that
+/// configures it.
+///
+/// The hole at the front of a URL usually names a value rather than being
+/// one, so the walk follows the same-file assignment graph:
+///
+/// | shape                          | step                                  |
+/// |--------------------------------|---------------------------------------|
+/// | `BASE_URL`                     | the expression it is assigned          |
+/// | `` `${BASE_URL}/v1` ``         | the hole that carries the origin      |
+/// | `upstream.protocol`            | its base identifier (`upstream`)      |
+/// | `new URL(NAT_BACKEND_URL)`     | its arguments                          |
+///
+/// and stops at an environment-variable read (`process.env.X` and the other
+/// §6.3 shapes), which is the variable that configures the host.
+///
+/// Only the origin is followed, so a URL built from a literal stays a
+/// literal and an env var in the *path* is never mistaken for the host.
+/// What the walk cannot resolve leaves the host as `HostPart::Expr`, where
+/// it was before.
+fn resolve_host_env(
+    text: &str,
+    ctx: &FileContext,
+    scope_chain: &[u32],
+    depth: usize,
+) -> Option<String> {
+    /// A chain this deep is a cycle or a pathological file, not a URL.
+    const MAX_DEPTH: usize = 8;
+    if depth > MAX_DEPTH {
+        return None;
+    }
+    let t = text.trim();
+    if let Some(name) = crate::server::sensors::util::host_env_name(t) {
+        return Some(name.to_string());
+    }
+    if is_plain_identifier(t) {
+        let resolved = ctx.resolve_identifier(t, scope_chain)?;
+        return resolve_host_env(&resolved, ctx, scope_chain, depth + 1);
+    }
+    if let Some(body) = template_body(t) {
+        let hole = origin_hole(&template_from_string(body))?;
+        return resolve_host_env(&hole, ctx, scope_chain, depth + 1);
+    }
+    if let Some(base) = member_base(t) {
+        return resolve_host_env(base, ctx, scope_chain, depth + 1);
+    }
+    for arg in call_arguments(t) {
+        if let Some(var) = resolve_host_env(&arg, ctx, scope_chain, depth + 1) {
+            return Some(var);
+        }
+    }
+    None
+}
+
+/// The hole that carries a template's origin, if it has one.
+///
+/// A URL's origin sits between the scheme and the path. In a template that
+/// is the first hole after the `//` that separates them; a template with no
+/// `//` is a path or a bare host, and its first hole is the origin. A
+/// literal that carries a host of its own (`https://api.example.com/…`) has
+/// no hole origin — that literal is the host.
+fn origin_hole(parts: &[UrlPart]) -> Option<String> {
+    let mut first_hole = None;
+    let mut after_separator = false;
+    for part in parts {
+        match part {
+            UrlPart::Literal(literal) => {
+                if let Some((_, after)) = literal.split_once("//") {
+                    // A literal with a host of its own after the `//` has
+                    // no hole origin.
+                    if !after.is_empty() && after != "/" {
+                        return None;
+                    }
+                    after_separator = true;
+                }
+            }
+            UrlPart::Hole(hole) => {
+                if after_separator {
+                    return Some(hole.clone());
+                }
+                if first_hole.is_none() {
+                    first_hole = Some(hole.clone());
+                }
+            }
+        }
+    }
+    first_hole
+}
+
+/// Whether `text` is a bare identifier — a name the assignment table can
+/// answer for.
+fn is_plain_identifier(text: &str) -> bool {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(c) if c.is_alphabetic() || c == '_' || c == '$' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_alphanumeric() || c == '_' || c == '$')
+}
+
+/// The body of a template literal, without its backticks.
+fn template_body(text: &str) -> Option<&str> {
+    let bytes = text.as_bytes();
+    if bytes.len() >= 2 && bytes[0] == b'`' && bytes[bytes.len() - 1] == b'`' {
+        Some(&text[1..text.len() - 1])
+    } else {
+        None
+    }
+}
+
+/// The identifier a member expression reads from — `upstream.protocol`
+/// reads from `upstream`.
+fn member_base(text: &str) -> Option<&str> {
+    let (base, rest) = text.split_once('.')?;
+    if rest.is_empty() || !is_plain_identifier(base) {
+        return None;
+    }
+    Some(base)
+}
+
+/// The arguments of a call expression, split at top-level commas.
+fn call_arguments(text: &str) -> Vec<String> {
+    let Some(open) = text.find('(') else {
+        return Vec::new();
+    };
+    let Some(close) = text.rfind(')') else {
+        return Vec::new();
+    };
+    if close <= open {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0usize;
+    for ch in text[open + 1..close].chars() {
+        match ch {
+            '(' | '[' | '{' => {
+                depth += 1;
+                current.push(ch);
+            }
+            ')' | ']' | '}' => {
+                depth = depth.saturating_sub(1);
+                current.push(ch);
+            }
+            ',' if depth == 0 => out.push(std::mem::take(&mut current)),
+            _ => current.push(ch),
+        }
+    }
+    out.push(current);
+    out.into_iter()
+        .map(|arg| arg.trim().to_string())
+        .filter(|arg| !arg.is_empty())
+        .collect()
 }
 
 // ─── Graph emission ───────────────────────────────────────────────────
@@ -2264,7 +2521,7 @@ mod tests {
             UrlPart::Hole("os.environ[\"ORDERS_URL\"]".to_string()),
             UrlPart::Literal("/api/orders".to_string()),
         ];
-        match host_for(&parts) {
+        match host_for(&parts, None) {
             HostPart::Env(names) => assert_eq!(names.clone(), vec!["ORDERS_URL".to_string()]),
             other => panic!("expected Env, got {other:?}"),
         }
@@ -2276,7 +2533,7 @@ mod tests {
             UrlPart::Hole("BASE".to_string()),
             UrlPart::Literal("/api/orders".to_string()),
         ];
-        match host_for(&parts) {
+        match host_for(&parts, None) {
             HostPart::Expr(text) => assert_eq!(text, "BASE"),
             other => panic!("expected Expr, got {other:?}"),
         }
@@ -2285,7 +2542,107 @@ mod tests {
     #[test]
     fn host_for_yields_none_for_pure_literal() {
         let parts = vec![UrlPart::Literal("https://orders.svc/api".to_string())];
-        assert!(matches!(host_for(&parts), HostPart::None));
+        assert!(matches!(host_for(&parts, None), HostPart::None));
+    }
+
+    /// A URL whose host is built from an environment variable reaches that
+    /// variable through the file's assignments: the name the URL holds, the
+    /// object it is built from, and the argument that object was built
+    /// with. This is the shape of a reverse proxy that forwards to a
+    /// backend named by an env var.
+    #[test]
+    fn ts_url_built_from_an_env_var_resolves_to_that_var() {
+        let src = "\
+const NAT_BACKEND_URL = process.env.NAT_BACKEND_URL;
+const upstream = new URL(NAT_BACKEND_URL);
+const UPSTREAM_HTTP_ORIGIN = `${upstream.protocol}//${upstream.host}`;
+const targetUrl = `${UPSTREAM_HTTP_ORIGIN}/chat`;
+const res = await fetch(targetUrl, { method: 'POST' });
+";
+        let calls = ts_calls(src);
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        match &calls[0].url.host {
+            HostPart::Env(names) => {
+                assert_eq!(names, &vec!["NAT_BACKEND_URL".to_string()])
+            }
+            other => panic!("expected Env, got {other:?}"),
+        }
+        assert_eq!(calls[0].url.template.as_deref(), Some("/chat"));
+    }
+
+    /// The same env var, read inline rather than through a named const.
+    #[test]
+    fn ts_url_built_from_an_inline_env_var_resolves_to_that_var() {
+        let src = "\
+const targetUrl = new URL(process.env.NAT_BACKEND_URL);
+const res = await fetch(targetUrl, { method: 'POST' });
+";
+        let calls = ts_calls(src);
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        match &calls[0].url.host {
+            HostPart::Env(names) => {
+                assert_eq!(names, &vec!["NAT_BACKEND_URL".to_string()])
+            }
+            other => panic!("expected Env, got {other:?}"),
+        }
+    }
+
+    /// The env var is in the *path*, not the host: the URL's origin is the
+    /// literal, so the host is not env-configured and the resolution must
+    /// not claim it is.
+    #[test]
+    fn ts_env_var_in_the_path_does_not_become_the_host() {
+        let src = "\
+const BASE = 'https://api.example.com';
+const targetUrl = `${BASE}/v1/${process.env.VERSION}`;
+const res = await fetch(targetUrl);
+";
+        let calls = ts_calls(src);
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        match &calls[0].url.host {
+            HostPart::Expr(text) => assert_eq!(text, "BASE"),
+            other => panic!("expected Expr, got {other:?}"),
+        }
+    }
+
+    /// A literal host stays a literal host: the hole after it is in the
+    /// path, and the resolution must not walk into it.
+    #[test]
+    fn ts_literal_host_is_not_replaced_by_a_path_env_var() {
+        let src = "\
+const targetUrl = `https://api.example.com/${process.env.VERSION}`;
+const res = await fetch(targetUrl);
+";
+        let calls = ts_calls(src);
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        match &calls[0].url.host {
+            HostPart::Literal(host) => assert_eq!(host, "api.example.com"),
+            other => panic!("expected the literal host, got {other:?}"),
+        }
+    }
+
+    /// The resolution follows the scope chain like the identifier
+    /// resolution does: a name assigned in an enclosing scope is visible
+    /// in a nested closure, and one assigned in a sibling scope is not.
+    #[test]
+    fn ts_host_env_resolution_follows_the_scope_chain() {
+        let src = "\
+const NAT_BACKEND_URL = process.env.NAT_BACKEND_URL;
+const handler = async (req, res) => {
+  const targetUrl = `${NAT_BACKEND_URL}/chat`;
+  const doFetch = async () => {
+    const backendRes = await fetch(targetUrl, { method: 'POST' });
+  };
+};
+";
+        let calls = ts_calls(src);
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        match &calls[0].url.host {
+            HostPart::Env(names) => {
+                assert_eq!(names, &vec!["NAT_BACKEND_URL".to_string()])
+            }
+            other => panic!("expected Env, got {other:?}"),
+        }
     }
 
     // ─── Per-shape detection tests ────────────────────────────────
@@ -2298,6 +2655,45 @@ mod tests {
             Patterns::patterns(),
         )
     }
+    /// An ambiguous binding in an inner scope shadows the outer scope's
+    /// value: the name is assigned twice inside the handler, so the
+    /// identifier is unresolved. It must not fall through to the
+    /// module-level binding — that would attribute the call to a host
+    /// it never dials.
+    #[test]
+    fn ts_ambiguous_inner_binding_does_not_resolve_to_the_outer_scope() {
+        let src = "\
+const targetUrl = 'https://outer.example/one';
+const handler = async () => {
+  let targetUrl = 'https://a.example';
+  targetUrl = 'https://b.example';
+  const res = await fetch(targetUrl);
+};
+";
+        let calls = ts_calls(src);
+        assert_eq!(calls.len(), 1);
+        match &calls[0].url.host {
+            HostPart::Expr(expr) => assert_eq!(expr, "targetUrl"),
+            other => panic!("expected the unresolved identifier, got {other:?}"),
+        }
+    }
+
+    /// Two scopes that start on the same source line are two scopes: a
+    /// name bound in one is not visible in the other. The scope key is
+    /// the scope's start byte, not its line.
+    #[test]
+    fn ts_sibling_scopes_on_one_line_do_not_share_a_scope() {
+        let src = "\
+const a = () => { const targetUrl = 'https://a.example'; }; const b = () => { const res = fetch(targetUrl); };
+";
+        let calls = ts_calls(src);
+        assert_eq!(calls.len(), 1);
+        match &calls[0].url.host {
+            HostPart::Expr(expr) => assert_eq!(expr, "targetUrl"),
+            other => panic!("expected the unresolved identifier, got {other:?}"),
+        }
+    }
+
     fn ts_calls(src: &str) -> Vec<HttpClientCall> {
         detect_calls(
             std::path::Path::new("test.ts"),
@@ -2529,6 +2925,72 @@ got(\"/api/y\", { method: \"PUT\" });
             other => panic!("expected Env, got {other:?}"),
         }
         assert_eq!(c.url.template.as_deref(), Some("/invoices/{}"));
+    }
+
+    /// A `const` in an enclosing scope is visible in a nested closure:
+    /// the lexical rule. The NAT UI proxy is this shape — the URL is
+    /// built in the request handler and fetched from a nested arrow
+    /// function — and before this the fetch's URL stayed the bare
+    /// identifier, so the host was never known.
+    #[test]
+    fn ts_const_in_an_enclosing_scope_resolves_in_a_nested_closure() {
+        let src = "\
+const handler = async (req, res) => {
+  const targetUrl = `${UPSTREAM_HTTP_ORIGIN}/chat`;
+  const doFetch = async () => {
+    const backendRes = await fetch(targetUrl, { method: 'POST' });
+  };
+};
+";
+        let calls = ts_calls(src);
+        assert_eq!(calls.len(), 1);
+        let c = &calls[0];
+        match &c.url.host {
+            HostPart::Expr(expr) => assert_eq!(expr, "UPSTREAM_HTTP_ORIGIN"),
+            other => panic!("expected Expr, got {other:?}"),
+        }
+        assert_eq!(c.url.template.as_deref(), Some("/chat"));
+    }
+
+    /// The other half of the rule: a name assigned in a *sibling*
+    /// scope is not visible here. Without this, the chain lookup would
+    /// resolve any name assigned once in the file.
+    #[test]
+    fn ts_const_in_a_sibling_scope_does_not_resolve() {
+        let src = "\
+const first = async () => {
+  const targetUrl = 'https://example.com/one';
+};
+const second = async () => {
+  const backendRes = await fetch(targetUrl);
+};
+";
+        let calls = ts_calls(src);
+        assert_eq!(calls.len(), 1);
+        let c = &calls[0];
+        match &c.url.host {
+            HostPart::Expr(expr) => assert_eq!(expr, "targetUrl"),
+            other => panic!("expected the unresolved identifier, got {other:?}"),
+        }
+    }
+
+    /// A name assigned twice in the same scope stays unresolved — the
+    /// §6.3 rule, now applied per scope.
+    #[test]
+    fn ts_name_assigned_twice_in_one_scope_stays_unresolved() {
+        let src = "\
+const handler = async () => {
+  let targetUrl = 'https://example.com/one';
+  targetUrl = 'https://example.com/two';
+  const backendRes = await fetch(targetUrl);
+};
+";
+        let calls = ts_calls(src);
+        assert_eq!(calls.len(), 1);
+        match &calls[0].url.host {
+            HostPart::Expr(expr) => assert_eq!(expr, "targetUrl"),
+            other => panic!("expected the unresolved identifier, got {other:?}"),
+        }
     }
 
     #[test]

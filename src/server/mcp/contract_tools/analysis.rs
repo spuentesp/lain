@@ -37,9 +37,9 @@ use super::view::resolve_view;
 use super::{ContractToolEntry, ContractToolFuture, ToolOutcome};
 use crate::federation::contracts::changed_files::{MirrorChangedFiles, MultiRepoChangedFiles};
 use crate::federation::contracts::diff::{
-    build_coverage, classify, coverage_complete, diff_consumers, diff_contracts, evaluate,
-    ChangeKind, Class, Compat, ContractSurface, Coverage as DiffCoverage, Impact, ReviewedRepo,
-    Scope as DiffScope, UnreviewedRepo,
+    build_coverage, classify, coverage_complete, diff_consumers_until, diff_contracts_until,
+    evaluate, ChangeKind, Class, Compat, ContractSurface, Coverage as DiffCoverage, Impact,
+    ReviewedRepo, Scope as DiffScope, UnreviewedRepo,
 };
 use crate::federation::contracts::index::{ContractIndex, EndpointId};
 use crate::federation::contracts::model::ServiceName;
@@ -182,6 +182,16 @@ async fn run_diff_contracts(
         Err(o) => return Err(o),
     };
     let cap = parse_cap(&args_map, 50, 500, started)?;
+    let max_hops = parse_max_hops(&args_map, started)?;
+    let deadline = parse_timeout(&args_map, started)?;
+    macro_rules! check_deadline {
+        () => {
+            if deadline_expired(deadline) {
+                return Ok(timeout_outcome(&head_label, started, Vec::new(), 0, json!({"complete": false})));
+            }
+        };
+    }
+    check_deadline!();
     // §12: `repo` and `service` narrow the reported changes; both
     // apply before `min_impact` and before `compatible_changes`
     // counting (a filtered-out change is not counted either).
@@ -194,8 +204,12 @@ async fn run_diff_contracts(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    let base_record = load_snapshot(ctx, &base_label, started).await?;
-    let head_record = load_snapshot(ctx, &head_label, started).await?;
+    let base_record = load_snapshot(ctx, &base_label, started, deadline).await;
+    check_deadline!();
+    let base_record = base_record?;
+    let head_record = load_snapshot(ctx, &head_label, started, deadline).await;
+    check_deadline!();
+    let head_record = head_record?;
     if !snapshot_state_is_ready(&base_record) {
         return Err(error_outcome(
             "snapshot_not_ready",
@@ -235,20 +249,57 @@ async fn run_diff_contracts(
             started,
         ));
     }
-    let (base_index, base_fed, _base_hold) =
-        snapshot_contract_index(ctx, &base_record, &args_map, started)?;
-    let (head_index, head_fed, _head_hold) =
-        snapshot_contract_index(ctx, &head_record, &args_map, started)?;
+    // Each hydration is individually blocking; the deadline bounds the
+    // residency wait, but a single hydration itself cannot be interrupted.
+    let base = super::run_blocking(|| {
+        snapshot_contract_index(ctx, &base_record, &args_map, started, deadline)
+    });
+    check_deadline!();
+    let (base_index, base_fed, _base_hold) = base?;
+    let head = super::run_blocking(|| {
+        snapshot_contract_index(ctx, &head_record, &args_map, started, deadline)
+    });
+    check_deadline!();
+    let (head_index, head_fed, _head_hold) = head?;
     let data_dir = ctx
         .snapshots
         .map(|m| m.data_dir().to_path_buf())
         .unwrap_or_else(|| std::path::PathBuf::from("."));
-    let changed_source = build_changed_source(&data_dir, &base_record, &head_record);
-    let base_surface = ContractSurface::from_index(&base_index);
-    let head_surface = ContractSurface::from_index(&head_index);
-
-    let provider_changes = diff_contracts(&base_surface, &head_surface, &changed_source);
-    let consumer_changes = diff_consumers(&base_surface, &head_surface);
+    // Individual git diffs and surface hydration are not interruptible;
+    // check between repos and stages, and inside the comparison loops.
+    let computed = super::run_blocking(|| {
+        let changed_source = build_changed_source(&data_dir, &base_record, &head_record, deadline)?;
+        if deadline_expired(deadline) {
+            return None;
+        }
+        let base_surface = ContractSurface::from_index(&base_index);
+        if deadline_expired(deadline) {
+            return None;
+        }
+        let head_surface = ContractSurface::from_index(&head_index);
+        let provider_changes =
+            diff_contracts_until(&base_surface, &head_surface, &changed_source, deadline)?;
+        let consumer_changes = diff_consumers_until(&base_surface, &head_surface, deadline)?;
+        Some((
+            changed_source,
+            base_surface,
+            head_surface,
+            provider_changes,
+            consumer_changes,
+        ))
+    });
+    check_deadline!();
+    let Some((changed_source, base_surface, head_surface, provider_changes, consumer_changes)) =
+        computed
+    else {
+        return Ok(timeout_outcome(
+            &head_label,
+            started,
+            Vec::new(),
+            0,
+            json!({"complete": false}),
+        ));
+    };
     let mut all_changes = provider_changes;
     all_changes.extend(consumer_changes);
 
@@ -258,7 +309,9 @@ async fn run_diff_contracts(
     let mut coverage = build_coverage(&head_index, coverage_repos, scope.clone());
     coverage.repo_coverages = repo_coverages;
 
+    check_deadline!();
     for repo in changed_source.unavailable_repos() {
+        check_deadline!();
         if !coverage.scope.unreviewed.iter().any(|u| u.repo == repo) {
             coverage
                 .scope
@@ -288,6 +341,7 @@ async fn run_diff_contracts(
     let mut removed_by_ed: BTreeMap<(EndpointId, Direction), Vec<JsonPath>> = BTreeMap::new();
     let mut added_by_ed: BTreeMap<(EndpointId, Direction), Vec<JsonPath>> = BTreeMap::new();
     for change in &all_changes {
+        check_deadline!();
         match &change.kind {
             ChangeKind::FieldRemoved {
                 endpoint,
@@ -317,6 +371,7 @@ async fn run_diff_contracts(
     let mut rename_splits: BTreeMap<(EndpointId, Direction), (JsonPath, JsonPath)> =
         BTreeMap::new();
     for (ed, removes) in &removed_by_ed {
+        check_deadline!();
         if let Some(adds) = added_by_ed.get(ed) {
             if removes.len() == 1 && adds.len() == 1 {
                 rename_splits.insert(ed.clone(), (removes[0].clone(), adds[0].clone()));
@@ -326,6 +381,7 @@ async fn run_diff_contracts(
 
     let mut evaluated: Vec<(Impact, Compat, ChangeKind, ServiceName)> = Vec::new();
     for change in all_changes {
+        check_deadline!();
         let mut eval_kind = change.kind.clone();
         if let ChangeKind::FieldAdded {
             endpoint,
@@ -371,6 +427,15 @@ async fn run_diff_contracts(
     // `currency` addition → 1, not 3).
     let mut compatible_seen: BTreeSet<String> = BTreeSet::new();
     for (impact, compat, kind, service) in evaluated {
+        if deadline_expired(deadline) {
+            return Ok(timeout_outcome(
+                &head_label,
+                started,
+                kept,
+                compatible_changes,
+                coverage_to_value(&coverage),
+            ));
+        }
         if let Some(ref sf) = service_filter {
             if service.0.as_str() != sf.as_str() {
                 continue;
@@ -418,11 +483,21 @@ async fn run_diff_contracts(
             &base_fed,
             &head_fed,
             cap,
+            max_hops,
             &head_label,
             started,
         )?;
         claims.extend(claims_for_impact(&impact, &kind, head_fed.backend.as_ref()));
         kept.push(value);
+        if deadline_expired(deadline) {
+            return Ok(timeout_outcome(
+                &head_label,
+                started,
+                kept,
+                compatible_changes,
+                coverage_to_value(&coverage),
+            ));
+        }
     }
     kept.sort_by(|a, b| {
         let ka = sort_key(a);
@@ -437,6 +512,15 @@ async fn run_diff_contracts(
     claims.extend(claims_from_coverage(&coverage));
     let coverage_caveat = coverage_note(&coverage);
 
+    if deadline_expired(deadline) {
+        return Ok(timeout_outcome(
+            &head_label,
+            started,
+            kept,
+            compatible_changes,
+            coverage_to_value(&coverage),
+        ));
+    }
     let data = json!({
         "changes": kept,
         "compatible_changes": compatible_changes,
@@ -627,12 +711,11 @@ fn find_field_node(
     // from the endpoint's provider nodes instead. A repo-wide name
     // scan would pick an arbitrary endpoint's field (the fixture's
     // `customer_id` appears in four schemas).
-    let edges = backend.all_edges().ok()?;
-    let mut targets: Vec<String> = edges
-        .iter()
-        .filter(|e| e.edge_type == crate::schema::EdgeType::HasField)
-        .filter(|e| e.source_id == schema.node_id.as_str())
-        .map(|e| e.target_id.clone())
+    let mut targets: Vec<String> = backend
+        .edges_from(schema.node_id.as_str(), crate::schema::EdgeType::HasField)
+        .ok()?
+        .into_iter()
+        .map(|e| e.target_id)
         .collect();
     targets.sort();
     for target in &targets {
@@ -664,6 +747,99 @@ fn parse_min_impact(args: &Map<String, Value>) -> Result<Option<Class>, ToolOutc
     }))
 }
 
+const TIMEOUT_HARD_MAX_MS: u64 = 600_000;
+
+/// Server-side limits from `LAIN_DIFF_TIMEOUT_MS` (default applied when the
+/// call omits `timeout_ms`) and `LAIN_DIFF_TIMEOUT_MAX_MS` (cap, never above
+/// the schema ceiling of 600000).
+fn timeout_limits() -> (Option<u64>, u64) {
+    let read = |k: &str| {
+        std::env::var(k)
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|v| *v >= 1)
+    };
+    let max = read("LAIN_DIFF_TIMEOUT_MAX_MS")
+        .map_or(TIMEOUT_HARD_MAX_MS, |v| v.min(TIMEOUT_HARD_MAX_MS));
+    (read("LAIN_DIFF_TIMEOUT_MS").map(|v| v.min(max)), max)
+}
+
+fn parse_timeout(
+    args: &Map<String, Value>,
+    started: Instant,
+) -> Result<Option<Instant>, ToolOutcome> {
+    let (default, max) = timeout_limits();
+    parse_timeout_with(args, started, default, max)
+}
+
+fn parse_timeout_with(
+    args: &Map<String, Value>,
+    started: Instant,
+    default: Option<u64>,
+    max: u64,
+) -> Result<Option<Instant>, ToolOutcome> {
+    let ms = match args.get("timeout_ms") {
+        None => default,
+        Some(value) => match value.as_u64() {
+            Some(ms) if (1..=max).contains(&ms) => Some(ms),
+            _ => {
+                return Err(error_outcome(
+                    "invalid_argument",
+                    &format!("timeout_ms must be an integer between 1 and {max}"),
+                    Some(json!({"arg": "timeout_ms", "min": 1, "max": max})),
+                    "live",
+                    started,
+                ))
+            }
+        },
+    };
+    Ok(ms.map(|ms| started + std::time::Duration::from_millis(ms)))
+}
+
+fn deadline_expired(deadline: Option<Instant>) -> bool {
+    deadline.is_some_and(|d| Instant::now() >= d)
+}
+
+fn remaining_wait_ms(deadline: Option<Instant>, default: u64) -> u64 {
+    deadline.map_or(default, |d| {
+        default.min(
+            d.saturating_duration_since(Instant::now())
+                .as_millis()
+                .min(u64::MAX as u128) as u64,
+        )
+    })
+}
+
+fn timeout_outcome(
+    label: &str,
+    started: Instant,
+    changes: Vec<Value>,
+    compatible_changes: u32,
+    mut coverage: Value,
+) -> ToolOutcome {
+    coverage["complete"] = json!(false);
+    let data = json!({"changes": changes, "compatible_changes": compatible_changes, "coverage": coverage, "truncated": true, "truncation_reason": "timeout"});
+    let envelope = success_envelope(data.clone(), label, true, started);
+    let text = format!("# diff_contracts: timed out; results are incomplete and must not be interpreted as no impact.\n{}", render_diff_contracts(&data));
+    outcome(envelope, &data, text)
+}
+
+fn parse_max_hops(args: &Map<String, Value>, started: Instant) -> Result<u32, ToolOutcome> {
+    match args.get("max_hops") {
+        None => Ok(10),
+        Some(value) => match value.as_u64() {
+            Some(n @ 1..=100) => Ok(n as u32),
+            _ => Err(error_outcome(
+                "invalid_argument",
+                "max_hops must be an integer between 1 and 100",
+                Some(json!({"arg": "max_hops", "min": 1, "max": 100})),
+                "live",
+                started,
+            )),
+        },
+    }
+}
+
 fn parse_cap(
     args: &Map<String, Value>,
     default: usize,
@@ -690,11 +866,15 @@ fn build_changed_source(
     data_dir: &std::path::Path,
     base: &SnapshotRecord,
     head: &SnapshotRecord,
-) -> MultiRepoChangedFiles {
+    deadline: Option<Instant>,
+) -> Option<MultiRepoChangedFiles> {
     let src = MirrorChangedFiles::new(data_dir);
     let mut by_repo = std::collections::BTreeMap::new();
     let mut line_ranges = std::collections::BTreeMap::new();
     for (repo, base_sha) in &base.repos {
+        if deadline_expired(deadline) {
+            return None;
+        }
         let head_sha = head
             .repos
             .get(repo)
@@ -709,16 +889,17 @@ fn build_changed_source(
             line_ranges.insert(repo.clone(), ranges);
         }
     }
-    MultiRepoChangedFiles {
+    Some(MultiRepoChangedFiles {
         by_repo,
         line_ranges,
-    }
+    })
 }
 
 async fn load_snapshot(
     ctx: &McpContext<'_>,
     label: &str,
     started: Instant,
+    deadline: Option<Instant>,
 ) -> Result<SnapshotRecord, ToolOutcome> {
     let mgr = ctx.snapshots.ok_or_else(|| {
         error_outcome(
@@ -729,7 +910,8 @@ async fn load_snapshot(
             started,
         )
     })?;
-    let outcome = mgr.get(label, 1_000).await.map_err(|e| match e {
+    let wait_ms = remaining_wait_ms(deadline, 1_000);
+    let outcome = mgr.get(label, wait_ms).await.map_err(|e| match e {
         crate::federation::contracts::snapshots::manager::PrepareError::SnapshotNotFound {
             snapshot,
         } => error_outcome(
@@ -793,6 +975,7 @@ fn snapshot_contract_index(
     record: &SnapshotRecord,
     args_map: &Map<String, Value>,
     started: Instant,
+    deadline: Option<Instant>,
 ) -> Result<
     (
         Arc<ContractIndex>,
@@ -818,6 +1001,7 @@ fn snapshot_contract_index(
             .unwrap_or(5_000),
         60_000,
     );
+    let wait_ms = remaining_wait_ms(deadline, wait_ms);
     let (fed, guard) =
         mgr.from_snapshot_with_wait_ms(record, wait_ms)
             .map_err(|error| match error {
@@ -1269,17 +1453,8 @@ fn parse_method_template(name: &str) -> (MethodSpec, Option<String>) {
     let mut parts = trimmed.splitn(2, ' ');
     let verb = parts.next().unwrap_or("");
     let tmpl = parts.next().map(str::to_string);
-    let method = match verb.to_ascii_uppercase().as_str() {
-        "GET" => MethodSpec::Known(crate::federation::contracts::model::HttpMethod::Get),
-        "POST" => MethodSpec::Known(crate::federation::contracts::model::HttpMethod::Post),
-        "PUT" => MethodSpec::Known(crate::federation::contracts::model::HttpMethod::Put),
-        "PATCH" => MethodSpec::Known(crate::federation::contracts::model::HttpMethod::Patch),
-        "DELETE" => MethodSpec::Known(crate::federation::contracts::model::HttpMethod::Delete),
-        "HEAD" => MethodSpec::Known(crate::federation::contracts::model::HttpMethod::Head),
-        "OPTIONS" => MethodSpec::Known(crate::federation::contracts::model::HttpMethod::Options),
-        "ANY" => MethodSpec::Known(crate::federation::contracts::model::HttpMethod::Any),
-        _ => MethodSpec::Unknown,
-    };
+    let method = crate::federation::contracts::model::HttpMethod::parse(&verb.to_ascii_uppercase())
+        .map_or(MethodSpec::Unknown, MethodSpec::Known);
     (method, tmpl)
 }
 
@@ -1342,6 +1517,7 @@ fn attach_change_paths(
     base_fed: &crate::federation::contracts::snapshots::SnapshotFederation,
     head_fed: &crate::federation::contracts::snapshots::SnapshotFederation,
     cap: usize,
+    max_hops: u32,
     label: &str,
     started: Instant,
 ) -> Result<(), ToolOutcome> {
@@ -1375,18 +1551,17 @@ fn attach_change_paths(
         &base_fed.backend
     };
     let start_refs: Vec<&str> = starts.iter().map(String::as_str).collect();
-    let outcome: ImpactResult =
-        backend
-            .traverse_impact(&start_refs, 10, cap, 0.0)
-            .map_err(|e| {
-                error_outcome(
-                    "invalid_argument",
-                    format!("traverse_impact failed: {e}"),
-                    None,
-                    label,
-                    started,
-                )
-            })?;
+    let outcome: ImpactResult = backend
+        .traverse_impact(&start_refs, max_hops, cap, 0.0)
+        .map_err(|e| {
+            error_outcome(
+                "invalid_argument",
+                format!("traverse_impact failed: {e}"),
+                None,
+                label,
+                started,
+            )
+        })?;
     let mut paths = outcome.paths;
     paths.sort_by(|a, b| {
         b.min_confidence
@@ -1520,27 +1695,32 @@ fn enclosing_sender(
     if call_ids.is_empty() {
         return None;
     }
-    let edges = backend.all_edges().ok()?;
+    // Indexed lookups by target: this used to clone every edge in the
+    // federation and scan it three times to answer a question about one
+    // call site.
+    let sources_into =
+        |ids: &[String], edge_type: crate::schema::EdgeType| -> Option<Vec<String>> {
+            let mut out = Vec::new();
+            for id in ids {
+                out.extend(
+                    backend
+                        .edges_to(id, edge_type.clone())
+                        .ok()?
+                        .into_iter()
+                        .map(|e| e.source_id),
+                );
+            }
+            Some(out)
+        };
     // FieldRefs that read from this call.
-    let field_refs: Vec<String> = edges
-        .iter()
-        .filter(|e| e.edge_type == crate::schema::EdgeType::ReadsFrom)
-        .filter(|e| call_ids.contains(&e.target_id))
-        .map(|e| e.source_id.clone())
-        .collect();
-    let mut readers: Vec<String> = edges
-        .iter()
-        .filter(|e| e.edge_type == crate::schema::EdgeType::ReadsField)
-        .filter(|e| field_refs.contains(&e.target_id))
-        .map(|e| e.source_id.clone())
-        .collect();
+    let mut field_refs = sources_into(&call_ids, crate::schema::EdgeType::ReadsFrom)?;
+    // Membership semantics, as before: a FieldRef that reads from two of
+    // these calls must still yield its readers once.
+    field_refs.sort();
+    field_refs.dedup();
+    let mut readers = sources_into(&field_refs, crate::schema::EdgeType::ReadsField)?;
     readers.sort();
-    let mut senders: Vec<String> = edges
-        .iter()
-        .filter(|e| e.edge_type == crate::schema::EdgeType::SendsHttp)
-        .filter(|e| call_ids.contains(&e.target_id))
-        .map(|e| e.source_id.clone())
-        .collect();
+    let mut senders = sources_into(&call_ids, crate::schema::EdgeType::SendsHttp)?;
     senders.sort();
     let sender = senders.first().cloned();
     // Candidate readers: functions other than the sending function
@@ -1893,18 +2073,21 @@ async fn run_trace_impact(
         // see its own schema, and the response would look complete.
         // The standing rule is never claim absent when unanalysed —
         // silently degrading the seed set is the same failure.
-        let edges = backend.all_edges().map_err(|e| ToolOutcome {
-            structured: json!({}),
-            text: format!("could not enumerate edges for the schema seed: {e}"),
-            is_error: true,
-        })?;
         {
-            let mut field_ids: Vec<String> = edges
-                .iter()
-                .filter(|e| e.edge_type == crate::schema::EdgeType::HasField)
-                .filter(|e| schema_ids.contains(&e.source_id))
-                .map(|e| e.target_id.clone())
-                .collect();
+            let mut field_ids: Vec<String> = Vec::new();
+            let mut seen_schemas: std::collections::HashSet<&String> =
+                std::collections::HashSet::new();
+            for schema_id in schema_ids.iter().filter(|id| seen_schemas.insert(id)) {
+                // Indexed by source: no clone of the whole edge set.
+                let fields = backend
+                    .edges_from(schema_id, crate::schema::EdgeType::HasField)
+                    .map_err(|e| ToolOutcome {
+                        structured: json!({}),
+                        text: format!("could not enumerate edges for the schema seed: {e}"),
+                        is_error: true,
+                    })?;
+                field_ids.extend(fields.into_iter().map(|e| e.target_id));
+            }
             field_ids.sort();
             starts.extend(field_ids);
         }
@@ -2106,7 +2289,7 @@ fn graph_path_to_value(p: &GraphImpactPath) -> Value {
     })
 }
 
-fn provenance_label(p: Option<&EdgeProvenance>) -> Value {
+pub(super) fn provenance_label(p: Option<&EdgeProvenance>) -> Value {
     let Some(p) = p else {
         // A legacy edge with no recorded provenance. Treated as 0.0
         // here and in `traverse_impact`, because confidence must be
@@ -2378,6 +2561,106 @@ mod tests {
     };
     use crate::federation::contracts::model::{JsonPath, SymbolKey};
     use crate::federation::repo_id::RepoId;
+
+    #[test]
+    fn timeout_validation_and_wait_budget() {
+        let now = Instant::now();
+        let mut args = Map::new();
+        // The default comes from the environment, so this case uses the
+        // explicit form: a `LAIN_DIFF_TIMEOUT_MS` set in the ambient
+        // environment must not decide whether the test passes.
+        assert!(parse_timeout_with(&args, now, None, TIMEOUT_HARD_MAX_MS)
+            .unwrap()
+            .is_none());
+        args.insert("timeout_ms".into(), json!(5000));
+        let deadline = parse_timeout(&args, now).unwrap();
+        assert!(remaining_wait_ms(deadline, 1000) <= 1000);
+        assert_eq!(
+            remaining_wait_ms(Some(now - std::time::Duration::from_millis(1)), 5000),
+            0
+        );
+        for value in [json!(0), json!(600001), json!(-1), json!("1"), Value::Null] {
+            args.insert("timeout_ms".into(), value);
+            assert!(parse_timeout(&args, now).is_err());
+        }
+    }
+
+    #[test]
+    fn timeout_default_and_cap_apply() {
+        let now = Instant::now();
+        let mut args = Map::new();
+        let d = parse_timeout_with(&args, now, Some(50), 100)
+            .unwrap()
+            .unwrap();
+        assert_eq!(d - now, std::time::Duration::from_millis(50));
+        args.insert("timeout_ms".into(), json!(101));
+        assert!(parse_timeout_with(&args, now, Some(50), 100).is_err());
+        args.insert("timeout_ms".into(), json!(100));
+        assert!(parse_timeout_with(&args, now, None, 100).unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn expired_timeout_returns_explicit_incomplete_result_before_snapshot_lookup() {
+        let status = crate::server::mcp::handler::HandlerStatus::for_test();
+        let ctx = McpContext {
+            server: None,
+            federation: None,
+            workspaces: None,
+            status: &status,
+            reload_bus: None,
+            snapshots: None,
+        };
+        let args = json!({"base": "base", "head": "head", "timeout_ms": 1})
+            .as_object()
+            .unwrap()
+            .clone();
+        let result = run_diff_contracts(
+            &ctx,
+            args,
+            Instant::now() - std::time::Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        assert!(!result.is_error);
+        assert_eq!(result.structured["data"]["truncated"], true);
+        assert_eq!(result.structured["data"]["truncation_reason"], "timeout");
+        assert_eq!(result.structured["data"]["coverage"]["complete"], false);
+        assert!(result.text.contains("must not be interpreted as no impact"));
+    }
+
+    #[test]
+    fn timeout_outcome_retains_completed_changes_and_marks_coverage_incomplete() {
+        let result = timeout_outcome(
+            "head",
+            Instant::now(),
+            vec![json!({"kind": "FieldRemoved"})],
+            2,
+            json!({"complete": true}),
+        );
+        assert_eq!(
+            result.structured["data"]["changes"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(result.structured["data"]["compatible_changes"], 2);
+        assert_eq!(result.structured["data"]["coverage"]["complete"], false);
+        assert_eq!(result.structured["data"]["truncated"], true);
+    }
+
+    #[test]
+    fn max_hops_defaults_and_rejects_invalid_values() {
+        let started = Instant::now();
+        let mut args = Map::new();
+        assert_eq!(parse_max_hops(&args, started).unwrap(), 10);
+        args.insert("max_hops".into(), json!(3));
+        assert_eq!(parse_max_hops(&args, started).unwrap(), 3);
+        for value in [json!(0), json!(101), json!(-1), json!("3"), Value::Null] {
+            args.insert("max_hops".into(), value);
+            assert!(parse_max_hops(&args, started).is_err());
+        }
+    }
 
     #[test]
     fn direction_of_change_extracts_field_kinds() {

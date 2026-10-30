@@ -204,18 +204,25 @@ pub struct YamlFile {
     /// (`crate::federation::anchor_miner`) — see [`AnchorShapes`].
     #[serde(default)]
     pub anchors: AnchorShapes,
+    /// Django ORM table sensor vocabulary (`crate::server::sensors::django_orm_sensor`).
+    #[serde(default)]
+    pub django_orm: DjangoOrmShapes,
 }
 
 impl YamlFile {
     /// Concatenate `doc` onto `self`: framework entries extend their
-    /// language bucket, anchor shapes merge additively (see
-    /// [`AnchorShapes::merge`]).
+    /// language bucket, anchor and ORM shapes merge additively.
     fn merge_from(&mut self, doc: YamlFile) {
-        let YamlFile { languages, anchors } = doc;
+        let YamlFile {
+            languages,
+            anchors,
+            django_orm,
+        } = doc;
         for (lang, list) in languages {
             self.languages.entry(lang).or_default().extend(list);
         }
         self.anchors.merge(&anchors);
+        self.django_orm.merge(&django_orm);
     }
 
     /// Load every `*.yaml` in `dir` and concatenate the entries.
@@ -482,6 +489,69 @@ impl AnchorShapes {
                 }
             }
         }
+    }
+}
+
+/// Configurable vocabulary for the Django ORM table sensor
+/// (`crate::server::sensors::django_orm_sensor`). Bundled in
+/// `frameworks.yaml` under `django_orm:` and layered additively with
+/// per-repo `<root>/.lain/patterns/*.yaml` overrides via
+/// [`Patterns::with_overrides`].
+#[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq)]
+pub struct DjangoOrmShapes {
+    /// Last-segment base names that make a class a Django model.
+    #[serde(default)]
+    pub model_bases: Vec<String>,
+    /// Manager / queryset methods that read the table.
+    #[serde(default)]
+    pub read_methods: Vec<String>,
+    /// Manager / queryset methods that write the table.
+    #[serde(default)]
+    pub write_methods: Vec<String>,
+    /// Methods that also read before they write.
+    #[serde(default)]
+    pub read_write_methods: Vec<String>,
+    /// Methods after which the chain no longer addresses the queryset.
+    #[serde(default)]
+    pub terminal_methods: Vec<String>,
+    /// Terminal methods that return a model instance.
+    #[serde(default)]
+    pub instance_methods: Vec<String>,
+}
+
+impl DjangoOrmShapes {
+    /// Additive merge: every list in `other` extends the matching list here.
+    pub fn merge(&mut self, other: &Self) {
+        extend_list(&mut self.model_bases, &other.model_bases);
+        extend_list(&mut self.read_methods, &other.read_methods);
+        extend_list(&mut self.write_methods, &other.write_methods);
+        extend_list(&mut self.read_write_methods, &other.read_write_methods);
+        extend_list(&mut self.terminal_methods, &other.terminal_methods);
+        extend_list(&mut self.instance_methods, &other.instance_methods);
+    }
+
+    pub fn has_model_base(&self, name: &str) -> bool {
+        self.model_bases.iter().any(|b| b == name)
+    }
+
+    pub fn is_read_method(&self, name: &str) -> bool {
+        self.read_methods.iter().any(|m| m == name)
+    }
+
+    pub fn is_write_method(&self, name: &str) -> bool {
+        self.write_methods.iter().any(|m| m == name)
+    }
+
+    pub fn is_read_write_method(&self, name: &str) -> bool {
+        self.read_write_methods.iter().any(|m| m == name)
+    }
+
+    pub fn is_terminal_method(&self, name: &str) -> bool {
+        self.terminal_methods.iter().any(|m| m == name)
+    }
+
+    pub fn is_instance_method(&self, name: &str) -> bool {
+        self.instance_methods.iter().any(|m| m == name)
     }
 }
 
@@ -861,6 +931,11 @@ impl Patterns {
         &mut self.yaml.anchors
     }
 
+    /// The Django ORM table sensor vocabulary (bundled + any loaded overrides).
+    pub fn django_orm_shapes(&self) -> &DjangoOrmShapes {
+        &self.yaml.django_orm
+    }
+
     /// Look up a framework by `id` across every language.
     pub fn framework(&self, id: &str) -> Option<&FrameworkDef> {
         self.yaml
@@ -1182,6 +1257,7 @@ impl Patterns {
         let YamlFile {
             languages: override_langs,
             anchors: override_anchors,
+            django_orm: override_django_orm,
         } = overrides;
         for (lang, list) in override_langs {
             for new_def in list {
@@ -1201,6 +1277,7 @@ impl Patterns {
         // [`AnchorShapes::merge`]. The framework replace-by-id rule
         // has no analogue for anonymous keyword lists.
         self.yaml.anchors.merge(&override_anchors);
+        self.yaml.django_orm.merge(&override_django_orm);
         // Populate the override cache. Bodies were validated above
         // (Step 1); the cache is a plain `Vec` so the second-call
         // behaviour is **all-or-nothing**: a subsequent
@@ -1423,6 +1500,9 @@ pub struct RoutePattern {
     method_regex: Option<regex::Regex>,
     path_regex: regex::Regex,
     handler_fn_regex: regex::Regex,
+    /// Optional source-file path filter (`config/routes.rb` for Rails,
+    /// `pages/api/` for Next.js Pages Router).
+    source: Option<String>,
     /// What to emit when the regex above did not capture a verb.
     /// `HttpMethod::Any` for go-std (the route declares no verb);
     /// `HttpMethod::Get` for Flask (whose default verb is GET even
@@ -1442,6 +1522,9 @@ impl RoutePattern {
     }
     pub fn handler_fn_regex(&self) -> &regex::Regex {
         &self.handler_fn_regex
+    }
+    pub fn source(&self) -> Option<&str> {
+        self.source.as_deref()
     }
 }
 
@@ -1519,6 +1602,7 @@ fn route_pattern_for(def: &FrameworkDef) -> Option<RoutePattern> {
         method_regex,
         path_regex,
         handler_fn_regex,
+        source: def.source.clone(),
         default_method: default,
     })
 }

@@ -39,6 +39,9 @@ mod battery_mcp_tools;
 #[path = "use_cases/battery_federation.rs"]
 mod battery_federation;
 
+#[path = "use_cases/service_refs.rs"]
+mod service_refs;
+
 #[path = "use_cases/battery_cli.rs"]
 mod battery_cli;
 
@@ -56,3 +59,6 @@ mod battery_success_metrics;
 
 #[path = "use_cases/battery_e2e_chains.rs"]
 mod battery_e2e_chains;
+
+#[path = "use_cases/confirmed_bindings_mcp.rs"]
+mod confirmed_bindings_mcp;

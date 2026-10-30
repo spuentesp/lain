@@ -492,13 +492,6 @@ impl ChangedFilesSource for StaticRepoChangedFiles {
     }
 }
 
-/// `BTreeSet`-based source injected into `diff_contracts`. Same shape
-/// as the `StaticChangedFiles` indirection; kept distinct so PR 13
-/// can replace the trait without breaking test call sites.
-pub fn changed_files_set(set: BTreeSet<String>) -> impl ChangedFilesSource {
-    StaticChangedFiles(set)
-}
-
 // ─── diff_contracts (§9.2) ────────────────────────────────────────────
 
 /// Diff provider-side endpoints between `base` and `head` (§9.2).
@@ -520,6 +513,20 @@ pub fn diff_contracts(
     head: &ContractSurface,
     changed_files: &dyn ChangedFilesSource,
 ) -> Vec<Change> {
+    diff_contracts_until(base, head, changed_files, None).expect("unbounded diff completes")
+}
+
+/// Abort incomplete surface comparison at a cooperative deadline. A partial
+/// pairing cannot be classified safely, so it is discarded on timeout.
+pub(crate) fn diff_contracts_until(
+    base: &ContractSurface,
+    head: &ContractSurface,
+    changed_files: &dyn ChangedFilesSource,
+    deadline: Option<std::time::Instant>,
+) -> Option<Vec<Change>> {
+    if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+        return None;
+    }
     let mut changes: Vec<Change> = Vec::new();
     let mut head_remaining: BTreeMap<EndpointId, EndpointDef> = head.endpoints.clone();
     let mut base_remaining: BTreeMap<EndpointId, EndpointDef> = base.endpoints.clone();
@@ -531,6 +538,9 @@ pub fn diff_contracts(
     let mut pairings: Vec<(EndpointId, EndpointId)> = Vec::new();
     let base_ids: Vec<EndpointId> = base.endpoints.keys().cloned().collect();
     for base_id in &base_ids {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return None;
+        }
         if !base_remaining.contains_key(base_id) {
             continue;
         }
@@ -545,6 +555,9 @@ pub fn diff_contracts(
         }
         let mut paired: Option<EndpointId> = None;
         for head_id in head.endpoints.keys() {
+            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                return None;
+            }
             if head_id.0 != base_id.0 {
                 continue;
             }
@@ -566,6 +579,9 @@ pub fn diff_contracts(
 
     // Stage 2 — unpaired removals and additions.
     for base_id in base_remaining.keys() {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return None;
+        }
         changes.push(Change {
             service: base_id.0.clone(),
             kind: ChangeKind::EndpointRemoved {
@@ -574,6 +590,9 @@ pub fn diff_contracts(
         });
     }
     for head_id in head_remaining.keys() {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return None;
+        }
         changes.push(Change {
             service: head_id.0.clone(),
             kind: ChangeKind::EndpointAdded {
@@ -595,7 +614,13 @@ pub fn diff_contracts(
     let mut handler_file_anchors: BTreeMap<(String, String), BTreeMap<EndpointId, BTreeSet<u32>>> =
         BTreeMap::new();
     for (eid, def) in base.endpoints.iter().chain(head.endpoints.iter()) {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return None;
+        }
         for p in &def.providers {
+            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                return None;
+            }
             if let Some(h) = p.handler.as_ref() {
                 if p.node_id.path().as_deref() == Some(h.path.as_str()) {
                     if let Some(line) = p.node_id.line_start().filter(|l| *l != 0) {
@@ -613,6 +638,9 @@ pub fn diff_contracts(
 
     // Stage 3 — field-level diffs for paired endpoints.
     for (base_id, head_id) in &pairings {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return None;
+        }
         let base_def = &base.endpoints[base_id];
         let head_def = &head.endpoints[head_id];
         // Anything pushed for THIS endpoint below (path/method rename,
@@ -650,6 +678,9 @@ pub fn diff_contracts(
         }
         // Field-level diff (per direction).
         for direction in [Direction::Request, Direction::Response, Direction::Payload] {
+            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                return None;
+            }
             diff_fields(
                 &mut changes,
                 head_id,
@@ -708,6 +739,9 @@ pub fn diff_contracts(
                 note("", &changed_files.changed_files(base_sha, head_sha));
             } else {
                 for repo in &provider_repos {
+                    if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                        return None;
+                    }
                     match changed_files.changed_files_for_repo(repo, base_sha, head_sha) {
                         // An unavailable diff is a coverage gap, not evidence
                         // that a handler changed. The tool layer records the
@@ -801,7 +835,7 @@ pub fn diff_contracts(
     changes.sort_by(|a, b| {
         change_sort_key(&a.service, &a.kind).cmp(&change_sort_key(&b.service, &b.kind))
     });
-    changes
+    Some(changes)
 }
 
 fn endpoint_provider_repos(base: &EndpointDef, head: &EndpointDef) -> BTreeSet<String> {
@@ -1195,73 +1229,47 @@ pub(crate) fn diff_fields(
     }
 }
 
-fn removed_paths(
-    base: &BTreeMap<JsonPath, FieldMeta>,
-    head: &BTreeMap<JsonPath, FieldMeta>,
+/// Paths present in `from` and absent from `to`, except those below an
+/// ancestor that is also in `from` and absent from `to`: the topmost removed
+/// (or added) ancestor reports the whole subtree.
+fn only_in(
+    from: &BTreeMap<JsonPath, FieldMeta>,
+    to: &BTreeMap<JsonPath, FieldMeta>,
 ) -> BTreeSet<JsonPath> {
     let mut out: BTreeSet<JsonPath> = BTreeSet::new();
-    for path in base.keys() {
-        if head.contains_key(path) {
-            continue;
-        }
-        // Nested-field rule: if any ancestor of `path` was also
-        // removed, this path is reported by the topmost ancestor and
-        // is skipped here.
-        if has_removed_ancestor(path, base, head) {
+    for path in from.keys() {
+        if to.contains_key(path) || has_ancestor_only_in(path, from, to) {
             continue;
         }
         out.insert(path.clone());
     }
     out
+}
+
+fn removed_paths(
+    base: &BTreeMap<JsonPath, FieldMeta>,
+    head: &BTreeMap<JsonPath, FieldMeta>,
+) -> BTreeSet<JsonPath> {
+    only_in(base, head)
 }
 
 fn added_paths(
     base: &BTreeMap<JsonPath, FieldMeta>,
     head: &BTreeMap<JsonPath, FieldMeta>,
 ) -> BTreeSet<JsonPath> {
-    let mut out: BTreeSet<JsonPath> = BTreeSet::new();
-    for path in head.keys() {
-        if base.contains_key(path) {
-            continue;
-        }
-        if has_added_ancestor(path, base, head) {
-            continue;
-        }
-        out.insert(path.clone());
-    }
-    out
+    only_in(head, base)
 }
 
-fn has_removed_ancestor(
+/// Whether a strict ancestor of `path` is in `from` and absent from `to`.
+fn has_ancestor_only_in(
     path: &JsonPath,
-    base: &BTreeMap<JsonPath, FieldMeta>,
-    head: &BTreeMap<JsonPath, FieldMeta>,
+    from: &BTreeMap<JsonPath, FieldMeta>,
+    to: &BTreeMap<JsonPath, FieldMeta>,
 ) -> bool {
     let mut prefix = JsonPath(Vec::new());
-    for (i, _) in path.0.iter().enumerate() {
-        if i == 0 {
-            continue;
-        }
+    for i in 1..path.0.len() {
         prefix.0 = path.0[..i].to_vec();
-        if base.contains_key(&prefix) && !head.contains_key(&prefix) {
-            return true;
-        }
-    }
-    false
-}
-
-fn has_added_ancestor(
-    path: &JsonPath,
-    base: &BTreeMap<JsonPath, FieldMeta>,
-    head: &BTreeMap<JsonPath, FieldMeta>,
-) -> bool {
-    let mut prefix = JsonPath(Vec::new());
-    for (i, _) in path.0.iter().enumerate() {
-        if i == 0 {
-            continue;
-        }
-        prefix.0 = path.0[..i].to_vec();
-        if head.contains_key(&prefix) && !base.contains_key(&prefix) {
+        if from.contains_key(&prefix) && !to.contains_key(&prefix) {
             return true;
         }
     }
@@ -1292,8 +1300,22 @@ fn parent_of(p: &JsonPath) -> JsonPath {
 ///   did not.
 /// - `ConsumerRebound`: same key bound to a different endpoint id.
 pub fn diff_consumers(base: &ContractSurface, head: &ContractSurface) -> Vec<Change> {
+    diff_consumers_until(base, head, None).expect("unbounded diff completes")
+}
+
+pub(crate) fn diff_consumers_until(
+    base: &ContractSurface,
+    head: &ContractSurface,
+    deadline: Option<std::time::Instant>,
+) -> Option<Vec<Change>> {
+    if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+        return None;
+    }
     let mut out: Vec<Change> = Vec::new();
     for (key, head_def) in &head.consumers {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return None;
+        }
         let base_def = base.consumers.get(key);
         match &head_def.resolution {
             SurfaceResolution::Unresolved { reason, .. } => {
@@ -1346,11 +1368,17 @@ pub fn diff_consumers(base: &ContractSurface, head: &ContractSurface) -> Vec<Cha
                 let base_reads: BTreeSet<crate::federation::contracts::model::JsonPath> =
                     base_def.map(|b| b.reads.clone()).unwrap_or_default();
                 for endpoint_id in endpoints {
+                    if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                        return None;
+                    }
                     if let Some(endpoint) = head.endpoints.get(endpoint_id) {
                         if !endpoint.has_schema {
                             continue;
                         }
                         for read in &head_def.reads {
+                            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                                return None;
+                            }
                             if base_reads.contains(read) {
                                 continue;
                             }
@@ -1382,7 +1410,24 @@ pub fn diff_consumers(base: &ContractSurface, head: &ContractSurface) -> Vec<Cha
     out.sort_by(|a, b| {
         change_sort_key(&a.service, &a.kind).cmp(&change_sort_key(&b.service, &b.kind))
     });
-    out
+    Some(out)
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+
+    #[test]
+    fn expired_deadline_stops_consumer_comparison() {
+        let surface = ContractSurface::default();
+        assert!(
+            diff_consumers_until(&surface, &surface, Some(std::time::Instant::now())).is_none()
+        );
+        assert_eq!(
+            diff_consumers_until(&surface, &surface, None),
+            Some(Vec::new())
+        );
+    }
 }
 
 fn consumer_service(key: &ConsumerKey) -> ServiceName {

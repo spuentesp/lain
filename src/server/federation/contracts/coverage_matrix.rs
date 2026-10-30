@@ -106,7 +106,7 @@ pub fn coverage_matrix() -> Vec<ProtocolCoverage> {
         },
         ProtocolCoverage {
             kind: "table",
-            sensor: "sql_sensor",
+            sensor: "sql_sensor, django_orm_sensor",
             resolver: "resolve_table_consumer",
             binding_supported: true,
             // `ReadsTable` / `WritesTable` are the Table legs and are

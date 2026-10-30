@@ -59,8 +59,10 @@
 pub mod changed_files;
 pub mod clients;
 pub mod config;
+pub mod context;
 pub mod coverage;
 pub mod coverage_matrix;
+pub mod deployment;
 pub mod diff;
 pub mod digest;
 pub mod field_join;
@@ -73,7 +75,10 @@ pub mod model;
 pub mod normalize;
 pub mod protocol_dispatch;
 pub mod route_match;
+pub mod rust_rpc;
+pub mod service_refs;
 pub mod snapshots;
+pub mod suggest;
 pub mod url_resolution;
 
 /// Per-module revision counter for the contract analyzer (§8.3).
@@ -98,7 +103,7 @@ pub mod url_resolution;
 /// combines the build version and the analyzer revision. Two
 /// different builds of the same analyzer revision share a cache
 /// entry; one analyzer revision's cache is invisible to the next.
-pub const CONTRACT_ANALYZER_REV: u32 = 6;
+pub const CONTRACT_ANALYZER_REV: u32 = 8;
 
 /// Build the analyzer-version string used as the cache-entry name
 /// suffix and embedded in the snapshot record (`§8.3` + `§8.4`).

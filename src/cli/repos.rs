@@ -81,6 +81,7 @@ fn add(config_path: &Path, name: &str, url: &str, ref_: &str) -> Result<()> {
             url: url.to_string(),
             r#ref: ref_.to_string(),
         },
+        packages: Vec::new(),
     });
     let yaml = serde_yaml::to_string(&file).context("serialize yaml")?;
     crate::cli::io::write_file_atomic(config_path, yaml.as_bytes())

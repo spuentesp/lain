@@ -390,6 +390,7 @@ traversing one always returns nothing.
 | `CoChangedWith` | Historical co-change (temporal coupling, not a static dependency) |
 | `Pattern` | Semantic boundary indicator (path prefix, topic name) |
 | `CallsHttp` | HTTP route → handler |
+| `CallsGraphql` | GraphQL root-field provider (SDL) → resolver function |
 | `Produces` / `Consumes` | Producer/consumer ↔ message topic |
 | `DeployedTo` | IaC resource → cloud resource — **not emitted** (`indexed: false`) |
 | `CrossRepoSameSymbol` | Federation-only: same symbol in two repos |

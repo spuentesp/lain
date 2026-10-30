@@ -14,6 +14,135 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{oneshot, Mutex as AsyncMutex};
 use tracing::{debug, info, warn};
 
+/// Environment escape hatch to disable all LSP servers operator-wide.
+///
+/// Unset, empty and `0` leave LSP on — the same rule the other
+/// `LAIN_DISABLE_*` knobs follow (see
+/// [`crate::server::ingest::background::env_disables`]).
+pub const DISABLE_LSP_ENV: &str = "LAIN_DISABLE_LSP";
+
+/// Environment escape hatch: `LAIN_LSP_LEAN=1` starts rust-analyzer in
+/// the memory-saving profile. See [`LspProfile::Lean`] for what that
+/// costs in symbol fidelity.
+pub const LEAN_LSP_ENV: &str = "LAIN_LSP_LEAN";
+
+/// Which rust-analyzer configuration the multiplexer starts servers with.
+///
+/// The default is [`LspProfile::Fidelity`]: rust-analyzer expands proc
+/// macros, runs build scripts and resolves the workspace the way the
+/// user builds it, so every symbol Lain extracts is the symbol the
+/// user sees. [`LspProfile::Lean`] trades that fidelity for memory and
+/// is opt-in through [`LEAN_LSP_ENV`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LspProfile {
+    Fidelity,
+    Lean,
+}
+
+impl LspProfile {
+    /// Read the profile from the environment.
+    pub fn from_env() -> Self {
+        Self::from_raw(std::env::var(LEAN_LSP_ENV).ok().as_deref())
+    }
+
+    /// Parse the profile from the raw environment value.
+    ///
+    /// Case-insensitive, matching the `LAIN_LSP_PREWARM` parsing in
+    /// [`crate::cli::doctor`]: `1`, `true`, `yes` and `on` select the
+    /// lean profile; everything else — unset, empty, `0`, `false` —
+    /// keeps the default fidelity profile.
+    fn from_raw(raw: Option<&str>) -> Self {
+        match raw.map(|v| v.trim().to_ascii_lowercase()).as_deref() {
+            Some("1") | Some("true") | Some("yes") | Some("on") => Self::Lean,
+            _ => Self::Fidelity,
+        }
+    }
+}
+
+/// `initializationOptions` for a language server, if it takes any.
+///
+/// Only rust-analyzer is configured today. The options fall into two
+/// groups:
+///
+/// *Fidelity-neutral* — set in every profile. rust-analyzer's own
+/// diagnostics and the `cargo check` it runs on save cost a rustc
+/// process per workspace, and the multiplexer only ever reads
+/// `textDocument/documentSymbol` and `textDocument/references` — it
+/// never consumes `textDocument/publishDiagnostics`. Turning them off
+/// saves those processes without changing a single symbol.
+///
+/// *Fidelity-affecting* — set only in [`LspProfile::Lean`]. Each of
+/// these makes rust-analyzer resolve *less* than the user's build
+/// does: `procMacro.enable` off hides every derive-generated impl,
+/// `cargo.buildScripts.enable` off leaves `env!("OUT_DIR")` and
+/// `include!` unresolved, `cargo.noDefaultFeatures` drops the
+/// workspace member's own `default` feature (which is not the feature
+/// set the user compiles), and `files.exclude` skips `target` and
+/// `.git` while indexing.
+fn initialization_options_for(binary: &str, profile: LspProfile) -> Option<serde_json::Value> {
+    if binary != "rust-analyzer" {
+        return None;
+    }
+    let mut opts = serde_json::Map::new();
+    opts.insert("checkOnSave".to_string(), serde_json::Value::Bool(false));
+    opts.insert(
+        "diagnostics".to_string(),
+        serde_json::json!({ "enable": false }),
+    );
+    if profile == LspProfile::Lean {
+        opts.insert(
+            "procMacro".to_string(),
+            serde_json::json!({ "enable": false }),
+        );
+        opts.insert(
+            "cargo".to_string(),
+            serde_json::json!({
+                "buildScripts": { "enable": false },
+                "noDefaultFeatures": true,
+            }),
+        );
+        opts.insert(
+            "files".to_string(),
+            serde_json::json!({ "exclude": ["target", ".git"] }),
+        );
+    }
+    Some(serde_json::Value::Object(opts))
+}
+
+/// The language servers the operator (or a test) has switched off.
+///
+/// `LAIN_DISABLE_LSP` is the operator-facing switch and follows the
+/// `LAIN_DISABLE_*` rule: unset, empty and `0` leave LSP on, anything
+/// else turns it off. `LAIN_TEST_NO_LSP` is the older test-only switch
+/// and keeps its original presence-based rule — any non-empty value,
+/// `0` included, turns LSP off — so existing callers are unaffected.
+///
+/// Returning the set instead of reading the environment here is what
+/// keeps the tests off process-global state: the harness runs tests in
+/// parallel, and a test that set an environment variable would leak
+/// into its siblings.
+fn disabled_lsp_binaries(
+    raw_disable: Option<&str>,
+    raw_test_no_lsp: Option<&str>,
+    registry: &HashMap<String, &'static LspConfig>,
+) -> HashSet<String> {
+    let disabled = crate::server::ingest::background::env_disables(raw_disable)
+        || raw_test_no_lsp.is_some_and(|v| !v.is_empty());
+    if !disabled {
+        return HashSet::new();
+    }
+    registry.values().map(|c| c.binary.to_string()).collect()
+}
+
+/// The extension → language server registry.
+fn language_registry() -> HashMap<String, &'static LspConfig> {
+    let mut registry = HashMap::new();
+    for (ext, config) in LANGUAGE_MAP {
+        registry.insert(ext.to_string(), config);
+    }
+    registry
+}
+
 /// Sentinel server id used when the multiplexer is wired to an external
 /// JSON-RPC endpoint (via [`LspMultiplexer::with_server_url`]). The
 /// `ensure_server` fast-path returns this id and the request methods
@@ -388,6 +517,43 @@ pub struct HierarchicalSymbol {
     pub children: Vec<HierarchicalSymbol>,
 }
 
+/// What the identity path must send to make the language server's view of a
+/// document current.
+///
+/// The distinction is not cosmetic: `didChange` is only meaningful for a
+/// document the server was already told about. Sending it for a document the
+/// server never opened is silently dropped by the server, so the identity
+/// answer never arrives. The server's own document state is *not* a reliable
+/// oracle for this — the local bridge keeps its document map across a server
+/// restart, so it still holds a URI whose new process never received the
+/// matching `didOpen`. The multiplexer's own record is the oracle, and it is
+/// cleared whenever the server dies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IdentitySync {
+    /// The server's view is already current — send nothing.
+    Current,
+    /// The server has never been told about this document: send `didOpen`.
+    Open { version: i32 },
+    /// The server already has the document open: send `didChange`.
+    Change { version: i32 },
+}
+
+/// Decide how to bring the server's view of a document up to date.
+///
+/// `prior` is the multiplexer's record of the last content it announced for
+/// this URI: `(content hash, version)`. `None` means the server has not been
+/// told about the document — either it is the first sight of the URI, or the
+/// server died and the record was cleared.
+fn identity_sync(prior: Option<&(String, i32)>, hash: &str) -> IdentitySync {
+    match prior {
+        None => IdentitySync::Open { version: 1 },
+        Some((old, _version)) if old == hash => IdentitySync::Current,
+        Some((_, version)) => IdentitySync::Change {
+            version: version.saturating_add(1),
+        },
+    }
+}
+
 pub struct LspMultiplexer {
     bridge: LspBridge,
     /// How long to keep asking the language server for document symbols
@@ -403,6 +569,9 @@ pub struct LspMultiplexer {
     poll_interval: Duration,
     /// ext -> language server configuration
     registry: HashMap<String, &'static LspConfig>,
+    /// Which configuration to start language servers with. Decided once,
+    /// at construction, from `LAIN_LSP_LEAN`.
+    profile: LspProfile,
     /// binary name -> started
     started: HashSet<String>,
     /// binary name -> missing from system
@@ -432,6 +601,7 @@ pub struct LspMultiplexer {
     /// which languages got warm before scanning started.
     prewarm_state: HashMap<String, PrewarmOutcome>,
     workspace: PathBuf,
+    identity_documents: HashMap<String, (String, i32)>,
     /// When `Some`, the multiplexer routes LSP requests through a JSON-RPC
     /// client connected to a real server at this address instead of
     /// spawning a child process via `lsp_bridge`. Set by
@@ -574,39 +744,54 @@ impl LspMultiplexer {
         workspace: &Path,
         runtime: &crate::tuning::RuntimeConfig,
     ) -> Result<Self, LainError> {
-        let mut registry = HashMap::new();
-        for (ext, config) in LANGUAGE_MAP {
-            registry.insert(ext.to_string(), config);
-        }
-        // `LAIN_TEST_NO_LSP=1` is a test-only escape hatch that pre-populates
-        // `unavailable` with every registered binary. `ensure_server` short
-        // -circuits to `LainError::Lsp(... is missing)` instead of trying to
-        // spawn rust-analyzer / gopls / etc. Smoke tests that drive the
-        // scanner in-process (or via `Command::new(env!("CARGO_BIN_EXE_lain"))`)
-        // set this so the test outcome doesn't depend on whether the host
-        // happens to have rust-analyzer on PATH. Production never sets it.
-        let mut unavailable = HashSet::new();
-        if std::env::var("LAIN_TEST_NO_LSP")
-            .ok()
-            .filter(|v| !v.is_empty())
-            .is_some()
-        {
-            for config in registry.values() {
-                unavailable.insert(config.binary.to_string());
-            }
-        }
+        let registry = language_registry();
+        // `LAIN_DISABLE_LSP=1` (or `LAIN_TEST_NO_LSP=1`) is an escape hatch that
+        // pre-populates `unavailable` with every registered binary.
+        // `ensure_server` short-circuits to `LainError::Lsp(... is missing)`
+        // instead of trying to spawn rust-analyzer / gopls / etc.
+        let unavailable = disabled_lsp_binaries(
+            std::env::var(DISABLE_LSP_ENV).ok().as_deref(),
+            std::env::var("LAIN_TEST_NO_LSP").ok().as_deref(),
+            &registry,
+        );
+        Self::with_parts(
+            workspace,
+            runtime,
+            registry,
+            unavailable,
+            LspProfile::from_env(),
+        )
+    }
+
+    /// Build a multiplexer from explicit parts.
+    ///
+    /// [`LspMultiplexer::new`] is the environment-reading front door;
+    /// this one takes the disabled set and the profile by value so
+    /// tests can drive the multiplexer without mutating
+    /// process-global environment state — the test harness runs tests
+    /// in parallel, and a test that set an environment variable would
+    /// leak into its siblings.
+    fn with_parts(
+        workspace: &Path,
+        runtime: &crate::tuning::RuntimeConfig,
+        registry: HashMap<String, &'static LspConfig>,
+        unavailable: HashSet<String>,
+        profile: LspProfile,
+    ) -> Result<Self, LainError> {
         Ok(Self {
             bridge: LspBridge::new(),
             poll_timeout: Duration::from_secs(runtime.lsp_symbol_poll_timeout_secs),
             poll_interval: Duration::from_millis(runtime.lsp_symbol_poll_interval_ms),
             registry,
             started: HashSet::new(),
-            unavailable: HashSet::new(),
+            unavailable,
             consecutive_failures: HashMap::new(),
             restart_budget: HashMap::new(),
             prewarm_state: HashMap::new(),
             workspace: workspace.to_path_buf(),
+            identity_documents: HashMap::new(),
             remote: None,
+            profile,
             #[cfg(test)]
             test_overrides: None,
         })
@@ -625,10 +810,7 @@ impl LspMultiplexer {
         runtime: &crate::tuning::RuntimeConfig,
     ) -> Result<Self, LainError> {
         let client = JsonRpcClient::connect(host, port).await?;
-        let mut registry = HashMap::new();
-        for (ext, config) in LANGUAGE_MAP {
-            registry.insert(ext.to_string(), config);
-        }
+        let registry = language_registry();
         Ok(Self {
             bridge: LspBridge::new(),
             poll_timeout: Duration::from_secs(runtime.lsp_symbol_poll_timeout_secs),
@@ -640,7 +822,12 @@ impl LspMultiplexer {
             restart_budget: HashMap::new(),
             prewarm_state: HashMap::new(),
             workspace: workspace.to_path_buf(),
+            identity_documents: HashMap::new(),
             remote: Some(Arc::new(client)),
+            // A bridged server was initialized by whoever started it —
+            // its `initializationOptions` are already fixed, so the
+            // profile only ever applies to servers we spawn.
+            profile: LspProfile::Fidelity,
             #[cfg(test)]
             test_overrides: None,
         })
@@ -654,6 +841,10 @@ impl LspMultiplexer {
 
     pub async fn ensure_server(&mut self, path: &Path) -> Result<String, LainError> {
         if self.remote.is_some() {
+            // A bridged server is already running and already
+            // initialized, so neither the disable hatch nor the lean
+            // profile reaches it: `LAIN_DISABLE_LSP=1` silences the
+            // servers *we* spawn, not one someone else started.
             return Ok(REMOTE_SERVER_ID.to_string());
         }
         let config = self
@@ -678,9 +869,13 @@ impl LspMultiplexer {
                 )));
             }
 
-            let lsp_config = LspServerConfig::new()
+            let mut lsp_config = LspServerConfig::new()
                 .command(&binary)
                 .root_path(self.workspace.clone());
+
+            if let Some(init_opts) = initialization_options_for(&binary, self.profile) {
+                lsp_config = lsp_config.initialization_options(init_opts);
+            }
 
             let startup = async {
                 self.bridge.register_server(&binary, lsp_config).await?;
@@ -1010,6 +1205,10 @@ impl LspMultiplexer {
                 )
                 .await?;
 
+            self.identity_documents.insert(
+                uri.clone(),
+                (blake3::hash(content.as_bytes()).to_hex().to_string(), 1),
+            );
             let response = remote
                 .request(
                     "textDocument/documentSymbol",
@@ -1030,6 +1229,11 @@ impl LspMultiplexer {
             self.record_lsp_failure(&server_id, kind);
             return Err(LainError::Lsp(e.to_string()));
         }
+
+        self.identity_documents.insert(
+            uri.clone(),
+            (blake3::hash(content.as_bytes()).to_hex().to_string(), 1),
+        );
 
         // Wait for LSP to analyze (intelligent polling). Track the
         // outcome so the circuit-breaker bookkeeping at the end of
@@ -1226,6 +1430,135 @@ impl LspMultiplexer {
         Ok(results)
     }
 
+    async fn sync_identity_document(
+        &mut self,
+        server_id: &str,
+        uri: &str,
+        content: &str,
+        path: &Path,
+    ) -> Result<(), LainError> {
+        let hash = blake3::hash(content.as_bytes()).to_hex().to_string();
+        let prior = self
+            .identity_documents
+            .get(uri)
+            .map(|(h, v)| (h.clone(), *v));
+        let version = match identity_sync(prior.as_ref(), &hash) {
+            IdentitySync::Current => return Ok(()),
+            IdentitySync::Open { version } => {
+                if let Some(remote) = &self.remote {
+                    remote
+                        .notify(
+                            "textDocument/didOpen",
+                            serde_json::json!({
+                                "textDocument": {
+                                    "uri": uri,
+                                    "languageId": language_id_for(path),
+                                    "version": version,
+                                    "text": content
+                                }
+                            }),
+                        )
+                        .await?;
+                } else {
+                    self.bridge
+                        .open_document(server_id, uri, content)
+                        .await
+                        .map_err(|e| LainError::Lsp(e.to_string()))?;
+                }
+                version
+            }
+            IdentitySync::Change { version } => {
+                if let Some(remote) = &self.remote {
+                    remote
+                        .notify(
+                            "textDocument/didChange",
+                            serde_json::json!({
+                                "textDocument": {"uri": uri, "version": version},
+                                "contentChanges": [{"text": content}]
+                            }),
+                        )
+                        .await?;
+                } else {
+                    self.bridge
+                        .update_document(server_id, uri, content)
+                        .await
+                        .map_err(|e| LainError::Lsp(e.to_string()))?;
+                }
+                version
+            }
+        };
+        self.identity_documents
+            .insert(uri.to_string(), (hash, version));
+        Ok(())
+    }
+
+    /// Resolve symbol identity using the existing local or remote language
+    /// server. Coordinates are zero-based LSP UTF-16 positions. Requests,
+    /// including document synchronization, are bounded by the normal budget.
+    pub async fn get_definitions(
+        &mut self,
+        path: &Path,
+        line: u32,
+        col: u32,
+        type_definition: bool,
+    ) -> Result<Vec<ReferenceLocation>, LainError> {
+        use lsp_types::request::{GotoDefinition, GotoTypeDefinition};
+        let server_id = self.ensure_server(path).await?;
+        let uri = file_uri(path);
+        let content = tokio::fs::read_to_string(path).await?;
+        let params = serde_json::json!({
+            "textDocument": {"uri": uri},
+            "position": {"line": line, "character": col}
+        });
+        let method = if type_definition {
+            "textDocument/typeDefinition"
+        } else {
+            "textDocument/definition"
+        };
+        let response = tokio::time::timeout(LSP_REQUEST_TIMEOUT, async {
+            self.sync_identity_document(&server_id, &uri, &content, path)
+                .await?;
+            if let Some(remote) = self.remote.as_ref() {
+                return remote.request(method, params).await;
+            }
+            let value = if type_definition {
+                let params =
+                    serde_json::from_value(params).map_err(|e| LainError::Lsp(e.to_string()))?;
+                let result = self
+                    .bridge
+                    .request::<GotoTypeDefinition>(&server_id, params)
+                    .await
+                    .map_err(|e| LainError::Lsp(e.to_string()))?;
+                serde_json::to_value(result)
+            } else {
+                let params =
+                    serde_json::from_value(params).map_err(|e| LainError::Lsp(e.to_string()))?;
+                let result = self
+                    .bridge
+                    .request::<GotoDefinition>(&server_id, params)
+                    .await
+                    .map_err(|e| LainError::Lsp(e.to_string()))?;
+                serde_json::to_value(result)
+            };
+            value.map_err(|e| LainError::Lsp(e.to_string()))
+        })
+        .await
+        .map_err(|_| LainError::Lsp(format!("{method} timed out")))??;
+        Ok(parse_locations(response)
+            .into_iter()
+            .filter_map(|loc| {
+                // parse_locations retains percent escapes; decode local file paths.
+                let path = decode_file_path(&loc.path)?;
+                Some(ReferenceLocation {
+                    path,
+                    line: loc.line,
+                    col: loc.col,
+                    context: String::new(),
+                })
+            })
+            .collect())
+    }
+
     pub async fn install_server(&mut self, ext: &str) -> Result<String, LainError> {
         // Accept either a file extension ("rs", "py") or a language name
         // ("rust", "python"). When given a name, resolve to the canonical ext.
@@ -1420,11 +1753,13 @@ impl LspMultiplexer {
                 // log from firing twice for the same binary.
                 if self.unavailable.contains(binary) {
                     self.started.remove(binary);
+                    self.identity_documents.clear();
                     return;
                 }
                 // Drop the dead child; the next ensure_server call
                 // will see `!started.contains(binary)` and respawn.
                 self.started.remove(binary);
+                self.identity_documents.clear();
                 self.record_restart_at(binary, now_ms);
             }
             FailureKind::RequestError | FailureKind::Timeout => {
@@ -1781,6 +2116,14 @@ pub struct LspPool {
 }
 
 impl LspPool {
+    #[cfg(test)]
+    pub(crate) fn from_test_multiplexer(mux: LspMultiplexer) -> Self {
+        Self {
+            multiplexers: vec![Arc::new(AsyncMutex::new(mux))],
+            next: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
     pub fn new(
         workspace: &Path,
         size: usize,
@@ -2957,6 +3300,51 @@ fn parse_document_symbols(value: serde_json::Value) -> Vec<DocumentSymbol> {
         .unwrap_or_default()
 }
 
+pub(crate) fn file_uri(path: &Path) -> String {
+    let path = path.to_string_lossy().replace('\\', "/");
+    let mut uri = if path.starts_with('/') {
+        "file://".to_string()
+    } else {
+        "file:///".to_string()
+    };
+    for b in path.bytes() {
+        if b.is_ascii_alphanumeric() || b"/-._~:".contains(&b) {
+            uri.push(b as char);
+        } else {
+            uri.push_str(&format!("%{b:02X}"));
+        }
+    }
+    uri
+}
+
+fn decode_file_path(path: &str) -> Option<PathBuf> {
+    // Reject virtual/remote documents: identity inspection reads local sources.
+    if path.contains("://") {
+        return None;
+    }
+    let mut out = Vec::new();
+    let bytes = path.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = std::str::from_utf8(bytes.get(i + 1..i + 3)?).ok()?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    let path = String::from_utf8(out).ok()?;
+    #[cfg(windows)]
+    let path = path
+        .strip_prefix('/')
+        .filter(|p| p.as_bytes().get(1) == Some(&b':'))
+        .unwrap_or(&path)
+        .to_string();
+    Some(PathBuf::from(path))
+}
+
 struct ParsedLocation {
     path: String,
     line: u32,
@@ -3027,9 +3415,12 @@ pub mod test_support {
     pub struct ReceivedRequests {
         pub initialize: std::sync::Mutex<Vec<serde_json::Value>>,
         pub did_open: std::sync::Mutex<Vec<serde_json::Value>>,
+        pub did_change: std::sync::Mutex<Vec<serde_json::Value>>,
         pub did_close: std::sync::Mutex<Vec<serde_json::Value>>,
         pub document_symbol: std::sync::Mutex<Vec<serde_json::Value>>,
         pub references: std::sync::Mutex<Vec<serde_json::Value>>,
+        pub definitions: std::sync::Mutex<Vec<serde_json::Value>>,
+        pub type_definitions: std::sync::Mutex<Vec<serde_json::Value>>,
         pub shutdown: std::sync::Mutex<u32>,
         pub exit: std::sync::Mutex<u32>,
     }
@@ -3189,6 +3580,9 @@ pub mod test_support {
                 "textDocument/didOpen" => {
                     received.did_open.lock().unwrap().push(value.clone());
                 }
+                "textDocument/didChange" => {
+                    received.did_change.lock().unwrap().push(value.clone());
+                }
                 "textDocument/didClose" => {
                     received.did_close.lock().unwrap().push(value.clone());
                 }
@@ -3207,8 +3601,20 @@ pub mod test_support {
                     let result = canned.unwrap_or_else(|| serde_json::json!([]));
                     send_response(&write, id, result).await?;
                 }
-                "textDocument/references" => {
-                    received.references.lock().unwrap().push(value.clone());
+                "textDocument/references"
+                | "textDocument/definition"
+                | "textDocument/typeDefinition" => {
+                    match method.as_str() {
+                        "textDocument/definition" => {
+                            received.definitions.lock().unwrap().push(value.clone())
+                        }
+                        "textDocument/typeDefinition" => received
+                            .type_definitions
+                            .lock()
+                            .unwrap()
+                            .push(value.clone()),
+                        _ => received.references.lock().unwrap().push(value.clone()),
+                    }
                     let uri = params
                         .get("textDocument")
                         .and_then(|td| td.get("uri"))
@@ -3275,5 +3681,268 @@ pub mod test_support {
 }
 
 #[cfg(test)]
+mod disable_env_tests {
+    use super::*;
+
+    /// `LAIN_DISABLE_LSP=1` is the operator-facing switch: every
+    /// registered binary lands in the disabled set, so `ensure_server`
+    /// short-circuits without spawning anything.
+    #[test]
+    fn disable_env_one_disables_every_registered_binary() {
+        let disabled = disabled_lsp_binaries(Some("1"), None, &language_registry());
+        assert!(disabled.contains("rust-analyzer"));
+        assert!(disabled.contains("gopls"));
+        assert!(disabled.contains("pylsp"));
+    }
+
+    /// `LAIN_DISABLE_LSP=0` must not disable anything — the knob
+    /// follows the `LAIN_DISABLE_*` rule where `0` means "do not
+    /// disable".
+    #[test]
+    fn disable_env_zero_keeps_every_language_server_available() {
+        let disabled = disabled_lsp_binaries(Some("0"), None, &language_registry());
+        assert!(disabled.is_empty());
+    }
+
+    /// The legacy test-only switch keeps its presence-based rule: any
+    /// non-empty value, `0` included, turns LSP off.
+    #[test]
+    fn the_legacy_test_switch_keeps_its_presence_based_rule() {
+        let registry = language_registry();
+        assert!(!disabled_lsp_binaries(None, Some("1"), &registry).is_empty());
+        assert!(!disabled_lsp_binaries(None, Some("0"), &registry).is_empty());
+        assert!(disabled_lsp_binaries(None, Some(""), &registry).is_empty());
+        assert!(disabled_lsp_binaries(None, None, &registry).is_empty());
+    }
+
+    /// A disabled multiplexer must report every language server as
+    /// unavailable — that is the whole point of the hatch, and the
+    /// tree-sitter fallback is what answers instead.
+    #[test]
+    fn a_disabled_multiplexer_reports_no_language_server_as_available() {
+        let registry = language_registry();
+        let unavailable = disabled_lsp_binaries(Some("1"), None, &registry);
+        let mux = LspMultiplexer::with_parts(
+            Path::new("."),
+            &crate::tuning::RuntimeConfig::default(),
+            registry,
+            unavailable,
+            LspProfile::Fidelity,
+        )
+        .unwrap();
+        assert!(mux.unavailable.contains("rust-analyzer"));
+        assert!(
+            mux.get_supported_languages()
+                .iter()
+                .all(|(_, _, available)| !available),
+            "a disabled multiplexer must report every language server as unavailable"
+        );
+    }
+}
+
+#[cfg(test)]
+mod initialization_options_tests {
+    use super::*;
+
+    /// The default profile must not touch anything that changes which
+    /// symbols rust-analyzer resolves. The only two options it sets are
+    /// the ones Lain never reads: rust-analyzer's own diagnostics and
+    /// the `cargo check` it runs on save.
+    #[test]
+    fn the_fidelity_profile_only_disables_options_lain_never_reads() {
+        let opts = initialization_options_for("rust-analyzer", LspProfile::Fidelity)
+            .expect("rust-analyzer takes initialization options");
+        assert_eq!(opts["checkOnSave"], false);
+        assert_eq!(opts["diagnostics"]["enable"], false);
+        assert!(
+            opts.get("procMacro").is_none(),
+            "the fidelity profile must not disable proc-macro expansion"
+        );
+        assert!(
+            opts.get("cargo").is_none(),
+            "the fidelity profile must not change how cargo resolves the workspace"
+        );
+        assert!(opts.get("files").is_none());
+    }
+
+    /// The lean profile turns the fidelity-affecting options on. They
+    /// are opt-in because each one makes rust-analyzer resolve less
+    /// than the user's build does.
+    #[test]
+    fn the_lean_profile_disables_proc_macros_build_scripts_and_default_features() {
+        let opts = initialization_options_for("rust-analyzer", LspProfile::Lean)
+            .expect("rust-analyzer takes initialization options");
+        assert_eq!(opts["procMacro"]["enable"], false);
+        assert_eq!(opts["cargo"]["buildScripts"]["enable"], false);
+        assert_eq!(opts["cargo"]["noDefaultFeatures"], true);
+        let exclude = opts["files"]["exclude"].as_array().expect("array");
+        assert!(exclude.iter().any(|v| v == "target"));
+        assert!(exclude.iter().any(|v| v == ".git"));
+        // The fidelity-neutral options stay off in the lean profile too.
+        assert_eq!(opts["checkOnSave"], false);
+        assert_eq!(opts["diagnostics"]["enable"], false);
+    }
+
+    /// Only rust-analyzer is configured; the other servers keep their
+    /// own defaults.
+    #[test]
+    fn other_language_servers_take_no_initialization_options() {
+        assert!(initialization_options_for("gopls", LspProfile::Fidelity).is_none());
+        assert!(initialization_options_for("pylsp", LspProfile::Lean).is_none());
+    }
+
+    /// `LAIN_LSP_LEAN` is case-insensitive and only the documented
+    /// truthy values select the lean profile.
+    #[test]
+    fn the_lean_env_parses_case_insensitively() {
+        for v in ["1", "true", "TRUE", "yes", "On"] {
+            assert_eq!(LspProfile::from_raw(Some(v)), LspProfile::Lean, "{v:?}");
+        }
+        for v in ["0", "false", "", "off", "maybe"] {
+            assert_eq!(LspProfile::from_raw(Some(v)), LspProfile::Fidelity, "{v:?}");
+        }
+        assert_eq!(LspProfile::from_raw(None), LspProfile::Fidelity);
+    }
+}
+
+#[cfg(test)]
 #[path = "lsp_verification.rs"]
 mod verification;
+
+#[cfg(test)]
+mod definition_wire_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// The open-vs-change rule, pinned without a live server.
+    ///
+    /// `didChange` is dropped by a server that never received the matching
+    /// `didOpen`, so the identity answer silently disappears. The decision
+    /// must therefore be driven by the multiplexer's own record of what it
+    /// announced, not by whether the bridge happens to still hold the URI.
+    #[test]
+    fn identity_sync_opens_unknown_documents_and_changes_known_ones() {
+        // Never announced: the server must be told the document exists.
+        assert_eq!(
+            identity_sync(None, "hash-a"),
+            IdentitySync::Open { version: 1 }
+        );
+        // Announced with this exact content: nothing to send.
+        assert_eq!(
+            identity_sync(Some(&("hash-a".to_string(), 1)), "hash-a"),
+            IdentitySync::Current
+        );
+        // Announced with different content: a change, with the version
+        // advanced so the server accepts it.
+        assert_eq!(
+            identity_sync(Some(&("hash-a".to_string(), 1)), "hash-b"),
+            IdentitySync::Change { version: 2 }
+        );
+        assert_eq!(
+            identity_sync(Some(&("hash-a".to_string(), 7)), "hash-b"),
+            IdentitySync::Change { version: 8 }
+        );
+        // A cleared record (the server died) reads as "never announced":
+        // the next request must open, not change.
+        assert_eq!(
+            identity_sync(None, "hash-a"),
+            IdentitySync::Open { version: 1 }
+        );
+    }
+
+    #[tokio::test]
+    async fn definition_and_type_definition_use_the_existing_wire_transport() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("caller with spaces.rs");
+        tokio::fs::write(&path, "fn caller() {}\n").await.unwrap();
+        let server = test_support::FakeLspServer::bind().await.unwrap();
+        let target = dir.path().join("generated with spaces.rs");
+        server.set_references(&file_uri(&path), 0, 3, json!({
+            "uri": file_uri(&target),
+            "range": {"start": {"line": 7, "character": 11}, "end": {"line": 7, "character": 17}}
+        })).await;
+        let mut mux = LspMultiplexer::with_server_url(
+            dir.path(),
+            &server.host(),
+            server.port(),
+            &crate::tuning::RuntimeConfig::default(),
+        )
+        .await
+        .unwrap();
+        let handle = server.spawn();
+        for type_definition in [false, true] {
+            let locations = mux
+                .get_definitions(&path, 0, 3, type_definition)
+                .await
+                .unwrap();
+            assert_eq!(locations.len(), 1);
+            assert_eq!(locations[0].path, target);
+            assert_eq!((locations[0].line, locations[0].col), (7, 11));
+        }
+        assert_eq!(handle.received().definitions.lock().unwrap().len(), 1);
+        assert_eq!(handle.received().type_definitions.lock().unwrap().len(), 1);
+        assert!(mux
+            .get_definitions(&path, 0, 99, false)
+            .await
+            .unwrap()
+            .is_empty());
+        handle.shutdown().await;
+    }
+
+    /// The identity path re-opens a document only when its content changed,
+    /// and it must open (never "change") a document the server has not been
+    /// told about. Re-opening on every probe made each definition request
+    /// pay a full `didOpen`, and a `didChange` sent to a server that never
+    /// received the matching `didOpen` is silently ignored — the identity
+    /// answer then never arrives.
+    #[tokio::test]
+    async fn identity_document_sync_opens_once_and_changes_only_on_new_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("caller.rs");
+        tokio::fs::write(&path, "fn caller() {}\n").await.unwrap();
+        let server = test_support::FakeLspServer::bind().await.unwrap();
+        let target = dir.path().join("generated.rs");
+        server.set_references(&file_uri(&path), 0, 3, json!({
+            "uri": file_uri(&target),
+            "range": {"start": {"line": 7, "character": 11}, "end": {"line": 7, "character": 17}}
+        })).await;
+        let mut mux = LspMultiplexer::with_server_url(
+            dir.path(),
+            &server.host(),
+            server.port(),
+            &crate::tuning::RuntimeConfig::default(),
+        )
+        .await
+        .unwrap();
+        let handle = server.spawn();
+
+        // First sight of the URI: the server must learn the document exists.
+        mux.get_definitions(&path, 0, 3, false).await.unwrap();
+        assert_eq!(handle.received().did_open.lock().unwrap().len(), 1);
+        assert_eq!(handle.received().did_change.lock().unwrap().len(), 0);
+
+        // Same content: nothing to re-announce.
+        mux.get_definitions(&path, 0, 3, false).await.unwrap();
+        assert_eq!(handle.received().did_open.lock().unwrap().len(), 1);
+        assert_eq!(handle.received().did_change.lock().unwrap().len(), 0);
+
+        // Changed content: a change, not a second open.
+        tokio::fs::write(&path, "fn caller() { let x = 1; }\n")
+            .await
+            .unwrap();
+        mux.get_definitions(&path, 0, 3, false).await.unwrap();
+        assert_eq!(handle.received().did_open.lock().unwrap().len(), 1);
+        assert_eq!(handle.received().did_change.lock().unwrap().len(), 1);
+
+        // After the server dies and is restarted, the multiplexer's record
+        // of what it opened is gone. The next request must re-open the
+        // document — a `didChange` would reach a process that never
+        // received the matching `didOpen` and be ignored there.
+        mux.identity_documents.clear();
+        mux.get_definitions(&path, 0, 3, false).await.unwrap();
+        assert_eq!(handle.received().did_open.lock().unwrap().len(), 2);
+        assert_eq!(handle.received().did_change.lock().unwrap().len(), 1);
+
+        handle.shutdown().await;
+    }
+}

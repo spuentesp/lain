@@ -55,6 +55,11 @@ on:
   pull_request:
     branches: [main, dev]
   workflow_dispatch:
+    inputs:
+      cross_platform:
+        description: 'Run macOS and Windows tests on this ref'
+        type: boolean
+        default: false
 
 concurrency:
   group: ci-${{ github.head_ref || github.ref }}
@@ -166,7 +171,7 @@ jobs:
     # A hung test (this session hit a real one: a subprocess reader
     # with no timeout blocking forever) must fail the job, not sit on
     # the runner queue for the 360-minute GitHub default.
-    timeout-minutes: 30
+    timeout-minutes: 60
     permissions:
       contents: read
     strategy:
@@ -185,15 +190,20 @@ jobs:
           sudo apt-get install -y libssl-dev pkg-config cmake git
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: stable
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "CI Runner"
+          git config --global user.email "ci@example.com"
 
       # Swatinem/rust-cache keys on Cargo.lock + os + toolchain, so each
       # matrix cell gets its own target/ cache. The cross-run speedup
       # within one OS is what the original ubuntu-only job relied on.
       - name: Rust Cache
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           # A timed-out job must still save what it compiled — without
           # this, a cold run that dies at the cap leaves the cache empty
@@ -315,7 +325,7 @@ jobs:
     # completes and seeds the cache, after which runs take ~10 min and
     # this number can come back down.
     timeout-minutes: 180
-    if: (github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.base_ref == 'main')) && needs.changes.outputs.docs_only != 'true' && github.event.pull_request.draft != true
+    if: (github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.base_ref == 'main') || (github.event_name == 'workflow_dispatch' && inputs.cross_platform)) && needs.changes.outputs.docs_only != 'true' && github.event.pull_request.draft != true
     permissions:
       contents: read
     strategy:
@@ -326,12 +336,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: stable
 
       - name: Rust Cache
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           # A timed-out job must still save what it compiled — without
           # this, a cold run that dies at the cap leaves the cache empty
@@ -421,12 +431,12 @@ jobs:
           sudo apt-get install -y libssl-dev pkg-config cmake git
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: stable
 
       - name: Rust Cache
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           # A timed-out job must still save what it compiled — without
           # this, a cold run that dies at the cap leaves the cache empty
@@ -567,12 +577,12 @@ jobs:
     # block merge regardless of the test matrix's color.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: stable
           components: rustfmt, clippy
       - name: Rust Cache
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           # A timed-out job must still save what it compiled — without
           # this, a cold run that dies at the cap leaves the cache empty
@@ -624,11 +634,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libssl-dev pkg-config cmake git
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: stable
       - name: Rust Cache
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           # A timed-out job must still save what it compiled — without
           # this, a cold run that dies at the cap leaves the cache empty
@@ -696,7 +706,7 @@ jobs:
     # letting that drift land is a 200-line cleanup PR.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.12'
       - name: Sensor duplication
@@ -748,12 +758,12 @@ jobs:
           sudo apt-get install -y libssl-dev pkg-config cmake git
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: stable
 
       - name: Rust Cache
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           # A timed-out job must still save what it compiled — without
           # this, a cold run that dies at the cap leaves the cache empty
@@ -762,7 +772,7 @@ jobs:
           save-always: true
 
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2
+        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2
         with:
           tool: cargo-llvm-cov
 
@@ -840,7 +850,7 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.12'
       - name: Release metadata consistency

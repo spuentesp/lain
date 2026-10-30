@@ -3,6 +3,207 @@
 All notable changes to LAIN are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.14.0] - 2026-10-30
+
+- Allow exact consumer `site` selectors in confirmed mappings, so repeated RPC calls within one symbol can target different services. Existing selectors remain supported.
+- Use the existing LSP pool for bounded live Rust RPC method-definition evidence, including closure receivers; snapshots retain revision-pinned syntax inference and explicit coverage gaps. Advance the contract analyzer cache revision to 8; graph persistence is unchanged.
+- Reuse the document the language server already has open for identity requests: a file is opened once and re-announced only when its content changes, instead of being reopened on every probe. After a language server dies and is restarted, the document is opened again — a change notification alone is dropped by a server that never received the matching open.
+
+### Added
+
+- **Rust gRPC consumer identity in federation.** Generated-client call sites
+  are compared with protobuf provider facts across repositories. A unique
+  identity is emitted as an RPC consumer at the call site, with an unknown
+  destination, and `list_unresolved` exposes source/provider evidence and
+  compatible mappings for `check_binding`. Unknown or ambiguous identities
+  remain explicit coverage gaps. Snapshot resolution reads the pinned source
+  blobs without LSP. The analyzer cache revision advances; the serialized
+  federation graph schema does not change. See `docs/RUST_GRPC_CONTRACTS.md`.
+
+- **Python gRPC consumers are detected through stub handles.** `self._stub`
+  and `stub` receivers bind to the service their constructor names, and a
+  channel whose address is a constructor parameter resolves through the file's
+  env read: one env var is taken as is, and with several only an
+  address-shaped one (`GATEWAY`, `HOST`, `URL`, `ADDR`, `ENDPOINT`, `SERVER`)
+  is taken — two or more address-shaped names stay unresolved. The bind is
+  service-level: the variable names a gateway, not a verified dial address.
+  OpenShell's Python SDK is the first target. `FEDERATION_GRAPH_VERSION` is
+  unchanged.
+- **`repos[].packages`** lists the package names a repo publishes (npm, PyPI,
+  crates.io, Go modules). A consumer whose manifest names one links to that
+  repo even when the name does not contain the repo id.
+- **`provides:` declares endpoints the analyzer cannot see.** A service whose
+  routes are registered from a runtime configuration file (FastAPI's
+  `add_api_route(path=…)` with a path from a Pydantic model, a mesh spec) has
+  no route in the source for a static sensor to find. The operator states the
+  endpoint — `provides: [{service, key, source}]` — in the shared key grammar
+  (`http:POST /chat/stream`, `ws:/websocket`, `topic:kafka/orders.created`),
+  and the joiner treats it exactly like a detected provider: it binds
+  consumers, it counts for coverage, and `bindings` can attach to it.
+- **`host_aliases:` declares which service a host expression dials.** A
+  consumer whose URL the analyzer cannot follow — a transparent reverse proxy
+  builds its target from a chain of variables — is routed by the operator:
+  `host_aliases: [{host, file, service, source}]`. A known path binds like any
+  other target; a dynamic path resolves to `no_route_in_service` with the
+  service attached, not to a bind.
+- **`apply_contract_context` writes contract context at runtime.** The MCP
+  tool takes `provides` and `host_aliases` and applies them to the
+  federation's `repos.yaml` without a restart. A hand-written `bindings:`
+  entry still comes from `check_binding`, which emits the YAML for an
+  operator to paste. Dry-run by default: it returns the YAML it would write
+  and touches nothing. With `dry_run=false` it validates the whole result,
+  writes atomically with a `.bak`, re-joins the contract index, and reports
+  `applied: true` only when the declaration is served — a failed re-join
+  restores the file, and a restore that fails is reported as such rather
+  than claimed. A write that loses a race with another writer is refused.
+
+- **GraphQL provider -> resolver edge** (`CallsGraphql`, appended last in
+  `EdgeType` so stored discriminants are unchanged). The resolver-link sensor
+  now links each SDL root field to the function that serves it, and learns
+  graphene (`resolve_<field>` on a `graphene.ObjectType`; the class name picks
+  Query, Mutation or Subscription; graphene mutation classes are not covered).
+  `get_call_chain`, `trace_dependency` and impact traversal cross the contract
+  boundary, `get_cross_runtime_callers` lists the SDL field a resolver serves,
+  and a resolver is an `http_handler` entry point in `used_by`. Existing graphs
+  gain the edges at the next `lain reindex`; `FEDERATION_GRAPH_VERSION` is
+  unchanged.
+- **Generated GraphQL documents link to their users.** A function that
+  references `<Operation>Document` (or `<Operation>Doc`) gets a `Calls` edge to
+  that operation's `graphql-call:` node, so a trace continues from the call
+  site into the code that runs it.
+- **`trace_flow`**: one read-only tool that returns a path across the contract
+  boundary from an endpoint, symbol or table, `downstream` toward the data or
+  `upstream` toward consumers. `strategy` is `breadth` (default) or `depth`
+  (follow one chain to its end). Each hop says whether it is an engine fact or
+  a heuristic, and `gaps` says where and why the chain stops, including
+  `consumers_pending` while repos are still indexing.
+- **Django ORM table sensor** (`django_orm_sensor`). Maps Django model classes
+  to tables (`Meta.db_table`, else `<app_label>_<classname>`; abstract models
+  have none, proxies use their parent's) and emits `ReadsTable` /
+  `WritesTable` edges from the function that runs `Model.objects…` chains,
+  `get_object_or_404`, or saves a model instance. A chain with only custom
+  manager methods is a heuristic read (confidence 0.6). Anything it cannot
+  resolve (bare `Model.objects`, dynamic receivers, ambiguous model names,
+  non-literal `db_table`) goes on the coverage ledger as `OrmDynamicQuery`.
+  The app label is a path heuristic: a custom `AppConfig.label` is not read.
+  No schema change: `FEDERATION_GRAPH_VERSION` is unchanged.
+- Embedding models are declared in `models.toml` (built in; a user file at
+  `~/.config/lain/models.toml` can add models or change the default). The
+  default, granite-embedding-small-english-r2 (Apache-2.0, about 195 MB), is
+  installed with `lain models install`, which the installers run. Each file is
+  checked against its pinned SHA-256 before it is kept or loaded. The server
+  never downloads: without an installed model, semantic search is off and the
+  log says how to install one. `lain models list` and `lain models path` show
+  the state. Models install under the user data directory, or `LAIN_MODEL_DIR`.
+  Installers skip the model when `LAIN_SKIP_MODEL_INSTALL=1` is set.
+- `list_service_refs` takes `suggestions: true` to also return suggested routes
+  for production references that match no route of their service. Each carries
+  `suggested: true` and a score; they are proposals, never links. `min_score`
+  (default 0.6) sets the cut-off. `suggestions_status` says why there are none
+  when a server context, a contract index or an embedding model is missing.
+- **Two operator switches for language servers.** `LAIN_DISABLE_LSP=1` turns
+  every language server off, so the scanner falls back to tree-sitter and no
+  `rust-analyzer` / `gopls` process is ever spawned; unset, empty and `0` leave
+  LSP on, matching the other `LAIN_DISABLE_*` knobs. `LAIN_LSP_LEAN=1` keeps
+  LSP but starts `rust-analyzer` in a memory-saving profile with proc-macro
+  expansion, build scripts and the workspace member's own `default` feature
+  switched off. That profile is a deliberate trade: rust-analyzer then
+  resolves *less* than the user's build does — derive-generated impls,
+  `env!("OUT_DIR")` code and default-feature code stay invisible to
+  `textDocument/references` — so it is opt-in and the default profile keeps
+  full fidelity. `scripts/lsp-memory-probe.py` measures the trade on any
+  repository: on the Lain checkout the lean profile saves roughly 500–600
+  MiB of peak RSS (~17–21%).
+
+### Changed
+
+- **Per-repo index budget is `LAIN_INDEX_TIMEOUT`.** `LAIN_REINDEX_TIMEOUT`
+  now bounds only the startup budget. The per-repo pipeline budget (default
+  60 s) no longer follows it: set `LAIN_INDEX_TIMEOUT` to raise it for a large
+  repo.
+- **Repos index concurrently at startup**, up to `max_concurrent_indexers` at
+  a time, before the cross-repo pass runs. One slow repo no longer holds the
+  rest of the federation behind it.
+
+- Indexing skips files no event idiom can match (a whole-file `RegexSet`
+  prefilter in front of the per-line walk; CRLF files and unbuildable sets fall
+  back to the full walk; `LAIN_IDIOM_GATE=0` turns it off). On Saleor in a
+  release build the event sensor drops from 8.5 s to 3.3 s with identical
+  output. Each sensor's wall time is now logged ("sensor finished").
+- Service references from prose (READMEs, docs, changelogs) are classified as
+  `documentation`, not `production`. Test scripts named by their stem
+  (`testcontainer.sh`) are `test`. `list_service_refs` accepts the new value.
+- A compose file's build context and published ports name the producer of an
+  address: `localhost:<published>` and `<service>:<container port>` resolve to
+  the repo's service when the service builds from that repo. Image-only
+  services and unpublished ports are not claimed.
+- **`rust-analyzer` no longer runs `cargo check` on save, and no longer
+  publishes its own diagnostics.** The multiplexer only ever reads
+  `textDocument/documentSymbol` and `textDocument/references` — it never
+  consumes `textDocument/publishDiagnostics` — so the on-save check and the
+  diagnostic pass cost a rustc process per workspace and changed no symbol.
+  Every symbol Lain extracts is unchanged.
+
+### Fixed
+
+- **`LAIN_TEST_NO_LSP=1` now actually disables LSP.** The multiplexer built
+  the disabled-binary set and then wrote an empty set into the struct, so the
+  hatch was a no-op: the scanner still spawned `rust-analyzer` / `gopls` in
+  the tests that asked it not to. `tests/cli_surface.rs` set the variable and
+  believed it was taking effect.
+- **A URL built from an enclosing scope did not resolve.** The HTTP client
+  sensor recorded only module-level assignments for JavaScript and
+  TypeScript, and resolved an identifier only against the innermost enclosing
+  function. A `const` in a request handler, fetched from a nested closure —
+  the shape of a reverse proxy — left the call's URL as the bare identifier,
+  so its host was never known. Assignments are now recorded per scope, and
+  an identifier is resolved through the scope chain, innermost first: a name
+  assigned in an enclosing scope is visible in a nested closure, a name
+  assigned in a sibling scope is not, and a name assigned twice in one scope
+  stays unresolved.
+- **A URL built from an environment variable did not say so.** The HTTP client
+  sensor took the host from the hole at the front of the URL, so a URL that
+  *named* its host — `${UPSTREAM_HTTP_ORIGIN}/chat`, a reverse proxy's origin
+  built from `new URL(process.env.NAT_BACKEND_URL)` — was recorded as an
+  unresolved expression and could not be routed to a service. The sensor now
+  follows the name through the file's assignments: a name resolves to the
+  expression it is assigned, a template to the hole that carries the origin, a
+  member expression to its base (`upstream.protocol` → `upstream`), and a call
+  to its arguments (`new URL(NAT_BACKEND_URL)`), stopping at the environment
+  variable that configures the host. Only the origin is followed, so a literal
+  host stays a literal and an env var in the path is never mistaken for the
+  host. A service that declares the variable in `env:` now receives those
+  consumers without an operator declaring them.
+- `get_service` returned an empty `used_by` for every consumer: it looked the
+  caller up in the per-repo graph with a global id, found nothing, and walked
+  the call-site node instead, silently. It now resolves callers and walks
+  `used_by` on the projected backend with indexed edge lookups (`edges_to`),
+  and logs when a caller is missing.
+- `diff_contracts` and snapshot-backed views hydrated a snapshot inside the
+  async handler and pinned runtime workers, so a few concurrent calls stopped
+  `/health` from answering. Hydration and diffing now run off the workers. A
+  single long call is not made faster.
+- Sensors looked up the enclosing function with 1-based lines against the
+  indexer's 0-based ranges, so a call on a function's last line missed it and
+  one on the line above hit it.
+- `lain schema dump` always uses the stub embedder, so the tool schema does not
+  depend on which model is installed.
+- Embeddings use each model's declared pooling. Granite small r2 is trained
+  with CLS pooling and lain averaged tokens, so its vectors were not the ones
+  the model was fit to produce. The manifest declares `pooling` per model; an
+  explicitly named model uses `LAIN_EMBEDDING_POOLING` (`mean` by default).
+  On Sock Shop the same suggestion scores 0.955 under CLS against 0.915 under
+  mean.
+- Verbless HTTP routes whose path starts with a method (`GET /health`, from Go
+  1.22 mux patterns and tracing labels) take that method instead of `ANY`.
+- The embedder passes `token_type_ids` only to models that declare it, so
+  encoders without that input load instead of falling back to the stub.
+- Cargo watches pattern inputs at their actual locations and resolves Git HEAD
+  in worktrees. Repeated commands reuse the build instead of rerunning the
+  build script because its watched paths do not exist.
+- Go message producers resolve package-level environment values on Windows.
+  Package scope keys now use forward slashes, matching the cross-package lookup.
+
 ## 0.13.0 — 2026-10-27
 
 Message-bus and job-queue detection, and environment-backed topic names.
@@ -2042,3 +2243,4 @@ that touches the joiner, sensors, or fixture must keep
 
 Initial public release. Federation `lain server` + single-repo `lain mcp` +
 Command Center SPA.
+

@@ -98,6 +98,8 @@ async fn build_three_repo_federation(
     let fed = Arc::new(FederatedIndex::new(backend));
 
     let cfg = ContractFederationConfig {
+        host_aliases: Vec::new(),
+        provides: Vec::new(),
         services: vec![
             ServiceDecl {
                 name: "orders".into(),
@@ -535,6 +537,166 @@ async fn scenario_17_get_service_billing_lists_reports_with_both_used_by() {
     assert!(
         found_scheduled,
         "used_by must include scheduled entry for scheduledMonthlyReport"
+    );
+}
+
+async fn call_trace_flow(fed: Arc<FederatedIndex>, args: Value) -> Value {
+    let status = lain::server::mcp::handler::HandlerStatus::for_test();
+    let ctx = McpContext {
+        server: None,
+        federation: Some(fed.as_ref()),
+        workspaces: None,
+        status: &status,
+        reload_bus: None,
+        snapshots: None,
+    };
+    lain::server::mcp::contract_tools::trace_flow::trace_flow_handle(&ctx, args)
+        .await
+        .unwrap()
+        .structured
+}
+
+/// `trace_flow` through the real handler on the three-repo fixture:
+/// billing's route runs downstream to its handler and helper, and
+/// upstream across the `Binds` edge to the reports consumer, its
+/// enclosing function and the two entry points that call it.
+#[tokio::test]
+async fn trace_flow_crosses_the_contract_boundary_both_ways() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fed = build_three_repo_federation(tmp.path(), RepoHealth::Ready).await;
+    let endpoint = json!({"service": "billing", "key": "http:GET /invoices/{}"});
+
+    let down = call_trace_flow(
+        fed.clone(),
+        json!({"from": {"endpoint": endpoint}, "direction": "downstream"}),
+    )
+    .await;
+    let data = &down["data"];
+    assert_eq!(data["direction"], json!("downstream"));
+    let chain: Vec<&str> = data["paths"][0]["hops"]
+        .as_array()
+        .expect("hops")
+        .iter()
+        .map(|h| h["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        chain,
+        vec!["GET /invoices/{}", "build_invoice", "fetch_order"],
+        "{data:#}"
+    );
+    assert_eq!(data["paths"][0]["hops"][1]["edge_type"], json!("CallsHttp"));
+    assert_eq!(data["paths"][0]["hops"][1]["engine_fact"], json!(true));
+    assert!(
+        data["gaps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|g| g["kind"] == json!("no_data_sink")),
+        "no table on this chain: the gap must say so: {data:#}"
+    );
+
+    let up = call_trace_flow(
+        fed.clone(),
+        json!({"from": {"endpoint": endpoint}, "direction": "upstream"}),
+    )
+    .await;
+    let paths = up["data"]["paths"].as_array().expect("paths");
+    let leaves: std::collections::BTreeSet<&str> = paths
+        .iter()
+        .map(|p| {
+            p["hops"].as_array().unwrap().last().unwrap()["name"]
+                .as_str()
+                .unwrap()
+        })
+        .collect();
+    assert!(
+        leaves.contains("getMonthlyReport") && leaves.contains("scheduledMonthlyReport"),
+        "upstream must reach both entry points: {leaves:?}"
+    );
+    let edge_types: Vec<&str> = paths[0]["hops"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|h| h["edge_type"].as_str())
+        .collect();
+    assert_eq!(edge_types, vec!["Binds", "SendsHttp", "Calls"]);
+
+    // Errors keep the existing codes.
+    let missing = call_trace_flow(
+        fed.clone(),
+        json!({"from": {"endpoint": {"service": "billing", "key": "http:GET /nope"}}}),
+    )
+    .await;
+    assert_eq!(missing["error"]["code"], json!("contract_not_found"));
+    let both = call_trace_flow(fed, json!({"from": {"symbol": "a", "table": "b"}})).await;
+    assert_eq!(both["error"]["code"], json!("invalid_argument"));
+}
+
+/// `strategy: depth` through the real handler returns the same full chain
+/// and says which strategy ran; the default call omits the field; an
+/// unknown value is an `invalid_argument` that lists the allowed ones.
+#[tokio::test]
+async fn trace_flow_strategy_switch_through_the_handler() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fed = build_three_repo_federation(tmp.path(), RepoHealth::Ready).await;
+    let endpoint = json!({"service": "billing", "key": "http:GET /invoices/{}"});
+
+    let default = call_trace_flow(
+        fed.clone(),
+        json!({"from": {"endpoint": endpoint}, "direction": "downstream"}),
+    )
+    .await;
+    assert!(default["data"].get("strategy").is_none());
+
+    let depth = call_trace_flow(
+        fed.clone(),
+        json!({"from": {"endpoint": endpoint}, "direction": "downstream", "strategy": "depth"}),
+    )
+    .await;
+    assert_eq!(depth["data"]["strategy"], json!("depth"));
+    assert_eq!(depth["data"]["paths"], default["data"]["paths"]);
+
+    let bad = call_trace_flow(
+        fed,
+        json!({"from": {"endpoint": endpoint}, "strategy": "sideways"}),
+    )
+    .await;
+    assert_eq!(bad["error"]["code"], json!("invalid_argument"));
+    assert_eq!(
+        bad["error"]["details"]["expected"],
+        json!(["breadth", "depth"])
+    );
+}
+
+/// While a repo is still indexing, an upstream trace names it instead of
+/// claiming no consumer exists.
+#[tokio::test]
+async fn trace_flow_names_repos_that_are_still_indexing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fed = build_three_repo_federation(tmp.path(), RepoHealth::Indexing).await;
+    let up = call_trace_flow(
+        fed,
+        json!({
+            "from": {"endpoint": {"service": "billing", "key": "http:GET /invoices/{}"}},
+            "direction": "upstream"
+        }),
+    )
+    .await;
+    let data = &up["data"];
+    let pending = data["repos_not_ready"].as_array().expect("repos_not_ready");
+    assert!(
+        pending
+            .iter()
+            .any(|r| r.as_str().unwrap_or("").starts_with("reports")),
+        "{data:#}"
+    );
+    assert!(
+        data["gaps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|g| g["kind"] != json!("no_consumers")),
+        "a missing consumer while repos index must not read as 'none exist': {data:#}"
     );
 }
 
@@ -1634,6 +1796,25 @@ async fn pr13_diff_contracts_ground_truth_scenarios_over_t1_fixture() {
     // §15.2: "a path reaches `reports`" (traced in the base view).
     path_reaches(&data, "FieldRemoved", "http:GET /api/orders/{}", "reports");
 
+    // The same snapshot pair with a shorter traversal must report its
+    // bounded paths as truncated, rather than claiming a complete impact.
+    let bounded =
+        diff_contracts_handle(&ctx, json!({"base": base_id, "head": head, "max_hops": 1}))
+            .await
+            .unwrap();
+    assert!(!bounded.is_error, "{:#?}", bounded.structured);
+    let bounded_change = find_endpoint_change(
+        &bounded.structured["data"],
+        "FieldRemoved",
+        "http:GET /api/orders/{}",
+    );
+    let paths = bounded_change["paths"].as_array().unwrap();
+    assert!(!paths.is_empty());
+    assert!(paths
+        .iter()
+        .all(|p| p["hops"].as_array().unwrap().len() <= 1));
+    assert_eq!(bounded_change["truncated"], json!(true));
+
     // ── 2: orders adds optional currency — not reported ────────────
     let head = harness::derive_head(
         &mgr,
@@ -2506,6 +2687,8 @@ mod pr14_check_binding_graphql {
     /// the `(op, field)` provider key space.
     pub(super) fn graphql_federation_config() -> ContractFederationConfig {
         ContractFederationConfig {
+            host_aliases: Vec::new(),
+            provides: Vec::new(),
             services: vec![
                 ServiceDecl {
                     name: "saleor-api".into(),
@@ -2730,10 +2913,10 @@ mod pr14_check_binding_graphql {
             "check_binding must accept the graphql link: {data:?}"
         );
         let yaml = data["bindings_entry"].as_str().unwrap();
-        assert!(
-            yaml.contains("key: \"graphql:query:product\""),
-            "both keys must round-trip as graphql:query:product: {yaml}"
-        );
+        let bindings: Vec<lain::federation::contracts::config::ConfirmedBinding> =
+            serde_yaml::from_str(yaml).expect("typed binding YAML");
+        assert_eq!(bindings[0].consumer.key, "graphql:query:product");
+        assert_eq!(bindings[0].provider.key, "graphql:query:product");
         assert!(
             yaml.contains("symbol: graphql-call:query:product"),
             "symbol must be the consumer node name: {yaml}"
@@ -3291,6 +3474,8 @@ mod pr15_event {
         let fed = Arc::new(FederatedIndex::new(backend));
 
         let cfg = ContractFederationConfig {
+            host_aliases: Vec::new(),
+            provides: Vec::new(),
             services: vec![
                 ServiceDecl {
                     name: "orders".into(),
@@ -3747,10 +3932,10 @@ mod pr15_check_binding_keys {
             "check_binding must accept the topic link: {data:?}"
         );
         let entry = data["bindings_entry"].as_str().expect("bindings_entry");
-        assert!(
-            entry.contains("key: \"topic:kafka/orders\""),
-            "the entry must carry the topic wire-form key: {entry}"
-        );
+        let bindings: Vec<lain::federation::contracts::config::ConfirmedBinding> =
+            serde_yaml::from_str(entry).expect("typed binding YAML");
+        assert_eq!(bindings[0].consumer.key, "topic:kafka/orders");
+        assert_eq!(bindings[0].provider.key, "topic:kafka/orders");
         assert!(
             entry.contains("symbol: on_orders"),
             "symbol must be the consumer node name: {entry}"
@@ -4307,11 +4492,10 @@ mod pr15_check_binding_keys {
                 .as_str()
                 .expect("bindings_entry")
                 .to_string();
-            assert!(
-                entry.contains(&format!("key: \"{}\"", case.entry_key)),
-                "[{}] emitted entry must carry the wire form: {entry}",
-                case.label
-            );
+            let bindings: Vec<lain::federation::contracts::config::ConfirmedBinding> =
+                serde_yaml::from_str(&entry).expect("typed binding YAML");
+            assert_eq!(bindings[0].consumer.key, case.entry_key);
+            assert_eq!(bindings[0].provider.key, case.entry_key);
 
             // (2) Round-trip, config half — the emitted entry (wire
             // form) parses and survives validate_key.
@@ -4622,6 +4806,8 @@ mod pr18_operation_id {
 
     fn sdk_config() -> lain::federation::contracts::config::ContractFederationConfig {
         lain::federation::contracts::config::ContractFederationConfig {
+            host_aliases: Vec::new(),
+            provides: Vec::new(),
             services: vec![ServiceDecl {
                 name: "orders".into(),
                 repo: "orders".into(),
