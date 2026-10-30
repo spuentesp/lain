@@ -179,6 +179,47 @@ Set `LAIN_LSP_PREWARM=false` to skip the warm-up without editing the file.
 `lain doctor --json` prints the repository's readiness report; `get_health`
 lists each language and whether its language server is installed.
 
+### Language servers
+
+Three environment variables decide how much language intelligence the
+indexer buys:
+
+| Variable | Default | Effect |
+|---|---|---|
+| `LAIN_DISABLE_LSP` | unset | `1` turns every language server off. The scanner falls back to tree-sitter and no `rust-analyzer` / `gopls` process is ever spawned. Unset, empty and `0` leave LSP on. |
+| `LAIN_LSP_LEAN` | unset | `1` keeps LSP but starts `rust-analyzer` in a memory-saving profile. Case-insensitive: `1`, `true`, `yes`, `on`. |
+| `LAIN_LSP_PREWARM` | unset | `false` skips the cold-boot warm-up. |
+
+`LAIN_DISABLE_LSP` and `LAIN_LSP_LEAN` are the two ends of one dial: the
+first buys memory by giving up *all* language intelligence, the second by
+giving up *some* of it.
+
+**The lean profile trades symbol fidelity for memory.** It starts
+`rust-analyzer` with proc-macro expansion, build scripts and the
+workspace member's own `default` feature switched off. rust-analyzer then
+resolves *less* than your build does:
+
+- `#[derive(...)]` generates no impl, so a derive-generated `impl Display`
+  is invisible to `textDocument/references` — "who implements `Display`?"
+  misses every derived type.
+- `env!("OUT_DIR")` and `include!` stay unresolved, because build scripts
+  never run.
+- Code behind your crate's `default` feature is not in the graph.
+
+The default profile keeps full fidelity: rust-analyzer expands proc macros
+and resolves the workspace exactly as you build it. The only options the
+default profile changes are the ones Lain never reads — rust-analyzer's own
+diagnostics and the `cargo check` it runs on save, which cost a rustc
+process per workspace and changed no symbol.
+
+`python3 scripts/lsp-memory-probe.py` measures the trade on your own
+repository: it starts a real rust-analyzer under each profile and compares
+peak RSS. On the Lain checkout itself the lean profile saves roughly
+500–600 MiB of peak RSS (~17–21%).
+
+`LAIN_DISABLE_LSP` silences the servers Lain *spawns*. A server bridged in
+from another process (`LspMultiplexer::with_server_url`) keeps answering.
+
 `state_lock_retry_interval_ms` sets the contention tail latency:
 with eight agents on one file, p99 on `claim_files` is roughly ten
 retries' worth.
