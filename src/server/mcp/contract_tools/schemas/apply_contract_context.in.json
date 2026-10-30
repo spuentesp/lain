@@ -1,22 +1,39 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "apply_contract_context input",
-  "description": "Input for `apply_contract_context`. Declares the contract context the analyzer cannot see into the federation's repos.yaml: endpoints a service exposes (`provides`) and which service a host expression dials (`host_aliases`). Dry-run by default; `snapshot` must be `live`.",
+  "description": "Input for apply_contract_context. Merge provides, host_aliases and explicit bindings in the existing repos.yaml format. Bindings select exactly one current consumer and an existing compatible endpoint. Dry-run by default; snapshot must be live.",
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "snapshot": { "type": "string", "enum": ["live"] },
+    "snapshot": {
+      "type": "string",
+      "enum": [
+        "live"
+      ]
+    },
     "provides": {
       "type": "array",
       "items": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "service": { "type": "string", "description": "A declared service, or an implicit repo-id service." },
-          "key": { "type": "string", "description": "Endpoint key in the shared grammar, e.g. `http:POST /chat/stream`." },
-          "source": { "type": "string", "description": "Where the declaration came from. Free-form." }
+          "service": {
+            "type": "string",
+            "description": "A declared service, or an implicit repo-id service."
+          },
+          "key": {
+            "type": "string",
+            "description": "Endpoint key in the shared grammar, e.g. `http:POST /chat/stream`."
+          },
+          "source": {
+            "type": "string",
+            "description": "Where the declaration came from. Free-form."
+          }
         },
-        "required": ["service", "key"]
+        "required": [
+          "service",
+          "key"
+        ]
       }
     },
     "host_aliases": {
@@ -25,15 +42,95 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "host": { "type": "string", "description": "The host expression as the analyzer records it (`HostPart::Expr`), e.g. `UPSTREAM_HTTP_ORIGIN`." },
-          "file": { "type": "string", "description": "A repo-relative file. Every HTTP call in it whose host is unknown dials `service`." },
-          "service": { "type": "string", "description": "A declared service, or an implicit repo-id service." },
-          "source": { "type": "string", "description": "Where the mapping was established. Free-form." }
+          "host": {
+            "type": "string",
+            "description": "The host expression as the analyzer records it (`HostPart::Expr`), e.g. `UPSTREAM_HTTP_ORIGIN`."
+          },
+          "file": {
+            "type": "string",
+            "description": "A repo-relative file. Every HTTP call in it whose host is unknown dials `service`."
+          },
+          "service": {
+            "type": "string",
+            "description": "A declared service, or an implicit repo-id service."
+          },
+          "source": {
+            "type": "string",
+            "description": "Where the mapping was established. Free-form."
+          }
         },
-        "required": ["service"]
+        "required": [
+          "service"
+        ]
       }
     },
-    "dry_run": { "type": "boolean", "default": true, "description": "When true (the default), return the YAML that would be written and touch nothing." }
+    "dry_run": {
+      "type": "boolean",
+      "default": true,
+      "description": "When true (the default), return the YAML that would be written and touch nothing."
+    },
+    "bindings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "consumer": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "repo": {
+                "type": "string",
+                "minLength": 1
+              },
+              "path": {
+                "type": "string",
+                "minLength": 1
+              },
+              "symbol": {
+                "type": "string",
+                "minLength": 1
+              },
+              "key": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "repo",
+              "path",
+              "symbol",
+              "key"
+            ]
+          },
+          "provider": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "service": {
+                "type": "string",
+                "minLength": 1
+              },
+              "key": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "service",
+              "key"
+            ]
+          }
+        },
+        "required": [
+          "consumer",
+          "provider"
+        ]
+      },
+      "description": "Explicit confirmed mappings using existing repos.yaml bindings entries. The repo/path/symbol/key selector must match exactly one current consumer; fanout is refused. Conflicting destinations are errors; identical mappings are idempotent. Apply revalidates current facts independently of check_binding. Confirmed means declared, not human-approved."
+    }
   },
-  "required": ["snapshot"]
+  "required": [
+    "snapshot"
+  ]
 }

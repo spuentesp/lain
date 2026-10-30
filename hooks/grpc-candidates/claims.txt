@@ -1,0 +1,10 @@
+src/server/sensors/grpc_consumer_sensor.rs
+src/server/sensors/grpc_consumer_sensor/rust.rs
+src/server/sensors/patterns/rust-grpc.yaml
+src/server/sensors/patterns/rust/grpc-candidate.scm
+tests/rust_grpc_candidates.rs
+docs/RUST_GRPC_CANDIDATES.md
+tests/use_cases/rust_grpc_candidates.rs
+
+# PR review fixes: lifetime-qualified references, pattern binding scopes, query baseline
+tests/sensors/patterns_protocol_idioms.rs

@@ -1,0 +1,150 @@
+{
+  "format": 1,
+  "files": [
+    {
+      "fixture": "openshell.proto",
+      "repository": "https://github.com/NVIDIA/OpenShell",
+      "revision": "6648bd0c290efbc41ba131ee9831ee45cd431f94",
+      "source_path": "proto/openshell.proto",
+      "retrieval_url": "https://raw.githubusercontent.com/NVIDIA/OpenShell/6648bd0c290efbc41ba131ee9831ee45cd431f94/proto/openshell.proto",
+      "source_sha256": "2e31d0faca652b91729f88bd4053447e5d162e74de7dbacdcc06327ed82e5b95",
+      "fixture_sha256": "e918b6c3621b99e3abd71fc4de76a70515ed7b94cfc18bc318b13fcf0e3e0884",
+      "ranges": [
+        {
+          "fixture_start": 4,
+          "source_start": 1,
+          "source_end": 6
+        },
+        {
+          "fixture_start": 12,
+          "source_start": 23,
+          "source_end": 23
+        },
+        {
+          "fixture_start": 15,
+          "source_start": 47,
+          "source_end": 54
+        },
+        {
+          "fixture_start": 25,
+          "source_start": 73,
+          "source_end": 80
+        }
+      ]
+    },
+    {
+      "fixture": "nemo-cargo-lock.txt",
+      "repository": "https://github.com/NVIDIA/NeMo-Fabric",
+      "revision": "4fdf65a4b4c96024327501ae28243f2d206e7ec7",
+      "source_path": "Cargo.lock",
+      "retrieval_url": "https://raw.githubusercontent.com/NVIDIA/NeMo-Fabric/4fdf65a4b4c96024327501ae28243f2d206e7ec7/Cargo.lock",
+      "source_sha256": "185757f35432db913e5a55b7aa7c7d703d9e9de8d3a9c4ede927f22b2aa1820e",
+      "fixture_sha256": "a7586ab5c2ac2094c95eff7304afb8e73905b3311c4f28002c6d21c3cb486a47",
+      "ranges": [
+        {
+          "fixture_start": 4,
+          "source_start": 1600,
+          "source_end": 1603
+        }
+      ]
+    },
+    {
+      "fixture": "nemo.rs",
+      "repository": "https://github.com/NVIDIA/NeMo-Fabric",
+      "revision": "4fdf65a4b4c96024327501ae28243f2d206e7ec7",
+      "source_path": "environment-providers/openshell/src/lib.rs",
+      "retrieval_url": "https://raw.githubusercontent.com/NVIDIA/NeMo-Fabric/4fdf65a4b4c96024327501ae28243f2d206e7ec7/environment-providers/openshell/src/lib.rs",
+      "source_sha256": "dcb5cfd6fd431ca220ff4cbd4bfb4593b581513b3bda6f1f0a76d6b90ee61a0c",
+      "fixture_sha256": "6da895ac037ff56c8260581e70b4d2a61d18d769dce92107890442316cf70e2a",
+      "ranges": [
+        {
+          "fixture_start": 4,
+          "source_start": 17,
+          "source_end": 21
+        },
+        {
+          "fixture_start": 11,
+          "source_start": 1967,
+          "source_end": 1969
+        },
+        {
+          "fixture_start": 16,
+          "source_start": 1971,
+          "source_end": 1972
+        },
+        {
+          "fixture_start": 20,
+          "source_start": 1987,
+          "source_end": 2052
+        },
+        {
+          "fixture_start": 88,
+          "source_start": 1,
+          "source_end": 2
+        }
+      ]
+    },
+    {
+      "fixture": "openshell_client.rs",
+      "repository": "https://github.com/NVIDIA/OpenShell",
+      "revision": "6648bd0c290efbc41ba131ee9831ee45cd431f94",
+      "source_path": "crates/openshell-sdk/src/client.rs",
+      "retrieval_url": "https://raw.githubusercontent.com/NVIDIA/OpenShell/6648bd0c290efbc41ba131ee9831ee45cd431f94/crates/openshell-sdk/src/client.rs",
+      "source_sha256": "3d57f5ce50ea823e63d302eac1b11e93bc31aef4e75168debf3c2e7bc5a7764b",
+      "fixture_sha256": "48e33fa2dbb61105a97eaac70bfd5073c1b7aa46e349cb5f860185af6b9c1a7b",
+      "ranges": [
+        {
+          "fixture_start": 4,
+          "source_start": 15,
+          "source_end": 15
+        },
+        {
+          "fixture_start": 7,
+          "source_start": 37,
+          "source_end": 46
+        },
+        {
+          "fixture_start": 19,
+          "source_start": 48,
+          "source_end": 48
+        },
+        {
+          "fixture_start": 22,
+          "source_start": 99,
+          "source_end": 104
+        },
+        {
+          "fixture_start": 30,
+          "source_start": 1,
+          "source_end": 2
+        }
+      ]
+    },
+    {
+      "fixture": "openshell_raw.rs",
+      "repository": "https://github.com/NVIDIA/OpenShell",
+      "revision": "6648bd0c290efbc41ba131ee9831ee45cd431f94",
+      "source_path": "crates/openshell-sdk/src/raw.rs",
+      "retrieval_url": "https://raw.githubusercontent.com/NVIDIA/OpenShell/6648bd0c290efbc41ba131ee9831ee45cd431f94/crates/openshell-sdk/src/raw.rs",
+      "source_sha256": "c0bcabd7015d08e882ca29bdd6f06d9f423469b4046ac63a0686571000964ac2",
+      "fixture_sha256": "e822711f3c885a68113e7e4709c2ea6542967bfed6cb3a2cf88f2641435dc081",
+      "ranges": [
+        {
+          "fixture_start": 4,
+          "source_start": 21,
+          "source_end": 22
+        },
+        {
+          "fixture_start": 8,
+          "source_start": 38,
+          "source_end": 44
+        },
+        {
+          "fixture_start": 17,
+          "source_start": 1,
+          "source_end": 2
+        }
+      ]
+    }
+  ]
+}

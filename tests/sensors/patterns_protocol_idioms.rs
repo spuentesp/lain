@@ -560,11 +560,9 @@ fn amqp_idioms_are_bundled_and_yield_literals() {
     assert!(!compile_idioms(p.topic_consumer_patterns(Lang::TsJs)).is_empty());
 }
 
-// ── 5. The `patterns` module's `generated` query map is
-//    unchanged: Tier 1 did not add a `.scm` file (the idioms
-//    are pure regex data, not tree-sitter). This guards
-//    against an accidental new entry landing in the build
-//    pipeline. ────────────────────────────────────────────────
+// ── 5. Tier 1 protocol idioms add no structural queries. The
+//    independent Rust gRPC query is included in the baseline.
+//    Guard against accidentally bundling regex idioms as .scm. ──
 
 #[test]
 fn tier1_did_not_add_a_new_scm_file() {
@@ -575,11 +573,11 @@ fn tier1_did_not_add_a_new_scm_file() {
     let len = patterns::generated::LEN;
     // The known-good count from the Tier-0 baseline
     // (HTTP-route + HTTP-outbound + entry-point .scm files).
-    // This is the count before Tier 1 landed; if a new
-    // build-pipeline entry is added the count would rise and
-    // this assertion would fail.
+    // Rust gRPC discovery independently adds one structural query. Tier 1
+    // protocol idioms still contribute no queries to this baseline.
+    assert!(patterns::generated::get("rust/grpc-candidate.scm").is_some());
     assert_eq!(
-        len, 38,
+        len, 39,
         "patterns/build.rs generated count changed unexpectedly. \
          Tier 1 must not add a new .scm file to the build pipeline — \
          idioms are pure regex data in frameworks.yaml."

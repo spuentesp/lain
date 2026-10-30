@@ -527,6 +527,20 @@ pub(crate) fn coverage_from_reports(
     for (sensor_name, report) in reports {
         let bucket: &mut BTreeMap<String, SensorLedger> =
             ledger.ledger.entry((*sensor_name).to_string()).or_default();
+        if *sensor_name == "grpc_consumer" {
+            let rust_seen = records
+                .iter()
+                .filter(|r| r.lang == Some(Lang::Rust))
+                .count();
+            if rust_seen > 0 {
+                let rust = bucket
+                    .entry(lang_label(Lang::Rust).to_string())
+                    .or_default();
+                rust.files_seen += rust_seen;
+                rust.unresolved.extend(report.unresolved.clone());
+                rust.error = report.error.clone();
+            }
+        }
         // The sensor's per-lang ledger is unknown until the sensor
         // migrates to a richer `scan_with_report`. The legacy
         // integer is recorded as the sensor's emitted count against
@@ -534,7 +548,9 @@ pub(crate) fn coverage_from_reports(
         let entry = bucket.entry(python_label.clone()).or_default();
         entry.files_seen += py_files_seen;
         entry.emitted += report.emitted;
-        entry.unresolved.extend(report.unresolved.clone());
+        if *sensor_name != "grpc_consumer" {
+            entry.unresolved.extend(report.unresolved.clone());
+        }
         if let Some(err) = &report.error {
             entry.error = Some(err.clone());
         }
