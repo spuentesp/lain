@@ -1,0 +1,4 @@
+Root owns generic-shadowing review fix after OOM; no local builds.
+src/server/sensors/grpc_consumer_sensor/rust.rs
+tests/rust_grpc_candidates.rs
+tests/rust_grpc_contracts.rs

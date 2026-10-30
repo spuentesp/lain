@@ -604,6 +604,30 @@ async fn normalization_collisions_are_unproven_and_retract_when_source_changes()
     assert!(fed.backend().get_node(id.as_str()).unwrap().is_none());
 }
 
+#[tokio::test]
+async fn generic_receiver_shadowing_never_emits_an_rpc_fact() {
+    let fixture = Fixture::new();
+    let path = "environment-providers/openshell/src/generic.rs";
+    write(&fixture.root.join("nemo"), path,
+        "use openshell_core::proto::open_shell_client::OpenShellClient as C; fn f<C: OtherClient>(c: C) { c.get_sandbox(req); }");
+    commit_changes(&fixture.root.join("nemo"), "add generic receiver shadow");
+    let fed = fixture.live().await;
+    assert!(fed
+        .contract_index()
+        .unwrap()
+        .rust_rpcs
+        .keys()
+        .all(|id| id.path().as_deref() != Some(path)));
+    assert!(fed
+        .backend()
+        .list_nodes()
+        .unwrap()
+        .iter()
+        .filter(|node| node.path == path)
+        .flat_map(|node| &node.contract)
+        .all(|fact| !matches!(fact, ContractFact::RpcConsumer(_))));
+}
+
 #[test]
 fn proto_word_boundaries_preserve_acronyms_and_digit_runs() {
     use lain::server::sensors::util::rust_proto_snake_case as snake;
