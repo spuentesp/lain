@@ -418,7 +418,7 @@ enum IdentitySync {
 fn identity_sync(prior: Option<&(String, i32)>, hash: &str) -> IdentitySync {
     match prior {
         None => IdentitySync::Open { version: 1 },
-        Some((old, version)) if old == hash => IdentitySync::Current,
+        Some((old, _version)) if old == hash => IdentitySync::Current,
         Some((_, version)) => IdentitySync::Change {
             version: version.saturating_add(1),
         },

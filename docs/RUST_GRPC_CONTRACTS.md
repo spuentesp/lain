@@ -89,5 +89,10 @@ never consume live LSP evidence: they rebuild from their exact source/mapping
 revision. A call proven only through a live definition may therefore remain a
 snapshot coverage gap, explicitly reported as missing evidence.
 
+The editable `tonic_dispatch_patterns` and `rpc_path_pattern` in
+`.lain/patterns/rust-grpc.yaml` customize these live definition checks, alongside
+the generated-client and method patterns. Repository overrides replace the full
+configuration, so copy the bundled file before changing individual fields.
+
 This enriches method identity, not deployment destination. Use the existing
 operator-confirmed mapping workflow for a destination that cannot be inferred.

@@ -194,23 +194,19 @@ pub fn generated_definition(
     let body = source[function.child_by_field_name("body")?.byte_range()]
         .split_whitespace()
         .collect::<String>();
-    // Require a generated tonic dispatch and an RPC path, not just names.
-    if ![
-        ".unary(",
-        ".server_streaming(",
-        ".client_streaming(",
-        ".streaming(",
-    ]
-    .iter()
-    .any(|dispatch| body.contains(dispatch))
-        || !body.contains("PathAndQuery::from_static(")
-    {
+    // Editable call-shape and RPC-path patterns come from this repository's
+    // `.lain/patterns/rust-grpc.yaml` override or the bundled conventions.
+    if !config.tonic_dispatch_patterns.iter().any(|pattern| {
+        Regex::new(pattern)
+            .ok()
+            .is_some_and(|regex| regex.is_match(&body))
+    }) {
         return None;
     }
-    let path = Regex::new(r#"PathAndQuery::from_static\("(/[^"]+)"\)"#).ok()?;
+    let path = Regex::new(&config.rpc_path_pattern).ok()?;
     let captures = path.captures(&body)?;
-    let rpc_path = captures.get(1)?.as_str().strip_prefix('/')?;
-    let (service, rpc_method) = rpc_path.split_once('/')?;
+    let service = captures.name("service")?.as_str();
+    let rpc_method = captures.name("method")?.as_str();
     if service.is_empty()
         || rpc_method.contains('/')
         || crate::server::sensors::util::rust_proto_snake_case(rpc_method)
@@ -389,6 +385,22 @@ mod tests {
             &config
         )
         .is_none());
+        let mut custom = config.clone();
+        custom.tonic_dispatch_patterns = vec![r"\.unary\(".into()];
+        custom.rpc_path_pattern =
+            r#"PathAndQuery::from_static\("/(?P<service>[^/]+)/(?P<method>[^/]+)"\)"#.into();
+        assert!(generated_definition(GENERATED, &location, "get", &custom).is_some());
+        custom.rpc_path_pattern =
+            r#"OtherPath::static\("/(?P<service>[^/]+)/(?P<method>[^/]+)"\)"#.into();
+        assert!(generated_definition(GENERATED, &location, "get", &custom).is_none());
+        let custom = RustGrpcConfig::from_sources(
+            Some(
+                &include_str!("../patterns/rust-grpc.yaml")
+                    .replace("PathAndQuery::from_static", "OtherPath::static"),
+            ),
+            None,
+        );
+        assert!(custom.is_ok());
         assert_eq!(byte_at_utf16("a😀b", 0, 3), Some(5));
         assert_eq!(byte_at_utf16("a😀b", 0, 2), None);
     }

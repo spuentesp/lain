@@ -1748,6 +1748,18 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<IndexOutcome, L
         if let Some(ref last) = last_commit {
             if last == &latest_commit {
                 info!("[federation] {:?} already up to date at {}", path, last);
+                if !mode.skips_lsp() {
+                    if let Some(pool) = lsp_pool {
+                        if let Err(error) =
+                            crate::server::sensors::grpc_consumer_sensor::semantic::enrich(
+                                graph, path, namespace, pool, cancel,
+                            )
+                            .await
+                        {
+                            tracing::warn!("Rust RPC LSP enrichment unavailable: {error}");
+                        }
+                    }
+                }
                 return Ok(IndexOutcome {
                     sensor_counts: crate::server::sensors::SensorCounts::default(),
                     sensor_reports: Vec::new(),
