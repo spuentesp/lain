@@ -244,6 +244,7 @@ jobs:
       - name: Build
         env:
           CARGO_INCREMENTAL: '0'
+          MACOSX_DEPLOYMENT_TARGET: '14.5'
         run: cargo build --release --target aarch64-apple-darwin
       - name: Verify built version before publishing
         shell: bash
