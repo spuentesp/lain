@@ -118,6 +118,16 @@ fn pinned_nvidia_candidates_require_explicit_cross_file_evidence() {
             .any(|e| e.description.contains("openshell_sdk::OpenShellClient")));
         assert_eq!(&src[call.site.start_byte..call.site.end_byte], call.method);
     }
+    let borrowed = src.replace(
+        "client: OpenShellClient",
+        "client: &'static OpenShellClient",
+    );
+    assert_eq!(
+        detect_rust_grpc_candidates(&borrowed, "nemo.rs", &config)
+            .unwrap()
+            .len(),
+        2
+    );
     let unrelated = src.replace("client: OpenShellClient", "client: HttpClient");
     assert!(detect_rust_grpc_candidates(&unrelated, "nemo.rs", &config)
         .unwrap()
@@ -131,4 +141,46 @@ fn pinned_nvidia_candidates_require_explicit_cross_file_evidence() {
         calls[0].generated_type,
         "openshell_core::proto::open_shell_client::OpenShellClient"
     );
+}
+
+#[test]
+fn lifetime_qualified_references_keep_generated_identity() {
+    let calls = candidates(
+        r#"
+use api::orders_client::OrdersClient as C;
+struct Gateway { client: C<Channel> }
+impl Gateway { fn raw<'a>(&'a self) -> &'a mut C<Channel> { todo!() } }
+fn f<'a>(c: &'a C<Channel>, g: &'a mut Gateway, nested: &&'a C<Channel>) {
+    c.get(req); g.client.get(req); g.raw().get(req); nested.get(req);
+}
+"#,
+    );
+    assert_eq!(calls.len(), 4, "{calls:#?}");
+    assert!(calls
+        .iter()
+        .all(|c| c.generated_type == "api::orders_client::OrdersClient"));
+}
+
+#[test]
+fn completed_pattern_scopes_do_not_hide_later_clients() {
+    for earlier in [
+        "for c in others {}",
+        "match value { Some(c) => {}, _ => {} }",
+        "if let Some(c) = value {}",
+        "while let Some(c) = value {}",
+    ] {
+        let src =
+            format!("fn f() {{ {earlier} let c = api::x_client::XClient::new(ch); c.get(req); }}");
+        assert_eq!(candidates(&src).len(), 1, "missed call: {src}");
+    }
+    // Patterns only shadow the outer client inside their binding scope.
+    for shadow in [
+        "for c in others { c.get(req); }",
+        "match value { Some(c) => { c.get(req); }, _ => {} }",
+        "if let Some(c) = value { c.get(req); }",
+        "while let Some(c) = value { c.get(req); }",
+    ] {
+        let src = format!("fn f() {{ let c = api::x_client::XClient::new(ch); {shadow} }}");
+        assert!(candidates(&src).is_empty(), "false identity: {src}");
+    }
 }
