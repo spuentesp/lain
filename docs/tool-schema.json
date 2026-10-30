@@ -2467,6 +2467,170 @@
           ],
           "type": "object"
         },
+        "RustRpcCandidate": {
+          "additionalProperties": false,
+          "properties": {
+            "enclosing_name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "enclosing_start_line": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "evidence": {
+              "items": {
+                "$ref": "#/$defs/RustRpcEvidence"
+              },
+              "type": "array"
+            },
+            "generated_type": {
+              "type": "string"
+            },
+            "method": {
+              "type": "string"
+            },
+            "receiver": {
+              "type": "string"
+            },
+            "site": {
+              "$ref": "#/$defs/RustRpcSite"
+            }
+          },
+          "required": [
+            "method",
+            "receiver",
+            "generated_type",
+            "site",
+            "evidence",
+            "enclosing_name",
+            "enclosing_start_line"
+          ],
+          "type": "object"
+        },
+        "RustRpcDetail": {
+          "additionalProperties": false,
+          "properties": {
+            "candidate": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RustRpcCandidate"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "compatible_keys": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "contract_key": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "enclosing_symbol": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "error": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "identity_rule": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "provider_ids": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "status": {
+              "enum": [
+                "resolved",
+                "unknown_identity",
+                "ambiguous_identity",
+                "missing_evidence"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "candidate",
+            "contract_key",
+            "compatible_keys",
+            "enclosing_symbol",
+            "error",
+            "provider_ids",
+            "identity_rule"
+          ],
+          "type": "object"
+        },
+        "RustRpcEvidence": {
+          "additionalProperties": false,
+          "properties": {
+            "description": {
+              "type": "string"
+            },
+            "site": {
+              "$ref": "#/$defs/RustRpcSite"
+            }
+          },
+          "required": [
+            "description",
+            "site"
+          ],
+          "type": "object"
+        },
+        "RustRpcSite": {
+          "additionalProperties": false,
+          "properties": {
+            "column": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "end_byte": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "line": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "path": {
+              "type": "string"
+            },
+            "start_byte": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "path",
+            "start_byte",
+            "end_byte",
+            "line",
+            "column"
+          ],
+          "type": "object"
+        },
         "Scope": {
           "additionalProperties": false,
           "properties": {
@@ -2576,7 +2740,10 @@
                 "$ref": "#/$defs/EvidenceRef"
               },
               "host": {
-                "type": "string"
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "method": {
                 "type": "string"
@@ -2584,15 +2751,36 @@
               "reason": {
                 "enum": [
                   "no_route_in_service",
-                  "no_match"
+                  "no_match",
+                  "wrapper_unconfigured",
+                  "env_unmapped",
+                  "env_ambiguous",
+                  "rpc_stub_unknown",
+                  "graphql_no_op",
+                  "dynamic_url",
+                  "base_unknown",
+                  "dynamic_topic",
+                  "external_ref",
+                  "dynamic_sql",
+                  "orm_dynamic_query",
+                  "external_schema_ref"
                 ],
                 "type": "string"
               },
+              "rpc": {
+                "$ref": "#/$defs/RustRpcDetail"
+              },
               "target_service": {
-                "type": "string"
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "template": {
-                "type": "string"
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "url_expr": {
                 "type": "string"
