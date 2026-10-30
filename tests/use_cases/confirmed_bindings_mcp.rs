@@ -13,7 +13,7 @@ use lain::federation::graph_backend::{GraphBackend, PetgraphBackend};
 use lain::federation::health::RepoHealth;
 use lain::federation::repo_id::{GlobalId, RepoId};
 use lain::federation::repo_source::{RepoSource, WorkspaceDirSource};
-use lain::schema::{GraphNode, NodeType, RepoNamespace};
+use lain::schema::{EdgeProvenance, GraphNode, NodeType, RepoNamespace};
 use lain::server::mcp::contract_tools::analysis::trace_impact_handle;
 use lain::server::mcp::contract_tools::context::apply_contract_context_handle;
 use lain::server::mcp::contract_tools::contracts::{
@@ -357,6 +357,8 @@ async fn binding_validation_selects_the_matching_topic_fact_resolution() {
     .as_str()
     .into();
     consumer.repo_id = Some("billing".into());
+    consumer.line_start = Some(22);
+    consumer.line_end = Some(22);
     consumer.contract = vec![
         ContractFact::TopicConsumer(TopicConsumerFact {
             broker: "kafka".into(),
@@ -386,6 +388,8 @@ async fn binding_validation_selects_the_matching_topic_fact_resolution() {
         .as_str()
         .into();
         node.repo_id = Some(repo.into());
+        node.line_start = Some(line);
+        node.line_end = Some(line);
         node.contract = vec![ContractFact::Provider(ProviderFact {
             method: lain::federation::contracts::model::HttpMethod::Any,
             template: topic.into(),
@@ -432,7 +436,13 @@ async fn binding_validation_selects_the_matching_topic_fact_resolution() {
         "subscribe_both",
         Some(22),
     );
-    let resolutions = fixture.fed.contract_index().unwrap().consumers[&site].clone();
+    let index = fixture.fed.contract_index().unwrap();
+    let resolutions = index.consumers.get(&site).cloned().unwrap_or_else(|| {
+        panic!(
+            "consumer {site:?} missing; indexed consumers: {:?}",
+            index.consumers.keys()
+        )
+    });
     assert_eq!(resolutions.len(), 2);
     assert!(resolutions[0]
         .bound_endpoints
