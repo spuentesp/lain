@@ -77,7 +77,6 @@ jobs:
           fi
 
   version-check:
-    needs: ci-status-check
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
