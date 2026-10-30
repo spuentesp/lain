@@ -49,8 +49,6 @@ bincode = { version = "2", features = ["serde"] }
 
 # NLP & Machine Learning
 # Keep prerelease upgrades deliberate: the environment/session API can change.
-# Skip ONNX Runtime on macOS to avoid linker errors with the prebuilt library.
-[target.'cfg(not(target_os = "macos"))'.dependencies]
 ort = { version = "=2.0.0-rc.15", features = ["ndarray"] }
 # Disable tokenizers' default `esaxx_fast` feature, which pulls in
 # `esaxx-rs`'s `cc`-built C++ as a static `/MT` archive. That collides
