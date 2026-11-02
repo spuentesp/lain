@@ -1,3 +1,6 @@
+pub(crate) mod django;
+mod python;
+
 use crate::error::LainError;
 use crate::federation::contracts::coverage::UnresolvedRecord;
 use crate::federation::contracts::model::{
@@ -44,6 +47,7 @@ pub struct OrmRelation {
     pub from: String,
     pub to: String,
     pub site: SourceSite,
+    pub source: StaticSource,
 }
 
 #[derive(Debug, Default)]
@@ -92,6 +96,7 @@ fn add_model(
     table: &str,
     path: &str,
     line: u32,
+    source: StaticSource,
 ) {
     let model = OrmModel {
         name: name.to_string(),
@@ -104,12 +109,20 @@ fn add_model(
         from: name.to_string(),
         to: table.to_string(),
         site: site(path, line),
+        source,
     });
     analysis.models.push(model);
     let _ = orm;
 }
 
-fn add_column(analysis: &mut OrmAnalysis, table: &str, name: &str, path: &str, line: u32) {
+fn add_column(
+    analysis: &mut OrmAnalysis,
+    table: &str,
+    name: &str,
+    path: &str,
+    line: u32,
+    source: StaticSource,
+) {
     analysis.columns.push(OrmColumn {
         name: name.to_string(),
         table: table.to_string(),
@@ -122,74 +135,8 @@ fn add_column(analysis: &mut OrmAnalysis, table: &str, name: &str, path: &str, l
         from: table.to_string(),
         to: name.to_string(),
         site: site(path, line),
+        source,
     });
-}
-
-fn analyze_django(analysis: &mut OrmAnalysis, path: &str, content: &str, shapes: &OrmModelShapes) {
-    let class_re = pattern(
-        shapes,
-        "django_class",
-        r#"(?m)^class\s+(\w+)\([^\)]*\):[ \t]*$"#,
-    );
-    let table_re = pattern(
-        shapes,
-        "django_table",
-        r#"db_table\s*=\s*['\"]([^'\"]+)['\"]"#,
-    );
-    let field_re = pattern(
-        shapes,
-        "django_field",
-        r#"(?m)^\s*(\w+)\s*=\s*models\.\w+Field\("#,
-    );
-    let db_column_re = pattern(
-        shapes,
-        "django_column",
-        r#"db_column\s*=\s*['\"]([^'\"]+)['\"]"#,
-    );
-    let classes: Vec<_> = class_re.captures_iter(content).collect();
-    for (index, class) in classes.iter().enumerate() {
-        let model = class.get(1).unwrap();
-        let body_start = class.get(0).unwrap().end();
-        let body_end = classes
-            .get(index + 1)
-            .and_then(|next| next.get(0))
-            .map(|next| next.start())
-            .unwrap_or(content.len());
-        let body = &content[body_start..body_end];
-        let Some(table) = table_re.captures(body).and_then(|m| m.get(1)) else {
-            continue;
-        };
-        add_model(
-            analysis,
-            "django",
-            model.as_str(),
-            table.as_str(),
-            path,
-            line_of(content, model.start()),
-        );
-        for field in field_re.captures_iter(body) {
-            let attribute = field.get(1).unwrap();
-            let open = field.get(0).unwrap().end() - 1;
-            let Some((args, _)) = paren_region(body, open) else {
-                continue;
-            };
-            let literal = db_column_re.captures(args).and_then(|m| m.get(1));
-            if args.contains("db_column") && literal.is_none() {
-                analysis
-                    .unresolved
-                    .push(format!("{path}: dynamic column on {}", model.as_str()));
-                continue;
-            }
-            let name = literal.map(|m| m.as_str()).unwrap_or(attribute.as_str());
-            add_column(
-                analysis,
-                table.as_str(),
-                name,
-                path,
-                line_of(content, body_start + attribute.start()),
-            );
-        }
-    }
 }
 
 fn analyze_sqlalchemy(
@@ -234,6 +181,7 @@ fn analyze_sqlalchemy(
             table.as_str(),
             path,
             line_of(content, model.start()),
+            StaticSource::Regex,
         );
         for field in field_re.captures_iter(body) {
             let attribute = field.get(1).unwrap();
@@ -260,6 +208,7 @@ fn analyze_sqlalchemy(
                 name,
                 path,
                 line_of(content, body_start + attribute.start()),
+                StaticSource::Regex,
             );
         }
     }
@@ -284,6 +233,7 @@ fn analyze_prisma(analysis: &mut OrmAnalysis, path: &str, content: &str, shapes:
             &table,
             path,
             line_of(content, name.start()),
+            StaticSource::Regex,
         );
         for (offset, line) in body.lines().enumerate() {
             let trimmed = line.trim();
@@ -303,6 +253,7 @@ fn analyze_prisma(analysis: &mut OrmAnalysis, path: &str, content: &str, shapes:
                 column,
                 path,
                 line_of(content, model.get(0).unwrap().start()) + offset as u32 + 1,
+                StaticSource::Regex,
             );
         }
     }
@@ -330,6 +281,7 @@ fn analyze_drizzle(analysis: &mut OrmAnalysis, path: &str, content: &str, shapes
             table_name,
             path,
             line_of(content, model.start()),
+            StaticSource::Regex,
         );
         for column in column_re.captures_iter(body) {
             let _property = column.get(1).unwrap();
@@ -343,6 +295,7 @@ fn analyze_drizzle(analysis: &mut OrmAnalysis, path: &str, content: &str, shapes
                     content,
                     table.get(3).unwrap().start() + column.get(0).unwrap().start(),
                 ),
+                StaticSource::Regex,
             );
         }
     }
@@ -373,6 +326,7 @@ fn analyze_typeorm(analysis: &mut OrmAnalysis, path: &str, content: &str, shapes
             &table,
             path,
             line_of(content, entity.get(0).unwrap().start()),
+            StaticSource::Regex,
         );
         let body_start = entity.get(0).unwrap().end();
         let body_end = entities
@@ -404,6 +358,7 @@ fn analyze_typeorm(analysis: &mut OrmAnalysis, path: &str, content: &str, shapes
                 name,
                 path,
                 line_of(content, body_start + column.get(0).unwrap().start()),
+                StaticSource::Regex,
             );
         }
     }
@@ -523,6 +478,7 @@ fn analyze_sequelize_definition(
         &table,
         path,
         line_of(content, definition_start),
+        StaticSource::Regex,
     );
     for property in property_re.captures_iter(body) {
         let name = property.get(1).unwrap();
@@ -544,6 +500,7 @@ fn analyze_sequelize_definition(
             column,
             path,
             line_of(content, definition_start + name.start()),
+            StaticSource::Regex,
         );
     }
 }
@@ -672,6 +629,7 @@ pub fn analyze_orm_models(root: &Path) -> OrmAnalysis {
         std::borrow::Cow::Borrowed(Patterns::patterns())
     });
     let shapes = patterns.orm_model_shapes();
+    let django_models = django::DjangoModelMap::load(root, patterns.django_orm_shapes());
     let mut analysis = OrmAnalysis::default();
     for (path, content, extension) in crate::server::sensors::util::scan_files(root, |path| {
         path.extension()
@@ -682,7 +640,6 @@ pub fn analyze_orm_models(root: &Path) -> OrmAnalysis {
         let path = graph_path(root, &path);
         match extension.as_str() {
             "py" => {
-                analyze_django(&mut analysis, &path, &content, shapes);
                 analyze_sqlalchemy(&mut analysis, &path, &content, shapes);
             }
             "prisma" => analyze_prisma(&mut analysis, &path, &content, shapes),
@@ -699,6 +656,7 @@ pub fn analyze_orm_models(root: &Path) -> OrmAnalysis {
                 .push(format!("{path}: dynamic ORM definition"));
         }
     }
+    python::add_django(&mut analysis, &django_models);
     attach_migrations(root, &mut analysis);
     analysis
         .models
@@ -873,7 +831,7 @@ pub fn scan_workspace_orm_models_with_report(
         let mut edge = GraphEdge::new(relation.edge_type.clone(), from, to);
         edge.site = Some(relation.site.clone());
         edge.provenance = Some(EdgeProvenance::Static {
-            source: StaticSource::Regex,
+            source: relation.source,
         });
         edges.push(edge);
     }

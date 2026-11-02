@@ -504,11 +504,15 @@ impl AnchorShapes {
 pub struct OrmModelShapes {
     #[serde(default)]
     pub patterns: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub django_field_suffixes: Vec<String>,
 }
 
 impl OrmModelShapes {
     fn merge(&mut self, other: &Self) {
         self.patterns.extend(other.patterns.clone());
+        self.django_field_suffixes
+            .extend(other.django_field_suffixes.clone());
     }
 }
 

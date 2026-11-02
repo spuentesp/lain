@@ -748,11 +748,8 @@ django_orm:
     - update_or_create
 
 orm_models:
+  django_field_suffixes: [Field]
   patterns:
-    django_class: '(?m)^class\s+(\w+)\([^\)]*\):[ \t]*$'
-    django_table: 'db_table\s*=\s*[''"'']([^''""]+)[''"'']'
-    django_field: '(?m)^\s*(\w+)\s*=\s*models\.\w+Field\('
-    django_column: 'db_column\s*=\s*[''"'']([^''""]+)[''"'']'
     sqlalchemy_class: '(?m)^class\s+(\w+)\([^\)]*\):[ \t]*$'
     sqlalchemy_table: '__tablename__\s*=\s*[''"'']([^''""]+)[''"'']'
     sqlalchemy_field: '(?m)^\s*(\w+)\s*=\s*Column\('

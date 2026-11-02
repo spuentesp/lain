@@ -443,3 +443,48 @@ fn migration_matching_prisma_comments_and_table_identity_are_precise() {
         .filter(|edge| edge.edge_type == EdgeType::MapsTo)
         .all(|edge| tables.iter().any(|table| table.id == edge.target_id)));
 }
+
+#[test]
+fn django_defaults_and_dynamic_names_are_ast_resolved_without_guessing() {
+    let tmp = tempfile::tempdir().unwrap();
+    write(
+        tmp.path(),
+        "shop/models.py",
+        "from django.db import models\nclass Product(models.Model):\n    name = models.CharField(max_length=10, default=make_default(), db_column='display_name')\nclass Dynamic(models.Model):\n    class Meta:\n        db_table = TABLE_NAME\n",
+    );
+    let analysis = analyze_orm_models(tmp.path());
+    assert!(relation(
+        &analysis,
+        EdgeType::MapsTo,
+        "Product",
+        "shop_product"
+    ));
+    assert!(relation(
+        &analysis,
+        EdgeType::HasColumn,
+        "shop_product",
+        "display_name"
+    ));
+    assert!(!analysis.models.iter().any(|model| model.name == "Dynamic"));
+    assert!(analysis
+        .unresolved
+        .iter()
+        .any(|item| item.contains("Dynamic")));
+}
+
+#[test]
+fn django_ast_query_honors_repository_overrides() {
+    let tmp = tempfile::tempdir().unwrap();
+    write(
+        tmp.path(),
+        "shop/models.py",
+        "from django.db import models\nclass Product(models.Model):\n    name = models.CharField()\n",
+    );
+    write(
+        tmp.path(),
+        ".lain/patterns/python/django-orm-model.scm",
+        "(class_definition name: (identifier) @model superclasses: (argument_list) @bases body: (block) @body (#eq? @model \"__NoSuchModel__\")) @class",
+    );
+    let analysis = analyze_orm_models(tmp.path());
+    assert!(analysis.models.is_empty());
+}
