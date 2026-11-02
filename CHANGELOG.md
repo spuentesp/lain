@@ -12,8 +12,7 @@ All notable changes to LAIN are documented here. Versions follow
 - Add operation-scoped topic/GraphQL payload reads and frontend `Renders`, `Stores`, `Forwards`, and `Discards` relations, keeping dynamic or ambiguous lineage explicitly unresolved.
 - Preserve OpenTelemetry resource and scope identity, and report relation, emitter, and snapshot readiness through `get_capabilities`.
 - Keep MCP cold-start handshakes non-blocking with an installed default embedding model by deferring checksum verification and ONNX initialization until first use; semantic capability reports warming until the model is ready.
-
-## [0.14.0] - 2026-10-30
+- Use syntax-backed ORM extraction and evidence-based frontend dispositions, fail snapshot source reads explicitly, and sort default-capped query results by name and id before truncation.
 
 - Allow exact consumer `site` selectors in confirmed mappings, so repeated RPC calls within one symbol can target different services. Existing selectors remain supported.
 - Use the existing LSP pool for bounded live Rust RPC method-definition evidence, including closure receivers; snapshots retain revision-pinned syntax inference and explicit coverage gaps. Advance the contract analyzer cache revision to 8; graph persistence is unchanged.

@@ -162,9 +162,9 @@ Paginate.
 { "op": "limit", "count": 10, "offset": 0 }
 ```
 
-Without a `limit` op, the executor caps the answer at
-`tuning.ingestion.default_query_limit` (default 100) and reports the
-trim in `meta.truncated` / `meta.matched_before_limit`.
+Without a `limit` op, the executor orders results by name and then id,
+caps the answer at `tuning.ingestion.default_query_limit` (default 100),
+and reports the trim in `meta.truncated` / `meta.matched_before_limit`.
 
 ---
 

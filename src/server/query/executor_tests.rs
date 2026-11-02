@@ -4,7 +4,7 @@ use crate::graph::GraphDatabase;
 use crate::nlp::NlpEmbedder;
 use crate::query::executor::Executor;
 use crate::query::spec::*;
-use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
+use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace};
 use parking_lot::Mutex;
 use proptest::prelude::*;
 use std::sync::Arc;
@@ -1167,6 +1167,53 @@ fn mode_auto_is_the_default_and_still_dispatches_both_ways() {
         ..QuerySpec::default()
     };
     assert!(exec.execute(&named).unwrap().legacy);
+}
+
+fn capped_names_in_insertion_order(order: &[&str]) -> Vec<String> {
+    let tmp = tempfile::tempdir().unwrap();
+    let graph = GraphDatabase::new(&tmp.path().join("graph.bin")).unwrap();
+    let namespace = RepoNamespace::for_test();
+    let nodes: Vec<GraphNode> = order
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            GraphNode::new_in(
+                NodeType::Function,
+                (*name).into(),
+                format!("src/file{index}.rs"),
+                &namespace,
+            )
+        })
+        .collect();
+    graph.insert_nodes_batch(&nodes).unwrap();
+    let (embedder, cache) = make_test_executor_params();
+    let mut executor = Executor::with_default_limit(
+        &graph,
+        &embedder,
+        &cache,
+        std::path::Path::new(""),
+        2,
+    );
+    let spec = QuerySpec::new(vec![GraphOp::Find(FindOp::new().r#type("Function"))]);
+    executor
+        .execute(&spec)
+        .unwrap()
+        .nodes
+        .into_iter()
+        .map(|node| node.name)
+        .collect()
+}
+
+#[test]
+fn default_cap_sorts_before_truncating_regardless_of_insertion_order() {
+    let forward = capped_names_in_insertion_order(&["zulu", "alpha", "mike"]);
+    let reverse = capped_names_in_insertion_order(&["mike", "zulu", "alpha"]);
+    assert_eq!(forward, vec!["alpha", "mike"]);
+    assert_eq!(reverse, forward);
+    assert_eq!(
+        capped_names_in_insertion_order(&["zulu", "alpha", "alpha"]),
+        vec!["alpha", "alpha"]
+    );
 }
 
 /// `ingestion.default_query_limit` is documented as "Default query result

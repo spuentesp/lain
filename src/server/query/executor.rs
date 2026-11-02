@@ -229,6 +229,7 @@ impl<'a> Executor<'a> {
             }
             current_nodes = current_nodes[start..end].to_vec();
         } else if !asked_for_a_limit && self.default_limit > 0 && matched > self.default_limit {
+            current_nodes.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
             current_nodes.truncate(self.default_limit);
             truncated = true;
         }
