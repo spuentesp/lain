@@ -54,19 +54,21 @@ fn source_excerpt(
     ctx: &ToolContext,
     args: &Map<String, Value>,
     node: &GraphNode,
-) -> Option<String> {
+) -> Result<Option<String>, LainError> {
     if let Some((snapshot, repo)) = ctx.snapshot_scope(args) {
         let repo = snapshot
             .repo_for_node(node)
             .unwrap_or_else(|_| repo.to_string());
-        return snapshot
-            .read_source(&repo, &node.path)
-            .ok()
-            .and_then(|text| {
-                crate::server::tools::utils::read_body_summary_from_text(node, 2000, &text)
-            });
+        let text = snapshot.read_source(&repo, &node.path)?;
+        return Ok(crate::server::tools::utils::read_body_summary_from_text(
+            node, 2000, &text,
+        ));
     }
-    crate::server::tools::utils::read_body_summary(node, 2000, &ctx.workspace)
+    Ok(crate::server::tools::utils::read_body_summary(
+        node,
+        2000,
+        &ctx.workspace,
+    ))
 }
 
 pub fn find_symbol(ctx: &ToolContext, args: &Map<String, Value>) -> Result<Value, LainError> {
@@ -89,7 +91,7 @@ pub fn get_call_sites(ctx: &ToolContext, args: &Map<String, Value>) -> Result<Va
             caller,
             &target.name,
             ctx.snapshot_scope(args),
-        );
+        )?;
         sites.push(json!({
             "caller": node_json(caller),
             "lines": lines,
@@ -140,7 +142,7 @@ pub fn get_cross_runtime_callers(
 pub fn explain_symbol(ctx: &ToolContext, args: &Map<String, Value>) -> Result<Value, LainError> {
     let symbol = required_str_arg(args, "symbol")?;
     let (target, other) = resolve_node_ambiguous(&ctx.graph, &ctx.overlay, &symbol)?;
-    let source = source_excerpt(ctx, args, &target);
+    let source = source_excerpt(ctx, args, &target)?;
     let active = ctx.presence.list_active(false);
     let agents: Vec<Value> = active
         .iter()
@@ -173,7 +175,7 @@ pub fn get_context(ctx: &ToolContext, args: &Map<String, Value>) -> Result<Value
         "definition": node_json(&target),
         "callers": nodes_json(&callers),
         "callees": nodes_json(&callees),
-        "source": source_excerpt(ctx, args, &target),
+        "source": source_excerpt(ctx, args, &target)?,
         "annotations": super::registry_impl::open_annotations_for_symbol(ctx, &symbol),
     }))
 }

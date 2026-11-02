@@ -714,12 +714,8 @@ pub fn explain_symbol_report_scoped(
         let repo = snapshot
             .repo_for_node(&node)
             .unwrap_or_else(|_| repo.to_string());
-        snapshot
-            .read_source(&repo, &node.path)
-            .ok()
-            .and_then(|text| {
-                crate::server::tools::utils::read_body_summary_from_text(&node, 200, &text)
-            })
+        let text = snapshot.read_source(&repo, &node.path)?;
+        crate::server::tools::utils::read_body_summary_from_text(&node, 200, &text)
     } else {
         read_body_summary(&node, 200, workspace)
     };

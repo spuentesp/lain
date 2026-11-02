@@ -9,6 +9,7 @@ use std::process::Command;
 
 struct RawSnapshotFixture {
     _tmp: tempfile::TempDir,
+    root: std::path::PathBuf,
     host: String,
     _server: common::ServerGuard,
     snapshot: String,
@@ -94,6 +95,7 @@ impl RawSnapshotFixture {
 
         Self {
             _tmp: tmp,
+            root: root.clone(),
             host,
             _server: server,
             snapshot,
@@ -251,6 +253,27 @@ async fn arbitrary_snapshot_values_never_fall_back_to_live_data() {
             result.pointer("/result/isError").and_then(Value::as_bool),
             Some(true),
             "snapshot value unexpectedly answered from live data: {result}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn unreadable_snapshot_source_is_an_error_in_structured_and_legacy_tools() {
+    let fixture = RawSnapshotFixture::new().await;
+    let mirror = fixture.root.join("data/mirrors/orders.git");
+    let parked = fixture.root.join("data/mirrors/orders.git.parked");
+    std::fs::rename(&mirror, &parked).unwrap();
+
+    for (tool, args) in [
+        ("get_context", json!({"symbol": "old_callee"})),
+        ("explain_symbol", json!({"symbol": "old_callee"})),
+        ("get_call_sites", json!({"symbol": "old_callee"})),
+    ] {
+        let result = fixture.call(tool, args);
+        assert_eq!(
+            result.pointer("/result/isError").and_then(Value::as_bool),
+            Some(true),
+            "{tool} hid the snapshot source failure: {result}"
         );
     }
 }

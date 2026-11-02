@@ -356,7 +356,7 @@ pub fn get_call_sites_report_scoped(
             current.as_ref().unwrap_or(caller),
             &node.name,
             snapshot,
-        );
+        )?;
         total_sites += sites.len();
         lines_by_caller.push((caller, sites));
     }
@@ -434,7 +434,7 @@ fn call_lines_in(
     caller: &crate::schema::GraphNode,
     callee: &str,
 ) -> Vec<usize> {
-    call_lines_in_scoped(workspace, caller, callee, None)
+    call_lines_in_scoped(workspace, caller, callee, None).expect("live call-line scan")
 }
 
 pub(crate) fn call_lines_in_scoped(
@@ -442,28 +442,29 @@ pub(crate) fn call_lines_in_scoped(
     caller: &crate::schema::GraphNode,
     callee: &str,
     snapshot: Option<(&crate::server::tools::registry::SnapshotToolContext, &str)>,
-) -> Vec<usize> {
+) -> Result<Vec<usize>, LainError> {
     if callee.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let text = if let Some((snapshot, repo)) = snapshot {
         let repo = snapshot
             .repo_for_node(caller)
             .unwrap_or_else(|_| repo.to_string());
-        match snapshot.read_source(&repo, &caller.path) {
-            Ok(text) => text,
-            Err(_) => return Vec::new(),
-        }
+        snapshot.read_source(&repo, &caller.path)?
     } else {
         let path = workspace.join(&caller.path);
         if !crate::server::path_util::resolves_inside(workspace, &path) {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         match std::fs::read_to_string(&path) {
             Ok(text) => text,
-            Err(_) => return Vec::new(),
+            Err(_) => return Ok(Vec::new()),
         }
     };
+    Ok(scan_call_lines(text, caller, callee))
+}
+
+fn scan_call_lines(text: String, caller: &crate::schema::GraphNode, callee: &str) -> Vec<usize> {
     let (lo, hi) = match (caller.line_start, caller.line_end) {
         // Graph ranges are 0-based and inclusive; `lineno` below is 1-based.
         (Some(ls), Some(le)) => (ls as usize + 1, le as usize + 1),

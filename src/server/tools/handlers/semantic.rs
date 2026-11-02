@@ -221,7 +221,7 @@ pub async fn get_context_report_scoped(
         None => None,
     };
     let source = match resolve_for_snippet(graph, overlay, &symbol) {
-        Ok((Some(ls), Some(_le), Some(ref p))) => {
+        Ok((Some(ls), Some(_le), Some(ref p))) => Some(
             crate::server::tools::handlers::context::get_code_snippet_scoped(
                 graph,
                 overlay,
@@ -230,9 +230,8 @@ pub async fn get_context_report_scoped(
                 Some(ls + 1),
                 None,
                 source_snapshot,
-            )
-            .ok()
-        }
+            )?,
+        ),
         _ => None,
     };
     let source_section = source
@@ -241,10 +240,11 @@ pub async fn get_context_report_scoped(
         .unwrap_or_default();
 
     let callers = if depth >= 1 {
-        crate::server::tools::handlers::context::get_call_sites_report_scoped(
-            workspace, graph, overlay, &symbol, snapshot,
+        Some(
+            crate::server::tools::handlers::context::get_call_sites_report_scoped(
+                workspace, graph, overlay, &symbol, snapshot,
+            )?,
         )
-        .ok()
     } else {
         None
     };
