@@ -742,29 +742,8 @@ fn scoped_snapshot_graph(
     graph: &crate::graph::GraphDatabase,
     repo: &str,
 ) -> Result<crate::graph::GraphDatabase, String> {
-    let nodes: Vec<_> = graph
-        .get_all_nodes()
-        .into_iter()
-        .filter(|node| {
-            node.repo_id.as_deref() == Some(repo)
-                || crate::federation::repo_id::GlobalId::parse(&node.id)
-                    .is_ok_and(|id| id.repo_id() == repo)
-        })
-        .collect();
-    let ids: std::collections::BTreeSet<String> =
-        nodes.iter().map(|node| node.id.clone()).collect();
-    let edges: Vec<_> = graph
-        .all_edges()
-        .into_iter()
-        .filter(|edge| ids.contains(&edge.source_id) && ids.contains(&edge.target_id))
-        .collect();
-    let scoped = crate::graph::GraphDatabase::empty_writable();
-    scoped
-        .insert_nodes_batch(&nodes)
-        .map_err(|e| e.to_string())?;
-    scoped
-        .insert_edges_batch(&edges)
-        .map_err(|e| e.to_string())?;
+    let mut scoped = graph.clone();
+    scoped.set_symbol_repo_scope(repo);
     Ok(scoped)
 }
 
@@ -774,7 +753,14 @@ async fn dispatch_raw_snapshot(
     name: &str,
     args: &Map<String, serde_json::Value>,
 ) -> Option<(String, bool, Option<serde_json::Value>)> {
-    let snapshot_id = args.get("snapshot").and_then(|v| v.as_str())?;
+    let snapshot_value = args.get("snapshot")?;
+    let Some(snapshot_id) = snapshot_value.as_str() else {
+        return Some((
+            "Error: snapshot must be a string snapshot id or 'live'".to_string(),
+            true,
+            None,
+        ));
+    };
     if snapshot_id == "live" {
         return None;
     }

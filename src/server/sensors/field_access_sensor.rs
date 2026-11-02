@@ -403,7 +403,15 @@ fn collect_http_calls(graph: &GraphDatabase) -> BTreeMap<String, Vec<CallSite>> 
 fn collect_operation_calls(graph: &GraphDatabase) -> BTreeMap<String, Vec<CallSite>> {
     use crate::federation::contracts::model::{ContractFact, ContractKey};
     let mut out = collect_http_calls(graph);
-    let edges = graph.all_edges();
+    let mut sites_by_source = BTreeMap::new();
+    for edge in graph.all_edges() {
+        if edge.site.is_some() {
+            sites_by_source
+                .entry(edge.source_id.clone())
+                .or_insert_with(Vec::new)
+                .push(edge);
+        }
+    }
     for node in graph.get_all_nodes() {
         for fact in &node.contract {
             let (origin, operation) = match fact {
@@ -423,9 +431,9 @@ fn collect_operation_calls(graph: &GraphDatabase) -> BTreeMap<String, Vec<CallSi
                 ),
                 _ => continue,
             };
-            let site = edges
-                .iter()
-                .find(|edge| edge.source_id == node.id && edge.site.is_some())
+            let site = sites_by_source
+                .get(&node.id)
+                .and_then(|edges| edges.first())
                 .and_then(|edge| edge.site.clone());
             out.entry(node.id.clone()).or_default().push(CallSite {
                 call_id: node.id.clone(),

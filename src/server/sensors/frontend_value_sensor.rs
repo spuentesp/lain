@@ -155,6 +155,22 @@ pub fn scan_workspace_frontend_values(
     );
     let state_setter = pattern(shapes, "state_setter", r"^set[A-Z_]");
     let nodes = graph.get_all_nodes();
+    let mut field_nodes = BTreeMap::new();
+    for node in &nodes {
+        if node.node_type == NodeType::FieldRef
+            && node
+                .contract
+                .iter()
+                .any(|fact| matches!(fact, ContractFact::FieldRead(read) if read.exact))
+        {
+            if let Some(line) = node.line_start {
+                field_nodes
+                    .entry((node.path.clone(), line))
+                    .or_insert_with(Vec::new)
+                    .push(node);
+            }
+        }
+    }
     let graph_edges = graph.all_edges();
     let mut edges = Vec::new();
 
@@ -179,14 +195,11 @@ pub fn scan_workspace_frontend_values(
         while let Some(node) = pending.pop() {
             if let Some((name, declaration_line)) = variable_declaration(node, src) {
                 if let Some(reader) = enclosing_symbol(graph, &path, declaration_line) {
-                    for field in nodes.iter().filter(|node| {
-                        node.node_type == NodeType::FieldRef
-                            && node.path == path
-                            && node.line_start == Some(declaration_line)
-                            && node.contract.iter().any(
-                                |fact| matches!(fact, ContractFact::FieldRead(read) if read.exact),
-                            )
-                    }) {
+                    for field in field_nodes
+                        .get(&(path.clone(), declaration_line))
+                        .into_iter()
+                        .flatten()
+                    {
                         if graph_edges.iter().any(|edge| {
                             edge.edge_type == EdgeType::ReadsField
                                 && edge.source_id == reader.id

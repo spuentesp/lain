@@ -6,6 +6,7 @@ use crate::query::executor::Executor;
 use crate::query::spec::*;
 use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
 use parking_lot::Mutex;
+use proptest::prelude::*;
 use std::sync::Arc;
 
 type EmbeddingCache = Arc<Mutex<lru::LruCache<String, Vec<f32>>>>;
@@ -1502,10 +1503,9 @@ fn cursor_pages_are_deterministic_complete_and_query_bound() {
     let graph = make_test_graph();
     let (embedder, cache) = make_test_executor_params();
     let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
-    let find = || GraphOp::Find(FindOp::new().r#type("Function"));
     let mut first = exec
         .execute(&QuerySpec {
-            ops: vec![find()],
+            ops: vec![GraphOp::Find(FindOp::new().r#type("Function"))],
             limit: Some(2),
             ..QuerySpec::default()
         })
@@ -1528,7 +1528,7 @@ fn cursor_pages_are_deterministic_complete_and_query_bound() {
         .expect("next page");
     let mut second = exec
         .execute(&QuerySpec {
-            ops: vec![find()],
+            ops: vec![GraphOp::Find(FindOp::new().r#type("Function"))],
             cursor: Some(cursor),
             limit: Some(2),
             ..QuerySpec::default()
@@ -1544,7 +1544,7 @@ fn cursor_pages_are_deterministic_complete_and_query_bound() {
         .expect("third page");
     let third = exec
         .execute(&QuerySpec {
-            ops: vec![find()],
+            ops: vec![GraphOp::Find(FindOp::new().r#type("Function"))],
             cursor: Some(cursor.clone()),
             limit: Some(2),
             ..QuerySpec::default()
@@ -1556,7 +1556,7 @@ fn cursor_pages_are_deterministic_complete_and_query_bound() {
     assert_eq!(first.nodes.len() + third.nodes.len(), 6);
 
     let malformed = exec.execute(&QuerySpec {
-        ops: vec![find()],
+        ops: vec![GraphOp::Find(FindOp::new().r#type("Function"))],
         cursor: Some("not-a-cursor".into()),
         ..QuerySpec::default()
     });
@@ -1567,4 +1567,46 @@ fn cursor_pages_are_deterministic_complete_and_query_bound() {
         ..QuerySpec::default()
     });
     assert!(other_query.is_err());
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 16, ..ProptestConfig::default() })]
+
+    #[test]
+    fn every_cursor_page_partition_is_complete_unique_and_ordered(page_size in 1usize..8) {
+        let graph = make_test_graph();
+        let (embedder, cache) = make_test_executor_params();
+        let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
+        let mut expected = exec
+            .execute(&QuerySpec {
+                ops: vec![GraphOp::Find(FindOp::new().r#type("Function"))],
+                limit: Some(0),
+                ..QuerySpec::default()
+            })
+            .unwrap()
+            .nodes
+            .into_iter()
+            .map(|node| (node.name.clone(), node.id.clone()))
+            .collect::<Vec<_>>();
+        expected.sort();
+
+        let mut actual = Vec::new();
+        let mut cursor = None;
+        loop {
+            let result = exec
+                .execute(&QuerySpec {
+                    ops: vec![GraphOp::Find(FindOp::new().r#type("Function"))],
+                    cursor,
+                    limit: Some(page_size),
+                    ..QuerySpec::default()
+                })
+                .unwrap();
+            actual.extend(result.nodes.into_iter().map(|node| (node.name, node.id)));
+            cursor = result.meta.and_then(|meta| meta.next_cursor);
+            if cursor.is_none() {
+                break;
+            }
+        }
+        prop_assert_eq!(actual, expected);
+    }
 }

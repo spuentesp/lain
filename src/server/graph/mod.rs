@@ -277,6 +277,9 @@ fn derive_owner(
         {
             Some(SensorOwner::DjangoOrmSensor)
         }
+        (_, Some(ContractFact::OrmModel(_)))
+        | (_, Some(ContractFact::OrmTable(_)))
+        | (_, Some(ContractFact::OrmColumn(_))) => Some(SensorOwner::OrmModelSensor),
         (NodeType::Table, _) | (_, Some(ContractFact::Table(_))) => Some(SensorOwner::SqlSensor),
         (_, Some(ContractFact::TableConsumer(_)))
             if node
@@ -328,9 +331,6 @@ fn derive_owner(
         {
             Some(SensorOwner::GraphqlSensor)
         }
-        (_, Some(ContractFact::OrmModel(_)))
-        | (_, Some(ContractFact::OrmTable(_)))
-        | (_, Some(ContractFact::OrmColumn(_))) => Some(SensorOwner::OrmModelSensor),
         // Node-type catch-alls last.
         (NodeType::HttpClientCall, _) => Some(SensorOwner::HttpClientSensor),
         (NodeType::FieldRef, _) => Some(SensorOwner::FieldAccessSensor),
@@ -455,6 +455,7 @@ pub struct GraphDatabase {
     /// repo's namespace via [`Self::set_namespace`] before the first
     /// co-change write.
     namespace: RepoNamespace,
+    symbol_repo_scope: Option<String>,
     /// Edges the resolve phase wrote whose target id is not local
     /// (wishlist #13 — cross-repo `Calls`). The petgraph cannot store
     /// an edge to a node that isn't in `index_map`, so instead of
@@ -714,6 +715,7 @@ impl GraphDatabase {
             // `set_namespace` after `new` and before the first
             // `insert_co_change_edges`.
             namespace: RepoNamespace::for_test(),
+            symbol_repo_scope: None,
             pending_external_edges: Arc::new(parking_lot::Mutex::new(Vec::new())),
             write_pass_active: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cochange_failure: Arc::new(RwLock::new(None)),
@@ -735,6 +737,19 @@ impl GraphDatabase {
     /// to assert against the same id space the graph will use.
     pub fn namespace(&self) -> &RepoNamespace {
         &self.namespace
+    }
+
+    pub fn set_symbol_repo_scope(&mut self, repo: impl Into<String>) {
+        self.symbol_repo_scope = Some(repo.into());
+    }
+
+    fn in_symbol_repo_scope(&self, node: &GraphNode) -> bool {
+        let Some(repo) = self.symbol_repo_scope.as_deref() else {
+            return true;
+        };
+        node.repo_id.as_deref() == Some(repo)
+            || crate::federation::repo_id::GlobalId::parse(&node.id)
+                .is_ok_and(|id| id.repo_id() == repo)
     }
 
     /// Open an existing on-disk graph as immutable.
@@ -1982,6 +1997,20 @@ impl GraphDatabase {
         graph.edge_weights().cloned().collect()
     }
 
+    pub fn assert_well_formed(&self) {
+        let ids: std::collections::BTreeSet<String> = self
+            .get_all_nodes()
+            .into_iter()
+            .map(|node| node.id)
+            .collect();
+        for edge in self.all_edges() {
+            assert!(
+                ids.contains(&edge.source_id) && ids.contains(&edge.target_id),
+                "dangling edge: {edge:?}"
+            );
+        }
+    }
+
     /// One node with this name, chosen deterministically.
     ///
     /// This used to be `node_weights().find(...)` — petgraph iteration
@@ -2015,6 +2044,7 @@ impl GraphDatabase {
                     .collect()
             })
             .unwrap_or_default();
+        hits.retain(|node| self.in_symbol_repo_scope(node));
         hits.sort_by(|a, b| a.path.cmp(&b.path).then_with(|| a.id.cmp(&b.id)));
         hits
     }
@@ -5041,6 +5071,53 @@ mod survivor_pin_tests {
             vec!["App".to_string(), "main".to_string()],
             "only main and App are entry points"
         );
+    }
+
+    #[test]
+    fn repo_scope_filters_names_without_pruning_cross_repo_edges() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = GraphDatabase::new(&dir.path().join("graph.bin")).unwrap();
+        let repo = |name: &str| crate::federation::repo_id::RepoId::new(name).unwrap();
+        let billing_id = crate::federation::repo_id::GlobalId::new(
+            &repo("billing"),
+            NodeType::Function,
+            "src/lib.rs",
+            "shared",
+            Some(0),
+        )
+        .as_str()
+        .to_string();
+        let orders_id = crate::federation::repo_id::GlobalId::new(
+            &repo("orders"),
+            NodeType::Function,
+            "src/lib.rs",
+            "shared",
+            Some(0),
+        )
+        .as_str()
+        .to_string();
+        let mut billing = GraphNode::new(NodeType::Function, "shared".into(), "src/lib.rs".into());
+        billing.id = billing_id.clone();
+        billing.repo_id = Some("billing".into());
+        let mut orders = GraphNode::new(NodeType::Function, "shared".into(), "src/lib.rs".into());
+        orders.id = orders_id.clone();
+        orders.repo_id = Some("orders".into());
+        graph.insert_nodes_batch(&[billing, orders]).unwrap();
+        graph
+            .insert_edges_batch(&[GraphEdge::new(
+                EdgeType::Calls,
+                billing_id,
+                orders_id.clone(),
+            )])
+            .unwrap();
+
+        let mut scoped = graph.clone();
+        scoped.set_symbol_repo_scope("billing");
+        let matches = scoped.find_all_nodes_by_name("shared");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].repo_id.as_deref(), Some("billing"));
+        assert_eq!(scoped.all_edges().len(), 1);
+        assert!(scoped.get_node(&orders_id).unwrap().is_some());
     }
 
     /// A `FieldRef` whose `FieldRead` was minted by the GraphQL

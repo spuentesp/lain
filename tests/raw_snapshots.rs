@@ -212,3 +212,45 @@ async fn excluded_snapshot_repo_is_an_error_not_a_live_fallback() {
         "unregistered snapshot repo silently answered live: {result}"
     );
 }
+
+#[tokio::test]
+async fn non_string_snapshot_is_an_error_not_a_live_fallback() {
+    let fixture = RawSnapshotFixture::new().await;
+    let result = tools_call_envelope(
+        &fixture.host,
+        "find_symbol",
+        json!({"name": "live_only_caller", "snapshot": 123, "repo_id": "orders"}),
+    );
+    assert_eq!(
+        result.pointer("/result/isError").and_then(Value::as_bool),
+        Some(true),
+        "non-string snapshot silently answered from live data: {result}"
+    );
+    assert!(text(&result).contains("snapshot"), "{result}");
+}
+
+#[tokio::test]
+async fn arbitrary_snapshot_values_never_fall_back_to_live_data() {
+    let fixture = RawSnapshotFixture::new().await;
+    for value in [
+        Value::Null,
+        Value::Bool(true),
+        Value::Bool(false),
+        json!(123),
+        json!(123.5),
+        json!(["snap_test"]),
+        json!({"id": "snap_test"}),
+        json!("snap_does_not_exist"),
+    ] {
+        let result = tools_call_envelope(
+            &fixture.host,
+            "find_symbol",
+            json!({"name": "live_only_caller", "snapshot": value, "repo_id": "orders"}),
+        );
+        assert_eq!(
+            result.pointer("/result/isError").and_then(Value::as_bool),
+            Some(true),
+            "snapshot value unexpectedly answered from live data: {result}"
+        );
+    }
+}

@@ -288,6 +288,19 @@ fn connect_reference(
     (nodes, paths)
 }
 
+fn compose_ref_paths(prefix: &RefPath, segment: &RefPath) -> RefPath {
+    let mut nodes = prefix.nodes.clone();
+    nodes.extend(segment.nodes.iter().skip(1).cloned());
+    let mut edges = prefix.edges.clone();
+    edges.extend(segment.edges.iter().cloned());
+    RefPath {
+        seed: prefix.seed.clone(),
+        incoming: segment.incoming,
+        nodes,
+        edges,
+    }
+}
+
 /// Evaluate a whole `QuerySpec` the slow, obvious way. Returns the ids of
 /// the final working set and the selected path of every reported node.
 fn reference_eval(
@@ -333,7 +346,19 @@ fn reference_eval(
             GraphOp::Connect(connect) => {
                 let (nodes, found) = connect_reference(graph, &current, connect);
                 current = nodes;
-                paths = found;
+                let previous = paths;
+                paths = found
+                    .into_iter()
+                    .map(|(id, path)| {
+                        let composed = path
+                            .nodes
+                            .first()
+                            .and_then(|seed| previous.get(seed))
+                            .map(|prefix| compose_ref_paths(prefix, &path))
+                            .unwrap_or(path);
+                        (id, composed)
+                    })
+                    .collect();
             }
             // Excluded from the generator; a spec carrying one is not a
             // valid oracle input.

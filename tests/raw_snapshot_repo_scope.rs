@@ -90,15 +90,15 @@ async fn snapshot_symbol_and_source_reads_stay_in_the_requested_repo() {
             .pointer("/result/isError")
             .and_then(Value::as_bool),
         Some(false),
-        "{billing_symbol}"
+        "billing find_symbol failed"
     );
     assert!(
         text(&billing_symbol).contains("billing:Function"),
-        "{billing_symbol}"
+        "billing find_symbol returned the wrong repo"
     );
     assert!(
         !text(&billing_symbol).contains("orders:Function"),
-        "{billing_symbol}"
+        "billing find_symbol also returned orders"
     );
 
     let billing_source = tools_call_envelope(
@@ -111,10 +111,16 @@ async fn snapshot_symbol_and_source_reads_stay_in_the_requested_repo() {
             .pointer("/result/isError")
             .and_then(Value::as_bool),
         Some(false),
-        "{billing_source}"
+        "billing explain_symbol failed"
     );
-    assert!(text(&billing_source).contains("43"), "{billing_source}");
-    assert!(!text(&billing_source).contains("42"), "{billing_source}");
+    assert!(
+        text(&billing_source).contains("43"),
+        "billing source body was not read from the pinned billing blob"
+    );
+    assert!(
+        !text(&billing_source).contains("42"),
+        "billing source body came from orders"
+    );
 
     let ambiguous = tools_call_envelope(
         &host,

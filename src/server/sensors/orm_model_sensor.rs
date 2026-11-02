@@ -3,7 +3,7 @@ use crate::federation::contracts::coverage::UnresolvedRecord;
 use crate::federation::contracts::model::{
     ContractFact, OrmColumnFact, OrmModelFact, OrmTableFact, SourceSite, UnresolvedReason,
 };
-use crate::graph::{graph_path, GraphDatabase, SensorOwner};
+use crate::graph::{graph_path, sensor_owner_of, GraphDatabase, SensorOwner};
 use crate::schema::{
     EdgeProvenance, EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace, StaticSource,
 };
@@ -74,6 +74,13 @@ fn site(path: &str, line: u32) -> SourceSite {
     }
 }
 
+fn must_materialize(graph: &GraphDatabase, id: &str) -> Result<bool, LainError> {
+    Ok(match graph.get_node(id)? {
+        Some(node) => sensor_owner_of(&node) == Some(SensorOwner::OrmModelSensor),
+        None => true,
+    })
+}
+
 fn table_name(model: &str) -> String {
     model.to_lowercase()
 }
@@ -132,7 +139,7 @@ fn analyze_django(analysis: &mut OrmAnalysis, path: &str, content: &str, shapes:
     let field_re = pattern(
         shapes,
         "django_field",
-        r#"(?m)^\s*(\w+)\s*=\s*models\.\w+Field\(([^\)]*)\)"#,
+        r#"(?m)^\s*(\w+)\s*=\s*models\.\w+Field\("#,
     );
     let db_column_re = pattern(
         shapes,
@@ -162,7 +169,10 @@ fn analyze_django(analysis: &mut OrmAnalysis, path: &str, content: &str, shapes:
         );
         for field in field_re.captures_iter(body) {
             let attribute = field.get(1).unwrap();
-            let args = field.get(2).unwrap().as_str();
+            let open = field.get(0).unwrap().end() - 1;
+            let Some((args, _)) = paren_region(body, open) else {
+                continue;
+            };
             let literal = db_column_re.captures(args).and_then(|m| m.get(1));
             if args.contains("db_column") && literal.is_none() {
                 analysis
@@ -201,7 +211,7 @@ fn analyze_sqlalchemy(
     let field_re = pattern(
         shapes,
         "sqlalchemy_field",
-        r#"(?m)^\s*(\w+)\s*=\s*Column\(([^\)]*)\)"#,
+        r#"(?m)^\s*(\w+)\s*=\s*Column\("#,
     );
     let column_re = pattern(shapes, "sqlalchemy_column", r#"['\"]([^'\"]+)['\"]"#);
     let classes: Vec<_> = class_re.captures_iter(content).collect();
@@ -227,7 +237,10 @@ fn analyze_sqlalchemy(
         );
         for field in field_re.captures_iter(body) {
             let attribute = field.get(1).unwrap();
-            let args = field.get(2).unwrap().as_str();
+            let open = field.get(0).unwrap().end() - 1;
+            let Some((args, _)) = paren_region(body, open) else {
+                continue;
+            };
             let literal = column_re.captures(args).and_then(|m| m.get(1));
             let first = args.split(',').next().unwrap_or("").trim();
             let dynamic = literal.is_none()
@@ -276,7 +289,7 @@ fn analyze_prisma(analysis: &mut OrmAnalysis, path: &str, content: &str, shapes:
             let trimmed = line.trim();
             let mut parts = trimmed.split_whitespace();
             let Some(field) = parts.next() else { continue };
-            if field.starts_with('@') || parts.next().is_none() {
+            if trimmed.starts_with("//") || field.starts_with('@') || parts.next().is_none() {
                 continue;
             }
             let column = map_re
@@ -328,7 +341,7 @@ fn analyze_drizzle(analysis: &mut OrmAnalysis, path: &str, content: &str, shapes
                 path,
                 line_of(
                     content,
-                    table.get(0).unwrap().start() + column.get(0).unwrap().start(),
+                    table.get(3).unwrap().start() + column.get(0).unwrap().start(),
                 ),
             );
         }
@@ -342,7 +355,8 @@ fn analyze_typeorm(analysis: &mut OrmAnalysis, path: &str, content: &str, shapes
         r#"@Entity\(([^\)]*)\)\s*export\s+class\s+(\w+)"#,
     );
     let name_re = pattern(shapes, "typeorm_name", r#"name\s*:\s*['\"]([^'\"]+)['\"]"#);
-    let column_re = pattern(shapes, "typeorm_column", r#"@Column\(([^\)]*)\)\s*(\w+)"#);
+    let column_re = pattern(shapes, "typeorm_column", r#"@Column\("#);
+    let property_re = pattern(shapes, "typeorm_property", r#"(?m)^\s*(\w+)"#);
     let entities: Vec<_> = entity_re.captures_iter(content).collect();
     for (index, entity) in entities.iter().enumerate() {
         let options = entity.get(1).unwrap().as_str();
@@ -368,8 +382,14 @@ fn analyze_typeorm(analysis: &mut OrmAnalysis, path: &str, content: &str, shapes
             .unwrap_or(content.len());
         let body = &content[body_start..body_end];
         for column in column_re.captures_iter(body) {
-            let options = column.get(1).unwrap().as_str();
-            let property = column.get(2).unwrap().as_str();
+            let open = column.get(0).unwrap().end() - 1;
+            let Some((options, closing)) = paren_region(body, open) else {
+                continue;
+            };
+            let Some(property_match) = property_re.captures(&body[closing + 1..]) else {
+                continue;
+            };
+            let property = property_match.get(1).unwrap().as_str();
             let literal = name_re.captures(options).and_then(|m| m.get(1));
             if options.contains("name") && literal.is_none() {
                 analysis
@@ -418,6 +438,46 @@ fn braced_region(text: &str, open: usize) -> Option<(&str, usize)> {
         match ch {
             '{' => depth += 1,
             '}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some((&text[open + 1..open + offset], open + offset));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn paren_region(text: &str, open: usize) -> Option<(&str, usize)> {
+    if text.as_bytes().get(open) != Some(&b'(') {
+        return None;
+    }
+    let mut depth = 0usize;
+    let mut quote = None;
+    let mut escaped = false;
+    for (offset, ch) in text[open..].char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if let Some(active) = quote {
+            if ch == active {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(ch, '\'' | '"' | '`') {
+            quote = Some(ch);
+            continue;
+        }
+        match ch {
+            '(' => depth += 1,
+            ')' => {
                 depth = depth.checked_sub(1)?;
                 if depth == 0 {
                     return Some((&text[open + 1..open + offset], open + offset));
@@ -557,6 +617,15 @@ fn analyze_sequelize(
     }
 }
 
+fn contains_identifier(content: &str, name: &str) -> bool {
+    content.match_indices(name).any(|(offset, _)| {
+        let before = content[..offset].chars().next_back();
+        let after = content[offset + name.len()..].chars().next();
+        !before.is_some_and(|ch| ch.is_alphanumeric() || ch == '_')
+            && !after.is_some_and(|ch| ch.is_alphanumeric() || ch == '_')
+    })
+}
+
 fn attach_migrations(root: &Path, analysis: &mut OrmAnalysis) {
     let model_tables: BTreeMap<String, String> = analysis
         .models
@@ -577,13 +646,18 @@ fn attach_migrations(root: &Path, analysis: &mut OrmAnalysis) {
         for column in &mut analysis.columns {
             let found_table = model_tables
                 .values()
-                .any(|table| table == &column.table && content.contains(table));
+                .any(|table| table == &column.table && contains_identifier(&content, table));
             let sql_alter = found_table
                 && (content.contains("ADD COLUMN") || content.contains("add_column"))
-                && content.contains(&column.name);
+                && contains_identifier(&content, &column.name);
+            let found_django_model = model_tables.iter().any(|(model, table)| {
+                table == &column.table
+                    && (contains_identifier(&content, model)
+                        || contains_identifier(&content, table))
+            });
             let django_add = content.contains("AddField")
-                && content.contains(&column.name)
-                && model_tables.values().any(|table| table == &column.table);
+                && contains_identifier(&content, &column.name)
+                && found_django_model;
             if sql_alter || django_add {
                 let offset = content.find(&column.name).unwrap_or(0);
                 column.migration = Some(site(&path, line_of(&content, offset)));
@@ -694,12 +768,12 @@ pub fn scan_workspace_orm_models_with_report(
                     namespace,
                 )
             });
-        model_ids.insert(model.name.clone(), id.clone());
+        model_ids.insert((model.path.clone(), model.name.clone()), id.clone());
         table_ids.insert(
-            model.table.clone(),
+            (model.path.clone(), model.table.clone()),
             GraphNode::generate_id(&NodeType::Table, &model.path, &model.table, None, namespace),
         );
-        if graph.get_node(&id)?.is_none() {
+        if must_materialize(graph, &id)? {
             let mut node = GraphNode::new_in(
                 NodeType::Class,
                 model.name.clone(),
@@ -716,8 +790,8 @@ pub fn scan_workspace_orm_models_with_report(
             })];
             nodes.push(node);
         }
-        let table_id = table_ids[&model.table].clone();
-        if graph.get_node(&table_id)?.is_none() {
+        let table_id = table_ids[&(model.path.clone(), model.table.clone())].clone();
+        if must_materialize(graph, &table_id)? {
             let mut node = GraphNode::new_in(
                 NodeType::Table,
                 model.table.clone(),
@@ -742,8 +816,15 @@ pub fn scan_workspace_orm_models_with_report(
             Some(column.line),
             namespace,
         );
-        column_ids.insert((column.table.clone(), column.name.clone()), id.clone());
-        if graph.get_node(&id)?.is_none() {
+        column_ids.insert(
+            (
+                column.path.clone(),
+                column.table.clone(),
+                column.name.clone(),
+            ),
+            id.clone(),
+        );
+        if must_materialize(graph, &id)? {
             let mut node = GraphNode::new_in(
                 NodeType::Column,
                 column.name.clone(),
@@ -765,13 +846,23 @@ pub fn scan_workspace_orm_models_with_report(
     for relation in &analysis.relations {
         let (from, to) = match relation.edge_type {
             EdgeType::MapsTo => (
-                model_ids.get(&relation.from).cloned(),
-                table_ids.get(&relation.to).cloned(),
+                model_ids
+                    .get(&(relation.site.path.clone(), relation.from.clone()))
+                    .cloned(),
+                table_ids
+                    .get(&(relation.site.path.clone(), relation.to.clone()))
+                    .cloned(),
             ),
             EdgeType::HasColumn => (
-                table_ids.get(&relation.from).cloned(),
+                table_ids
+                    .get(&(relation.site.path.clone(), relation.from.clone()))
+                    .cloned(),
                 column_ids
-                    .get(&(relation.from.clone(), relation.to.clone()))
+                    .get(&(
+                        relation.site.path.clone(),
+                        relation.from.clone(),
+                        relation.to.clone(),
+                    ))
                     .cloned(),
             ),
             _ => continue,

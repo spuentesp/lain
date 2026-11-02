@@ -355,3 +355,91 @@ fn prisma_and_sequelize_defaults_and_model_init_are_extracted() {
         "display_name"
     ));
 }
+
+#[test]
+fn rescan_preserves_orm_nodes_edges_and_well_formedness() {
+    let tmp = tempfile::tempdir().unwrap();
+    write(
+        tmp.path(),
+        "schema.prisma",
+        "model Product {\n  id Int @id\n  name String @map(\"display_name\")\n  @@map(\"products\")\n}\n",
+    );
+    let graph = GraphDatabase::new(&tmp.path().join("graph.bin")).unwrap();
+    let first = scan_workspace_orm_models(&graph, tmp.path(), &RepoNamespace::for_test()).unwrap();
+    let first_nodes = graph.node_count();
+    let first_edges = graph.all_edges().len();
+    let second = scan_workspace_orm_models(&graph, tmp.path(), &RepoNamespace::for_test()).unwrap();
+    assert_eq!(second, first, "{:#?}", graph.get_all_nodes());
+    assert_eq!(graph.node_count(), first_nodes);
+    assert_eq!(graph.all_edges().len(), first_edges);
+    graph.assert_well_formed();
+}
+
+#[test]
+fn nested_argument_parentheses_keep_literal_column_names() {
+    let tmp = tempfile::tempdir().unwrap();
+    write(
+        tmp.path(),
+        "models.py",
+        "from django.db import models\nclass Product(models.Model):\n    name = models.CharField(max_length=10, default=make_default(), db_column='display_name')\n    class Meta:\n        db_table = 'products'\nclass Price(Base):\n    __tablename__ = 'prices'\n    amount = Column(String(50), name='price_usd')\n",
+    );
+    write(
+        tmp.path(),
+        "src/Product.ts",
+        "@Entity({ name: 'products' })\nexport class Product {\n  @Column({ name: 'display_name', transformer: { to: value => value } })\n  name: string;\n}\n",
+    );
+    let analysis = analyze_orm_models(tmp.path());
+    assert!(relation(
+        &analysis,
+        EdgeType::HasColumn,
+        "products",
+        "display_name"
+    ));
+    assert!(relation(
+        &analysis,
+        EdgeType::HasColumn,
+        "prices",
+        "price_usd"
+    ));
+}
+
+#[test]
+fn migration_matching_prisma_comments_and_table_identity_are_precise() {
+    let tmp = tempfile::tempdir().unwrap();
+    write(
+        tmp.path(),
+        "schema.prisma",
+        "// the display label\nmodel Product {\n  id Int @id\n  name String\n  @@map(\"products\")\n}\n",
+    );
+    write(
+        tmp.path(),
+        "src/other.ts",
+        "export const products = pgTable('products', { id: serial('id') });\n",
+    );
+    write(
+        tmp.path(),
+        "shop/migrations/0001_other.py",
+        "from django.db import migrations\nclass Migration(migrations.Migration):\n    operations = [migrations.AddField(model_name='order', name='id', field=models.CharField(db_column='id'))]\n",
+    );
+    let analysis = analyze_orm_models(tmp.path());
+    assert!(!analysis.columns.iter().any(|column| column.name == "//"));
+    assert!(analysis
+        .columns
+        .iter()
+        .filter(|column| column.migration.is_some())
+        .all(|column| column.table == "products"));
+    let graph = GraphDatabase::new(&tmp.path().join("graph.bin")).unwrap();
+    scan_workspace_orm_models(&graph, tmp.path(), &RepoNamespace::for_test()).unwrap();
+    let tables: Vec<_> = graph
+        .get_nodes_by_type(NodeType::Table)
+        .unwrap()
+        .into_iter()
+        .filter(|node| node.name == "products")
+        .collect();
+    assert_eq!(tables.len(), 2, "{tables:#?}");
+    assert!(graph
+        .all_edges()
+        .iter()
+        .filter(|edge| edge.edge_type == EdgeType::MapsTo)
+        .all(|edge| tables.iter().any(|table| table.id == edge.target_id)));
+}
