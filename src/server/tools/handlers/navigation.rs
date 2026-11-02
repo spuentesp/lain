@@ -10,11 +10,24 @@ use crate::server::tools::{UiSession, UiSessionData};
 use std::collections::{HashMap, HashSet, VecDeque};
 use uuid::Uuid;
 
+pub struct DependencyReport {
+    pub text: String,
+    pub nodes: Vec<GraphNode>,
+}
+
 pub fn trace_dependency(
     graph: &GraphDatabase,
     overlay: &VolatileOverlay,
     symbol: &str,
 ) -> Result<String, LainError> {
+    trace_dependency_report(graph, overlay, symbol).map(|report| report.text)
+}
+
+pub fn trace_dependency_report(
+    graph: &GraphDatabase,
+    overlay: &VolatileOverlay,
+    symbol: &str,
+) -> Result<DependencyReport, LainError> {
     // 1. Resolve handle
     let start_node = resolve_node(graph, overlay, symbol)?;
     let start_id = start_node.id.clone();
@@ -70,7 +83,7 @@ pub fn trace_dependency(
         }
     }
 
-    Ok(format!(
+    let text = format!(
         "Found {} dependency nodes in Merged Brain:\n{}",
         results.len(),
         results
@@ -78,7 +91,11 @@ pub fn trace_dependency(
             .map(|n| format!("- {} ({:?})", n.name, n.node_type))
             .collect::<Vec<_>>()
             .join("\n")
-    ))
+    );
+    Ok(DependencyReport {
+        text,
+        nodes: results,
+    })
 }
 
 pub async fn get_call_chain(

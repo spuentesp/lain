@@ -95,9 +95,23 @@
         "path":   { "type": "string" },
         "line":   { "type": "integer" },
         "text":   { "type": "string" },
-        "dirty":  { "type": "boolean" }
+        "dirty":  { "type": "boolean" },
+        "handlers": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/Handler" }
+        }
       },
       "required": ["id", "repo", "commit", "path", "line", "text"]
+    },
+    "Handler": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repo": { "type": "string" },
+        "file": { "type": "string" },
+        "symbol": { "type": "string" }
+      },
+      "required": ["repo", "file", "symbol"]
     },
     "Provenance": {
       "type": "object",

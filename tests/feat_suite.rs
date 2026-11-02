@@ -216,6 +216,7 @@ fn boot_server(
         // enumerate the *wire surface* of the server, which the
         // Semantic profile (default since PR #63) also filters down.
         .env("LAIN_TOOL_PROFILE", "full")
+        .env("LAIN_MODEL_DIR", project.path().join("empty-models"))
         .env_remove("LAIN_EMBEDDING_MODEL")
         .stdout(Stdio::null())
         .stderr(Stdio::from(stderr_file))

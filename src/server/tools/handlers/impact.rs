@@ -85,6 +85,60 @@ pub async fn get_blast_radius(
     include_weak_edges: bool,
     ui_sessions: crate::server::tools::UiLink<'_>,
 ) -> Result<String, LainError> {
+    get_blast_radius_scoped(
+        graph,
+        overlay,
+        workspace,
+        symbol,
+        include_coupling,
+        include_weak_edges,
+        ui_sessions,
+        false,
+    )
+    .await
+}
+
+pub struct BlastRadiusReport {
+    pub text: String,
+    pub nodes: Vec<BlastRadiusNode>,
+    pub heuristic_count: usize,
+    pub co_change_partners: Vec<(String, usize)>,
+}
+
+pub async fn get_blast_radius_scoped(
+    graph: &GraphDatabase,
+    overlay: &VolatileOverlay,
+    workspace: &std::path::Path,
+    symbol: &str,
+    include_coupling: bool,
+    include_weak_edges: bool,
+    ui_sessions: crate::server::tools::UiLink<'_>,
+    historical: bool,
+) -> Result<String, LainError> {
+    get_blast_radius_report_scoped(
+        graph,
+        overlay,
+        workspace,
+        symbol,
+        include_coupling,
+        include_weak_edges,
+        ui_sessions,
+        historical,
+    )
+    .await
+    .map(|report| report.text)
+}
+
+pub async fn get_blast_radius_report_scoped(
+    graph: &GraphDatabase,
+    overlay: &VolatileOverlay,
+    workspace: &std::path::Path,
+    symbol: &str,
+    include_coupling: bool,
+    include_weak_edges: bool,
+    ui_sessions: crate::server::tools::UiLink<'_>,
+    historical: bool,
+) -> Result<BlastRadiusReport, LainError> {
     let (node, other_defs) =
         crate::server::tools::utils::resolve_node_ambiguous(graph, overlay, symbol)?;
 
@@ -98,11 +152,13 @@ pub async fn get_blast_radius(
     // last scan is. Emit the same precise per-file warning the other handlers
     // use (explain_symbol / get_call_sites), and say nothing when the file
     // backing this answer is unchanged since it was indexed.
-    let file_freshness = graph.freshness(workspace, &node.path);
-    if let crate::graph::Freshness::Dirty { .. } = file_freshness {
-        if let Some(note) = file_freshness.note(&node.path) {
-            output.push_str(&note);
-            output.push('\n');
+    if !historical {
+        let file_freshness = graph.freshness(workspace, &node.path);
+        if let crate::graph::Freshness::Dirty { .. } = file_freshness {
+            if let Some(note) = file_freshness.note(&node.path) {
+                output.push_str(&note);
+                output.push('\n');
+            }
         }
     }
     output.push_str(&format!(
@@ -184,6 +240,7 @@ pub async fn get_blast_radius(
                 // the `[depth N]` tags in the text report.
                 depth: depth + 1,
                 is_direct,
+                is_heuristic,
             });
 
             // Confidence: LSP sync = high confidence, tree-sitter only = fallback
@@ -358,13 +415,15 @@ pub async fn get_blast_radius(
         ));
     }
 
-    if include_coupling {
-        let partners = graph.get_co_change_partners(&node.path)?;
-        if !partners.is_empty() {
-            output.push_str("\n\nCoupled Files (Git Co-Changes):\n");
-            for (p, c) in partners.iter().take(5) {
-                output.push_str(&format!("- {} (changed together {} times)\n", p, c));
-            }
+    let co_change_partners = if include_coupling {
+        graph.get_co_change_partners(&node.path)?
+    } else {
+        Vec::new()
+    };
+    if !co_change_partners.is_empty() {
+        output.push_str("\n\nCoupled Files (Git Co-Changes):\n");
+        for (p, c) in co_change_partners.iter().take(5) {
+            output.push_str(&format!("- {} (changed together {} times)\n", p, c));
         }
     }
 
@@ -372,7 +431,7 @@ pub async fn get_blast_radius(
     if let Some((sessions, port, ttl)) = ui_sessions {
         let data = UiSessionData::BlastRadius {
             symbol: symbol.to_string(),
-            nodes: session_nodes,
+            nodes: session_nodes.clone(),
         };
         store_ui_session_and_append_link(
             sessions,
@@ -388,7 +447,12 @@ pub async fn get_blast_radius(
             .push_str("\nClick nodes to mark approved, then describe your selection to the agent.");
     }
 
-    Ok(output)
+    Ok(BlastRadiusReport {
+        text: output,
+        nodes: session_nodes,
+        heuristic_count: heuristic_caller_count as usize,
+        co_change_partners,
+    })
 }
 
 pub async fn get_coupling_radar(

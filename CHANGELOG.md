@@ -5,6 +5,15 @@ All notable changes to LAIN are documented here. Versions follow
 
 ## Unreleased
 
+- Bind raw graph and code reads to named snapshots, with errors instead of live fallback when a snapshot or repo is unavailable.
+- Add schema-valid structured output to raw analysis tools and `search_code`, preserve their text output, and expose `get_contract` provider handlers as `{repo, file, symbol}`.
+- Include source locations and provenance in raw graph results, compose chained traversal paths, and add deterministic cursor pagination.
+- Add first-class ORM model/table/column relations and migration evidence for Django, SQLAlchemy, Prisma, Drizzle, TypeORM, and Sequelize. `FEDERATION_GRAPH_VERSION` advances from 4 to 5; run `lain reindex` to back up and rebuild older graphs.
+- Add operation-scoped topic/GraphQL payload reads and frontend `Renders`, `Stores`, `Forwards`, and `Discards` relations, keeping dynamic or ambiguous lineage explicitly unresolved.
+- Preserve OpenTelemetry resource and scope identity, and report relation, emitter, and snapshot readiness through `get_capabilities`.
+
+## [0.14.0] - 2026-10-30
+
 - Allow exact consumer `site` selectors in confirmed mappings, so repeated RPC calls within one symbol can target different services. Existing selectors remain supported.
 - Use the existing LSP pool for bounded live Rust RPC method-definition evidence, including closure receivers; snapshots retain revision-pinned syntax inference and explicit coverage gaps. Advance the contract analyzer cache revision to 8; graph persistence is unchanged.
 - Reuse the document the language server already has open for identity requests: a file is opened once and re-announced only when its content changes, instead of being reopened on every probe. After a language server dies and is restarted, the document is opened again — a change notification alone is dropped by a server that never received the matching open.

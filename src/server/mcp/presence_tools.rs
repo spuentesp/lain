@@ -1346,7 +1346,8 @@ fn symbol_weight(kind: &NodeType) -> u32 {
         // symbol-overlap perspective too — a single table reference
         // is rarely co-edited by two agents, so weight 1 is the
         // same bucket as the other contract-federation leaves.
-        | NodeType::Table => 1,
+        | NodeType::Table
+        | NodeType::Column => 1,
     }
 }
 

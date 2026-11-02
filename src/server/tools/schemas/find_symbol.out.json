@@ -1,0 +1,26 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["symbols", "count", "ambiguous"],
+  "properties": {
+    "symbols": {"type": "array", "items": {"$ref": "#/$defs/node"}},
+    "count": {"type": "integer", "minimum": 0},
+    "ambiguous": {"type": "boolean"}
+  },
+  "$defs": {
+    "node": {
+      "type": "object",
+      "required": ["id", "type", "name", "path"],
+      "properties": {
+        "id": {"type": "string"},
+        "type": {"type": "string"},
+        "name": {"type": "string"},
+        "path": {"type": "string"},
+        "line_start": {"type": ["integer", "null"]},
+        "line_end": {"type": ["integer", "null"]},
+        "commit": {"type": ["string", "null"]},
+        "repo_id": {"type": ["string", "null"]}
+      }
+    }
+  }
+}

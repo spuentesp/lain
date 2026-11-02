@@ -655,6 +655,34 @@ pub fn explain_symbol(
     occupancy: &CoordinationProxy,
     symbol: &str,
 ) -> Result<String, LainError> {
+    explain_symbol_scoped(workspace, graph, overlay, occupancy, symbol, None)
+}
+
+pub struct ExplainSymbolReport {
+    pub text: String,
+    pub structured: serde_json::Value,
+}
+
+pub fn explain_symbol_scoped(
+    workspace: &std::path::Path,
+    graph: &GraphDatabase,
+    overlay: &VolatileOverlay,
+    occupancy: &CoordinationProxy,
+    symbol: &str,
+    snapshot: Option<(&crate::server::tools::registry::SnapshotToolContext, &str)>,
+) -> Result<String, LainError> {
+    explain_symbol_report_scoped(workspace, graph, overlay, occupancy, symbol, snapshot)
+        .map(|report| report.text)
+}
+
+pub fn explain_symbol_report_scoped(
+    workspace: &std::path::Path,
+    graph: &GraphDatabase,
+    overlay: &VolatileOverlay,
+    occupancy: &CoordinationProxy,
+    symbol: &str,
+    snapshot: Option<(&crate::server::tools::registry::SnapshotToolContext, &str)>,
+) -> Result<ExplainSymbolReport, LainError> {
     let (node, other_defs) =
         crate::server::tools::utils::resolve_node_ambiguous(graph, overlay, symbol)?;
 
@@ -667,11 +695,10 @@ pub fn explain_symbol(
         "## Explanation for '{}' ({:?})",
         symbol, node.node_type
     ));
-    // Scoped to the file this answer is about. The index is commit-driven, so
-    // a file edited and not yet committed is invisible to it — the reader needs
-    // to know that here, not from a separate health call they will not make.
-    if let Some(note) = graph.freshness(workspace, &node.path).note(&node.path) {
-        lines.push(note);
+    if snapshot.is_none() {
+        if let Some(note) = graph.freshness(workspace, &node.path).note(&node.path) {
+            lines.push(note);
+        }
     }
     lines.push(format!("**Path:** {}", node.path));
 
@@ -683,14 +710,24 @@ pub fn explain_symbol(
         lines.push(format!("**Documentation:**\n{}", doc));
     }
 
-    // Show the actual code so the user can see what the symbol looks
-    // like, not just metadata about it. Single-user value: a developer
-    // asking "what is this?" wants the implementation, not path + score.
-    if let Some(excerpt) = read_body_summary(&node, 200, workspace) {
+    let excerpt = if let Some((snapshot, repo)) = snapshot {
+        let repo = snapshot
+            .repo_for_node(&node)
+            .unwrap_or_else(|_| repo.to_string());
+        snapshot
+            .read_source(&repo, &node.path)
+            .ok()
+            .and_then(|text| {
+                crate::server::tools::utils::read_body_summary_from_text(&node, 200, &text)
+            })
+    } else {
+        read_body_summary(&node, 200, workspace)
+    };
+    if let Some(excerpt) = excerpt.as_ref() {
         lines.push(String::new());
         lines.push("### Source".to_string());
         lines.push("```".to_string());
-        lines.push(excerpt);
+        lines.push(excerpt.clone());
         lines.push("```".to_string());
     }
 
@@ -839,7 +876,31 @@ pub fn explain_symbol(
         }
     }
 
-    Ok(lines.join("\n"))
+    let callers: Vec<serde_json::Value> = incoming
+        .iter()
+        .filter_map(|edge| graph.get_node(&edge.source_id).ok().flatten())
+        .map(|node| serde_json::json!(node))
+        .collect();
+    let callees: Vec<serde_json::Value> = outgoing
+        .iter()
+        .filter_map(|edge| graph.get_node(&edge.target_id).ok().flatten())
+        .map(|node| serde_json::json!(node))
+        .collect();
+    let coupling: Vec<serde_json::Value> = partners
+        .iter()
+        .map(|(path, count)| serde_json::json!({"path": path, "count": count}))
+        .collect();
+    Ok(ExplainSymbolReport {
+        text: lines.join("\n"),
+        structured: serde_json::json!({
+            "symbol": node,
+            "ambiguous": !other_defs.is_empty(),
+            "source": excerpt,
+            "callers": callers,
+            "callees": callees,
+            "co_change_partners": coupling,
+        }),
+    })
 }
 
 pub fn suggest_refactor_targets(

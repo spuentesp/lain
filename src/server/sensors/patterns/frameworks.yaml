@@ -747,3 +747,32 @@ django_orm:
     - get_or_create
     - update_or_create
 
+orm_models:
+  patterns:
+    django_class: '(?m)^class\s+(\w+)\([^\)]*\):[ \t]*$'
+    django_table: 'db_table\s*=\s*[''"'']([^''""]+)[''"'']'
+    django_field: '(?m)^\s*(\w+)\s*=\s*models\.\w+Field\(([^\)]*)\)'
+    django_column: 'db_column\s*=\s*[''"'']([^''""]+)[''"'']'
+    sqlalchemy_class: '(?m)^class\s+(\w+)\([^\)]*\):[ \t]*$'
+    sqlalchemy_table: '__tablename__\s*=\s*[''"'']([^''""]+)[''"'']'
+    sqlalchemy_field: '(?m)^\s*(\w+)\s*=\s*Column\(([^\)]*)\)'
+    sqlalchemy_column: '[''"'']([^''""]+)[''"'']'
+    prisma_model: 'model\s+(\w+)\s*\{([\s\S]*?)\}'
+    prisma_table: '@@map\(\"([^\"]+)\"\)'
+    prisma_column: '@map\(\"([^\"]+)\"\)'
+    drizzle_table: '(?:const|let|var)\s+(\w+)\s*=\s*(?:pgTable|mysqlTable|sqliteTable)\(\s*[''"'']([^''""]+)[''"'']\s*,\s*\{([\s\S]*?)\}\s*\)'
+    drizzle_column: '(?m)^\s*(\w+)\s*:\s*\w+\(\s*[''"'']([^''""]+)[''"'']'
+    typeorm_entity: '@Entity\(([^\)]*)\)\s*export\s+class\s+(\w+)'
+    typeorm_name: 'name\s*:\s*[''"'']([^''""]+)[''"'']'
+    typeorm_column: '@Column\(([^\)]*)\)\s*(\w+)'
+    sequelize_define: 'sequelize\.define\(\s*[''"''](\w+)[''"'']\s*,\s*\{'
+    sequelize_init: '(?m)(\w+)\.init\(\s*\{'
+    sequelize_table: 'tableName\s*:\s*[''"'']([^''""]+)[''"'']'
+    sequelize_column: 'column\s*:\s*[''"'']([^''""]+)[''"'']'
+    sequelize_property: '(?m)^\s*(\w+)\s*:\s*\{'
+
+
+frontend_values:
+  patterns:
+    storage_call: '^(?:localStorage|sessionStorage)\.setItem$'
+    state_setter: '^set[A-Z_]'

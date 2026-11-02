@@ -212,15 +212,16 @@ JSON, not emitted as `null`.
 
 | Field | Description |
 |-------|-------------|
-| `nodes` | Matched nodes (`id`, `type`, `name`, and `label` — `deprecated`, `test`, or another attribute-derived label; the field is omitted when the node carries none). Omitted when empty |
+| `nodes` | Matched nodes (`id`, `type`, `name`, and `label` — `deprecated`, `test`, or another attribute-derived label; the field is omitted when the node carries none). Also includes `path` and optional `line_start`, `line_end`, `commit`, and `repo_id`. Omitted when empty |
 | `count` | Number of nodes returned, after `limit` or the default cap |
 | `legacy` | `true` when the result came from a `named` query |
 | `meta.exec_us`, `meta.nodes_visited` | Always present |
-| `meta.truncated`, `meta.matched_before_limit` | Only when the default cap trimmed the result |
+| `meta.truncated`, `meta.matched_before_limit` | Only when the default cap or top-level paging trimmed the result |
+| `meta.next_cursor` | Opaque cursor for the next page; present exactly when more results remain |
 | `groups` | Only after a `group` op: `{ key, count, nodes }` entries. Omitted otherwise |
 | `occupancy` | Active agents in this workspace and the files each has claimed (`active_agents: []` when none registered). Added by the tool handler, not the executor |
-| `edges` | The deduplicated union of the `paths` edges — the edges walked to reach the reported nodes (`{ id, type, from, to }`, sorted by `from`, `to`, `type`). Only when the reported nodes came from a `connect`; see [Edges and paths](#edges-and-paths). Omitted when empty |
-| `paths` | One selected shortest path per reported node, parallel to `nodes` (seed first). Only when the reported nodes came from a `connect`; see [Edges and paths](#edges-and-paths). Omitted when empty |
+| `edges` | The deduplicated union of the `paths` edges — the edges walked to reach the reported nodes (`{ id, type, from, to }`, sorted by `from`, `to`, `type`). Also includes optional `provenance`, `confidence`, `site`, and `detail`. Only when the reported nodes came from a `connect`; see [Edges and paths](#edges-and-paths). Omitted when empty |
+| `paths` | One selected shortest composed path per reported node, parallel to `nodes` (seed first). Only when the reported nodes came from a `connect`; see [Edges and paths](#edges-and-paths). Omitted when empty |
 
 `meta.plan` has been removed from `QueryMeta` — it never appeared on the
 wire (always `None`), so only the Rust type changes.
@@ -277,10 +278,33 @@ arrays are omitted from the JSON).
   is its `{from}->{to}:{type}` key. Transit edges of intermediate nodes are
   included even when those nodes are not reported themselves; edges of
   unselected alternative routes are not.
-- Paths come from the `connect` step that produced the node; chained
-  `connect` steps do not compose paths across steps.
+- Paths compose across chained `connect` steps: the original seed stays
+  first, every hop appears once, and each step appends its segment without
+  duplicating the boundary node. A later `find` starts a new path.
 - `meta.truncated` (or a `limit` op) trims `nodes`, and `edges`/`paths`
   follow exactly the nodes that were reported.
+
+### Top-level cursor pagination
+
+Set `limit` and optionally `cursor` beside `ops` to page the final result.
+These fields are distinct from the existing `{"op":"limit"}` pipeline
+operation, which keeps its original behavior. Paged results are ordered by
+name and then id. A page returns `meta.next_cursor` only when another page
+exists; pass that value unchanged as the next request's `cursor`.
+
+```json
+{
+  "ops": [{"op": "find", "type": "Function"}],
+  "limit": 100,
+  "cursor": "q1_..."
+}
+```
+
+The cursor is an opaque, hex-encoded payload bound to the canonical query
+(with `cursor` removed) and the last returned node id. Malformed cursors,
+cursors from another query, and anchors absent from the result are errors.
+`limit: 0` disables the page cap. Existing unpaged queries retain their
+current ordering and default-cap behavior.
 
 ---
 

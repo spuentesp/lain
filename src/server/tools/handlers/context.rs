@@ -169,50 +169,63 @@ pub fn get_code_snippet(
     line: Option<u32>,
     context_lines: Option<usize>,
 ) -> Result<String, LainError> {
-    // `line` is 1-based, as shown in every tool's output; graph ranges are
-    // 0-based. Mixing them showed the blank line above a symbol and cut
-    // its last line off.
+    get_code_snippet_scoped(graph, overlay, workspace, path, line, context_lines, None)
+}
+
+pub fn get_code_snippet_scoped(
+    graph: &GraphDatabase,
+    overlay: &VolatileOverlay,
+    workspace: &std::path::Path,
+    path: &str,
+    line: Option<u32>,
+    context_lines: Option<usize>,
+    snapshot: Option<(&crate::server::tools::registry::SnapshotToolContext, &str)>,
+) -> Result<String, LainError> {
     let line_num = line.unwrap_or(1).max(1) as usize;
-    let disk_path = resolve_against_workspace(workspace, path)?;
-    // Around a symbol, context is added only when asked for.
     let around = context_lines.unwrap_or(0);
     let symbol_range = |ls: u32, le: u32| {
         let first = (ls as usize + 1).saturating_sub(around).max(1);
         (first, le as usize + 1 + around)
     };
+    let key = if snapshot.is_some() {
+        path.to_string()
+    } else {
+        let disk_path = resolve_against_workspace(workspace, path)?;
+        crate::server::graph::graph_path(workspace, std::path::Path::new(&disk_path))
+    };
+    let read = |first, last| read_file_range_scoped(workspace, path, first, last, snapshot);
 
-    // Try overlay first
     if let Some(node) = overlay.get_node(path) {
         if let (Some(ls), Some(le)) = (node.line_start, node.line_end) {
             let (first, last) = symbol_range(ls, le);
-            return read_file_range(&disk_path, first, last);
+            return read(first, last);
         }
     }
-
-    // Fall back to graph, keyed by the repo-relative path: `./pkg/a.py`
-    // and the absolute spelling missed the symbol lookup that `pkg/a.py`
-    // got, and showed a different range.
-    let key = crate::server::graph::graph_path(workspace, std::path::Path::new(&disk_path));
     if let Some(node) = graph.get_node_at_location(&key, line_num as u32 - 1) {
         if let (Some(ls), Some(le)) = (node.line_start, node.line_end) {
             let (first, last) = symbol_range(ls, le);
-            return read_file_range(&disk_path, first, last);
+            return read(first, last);
         }
     }
-
-    // Just read the file with context around the line
     let ctx = context_lines.unwrap_or(10);
-    read_file_range(
-        &disk_path,
-        line_num.saturating_sub(ctx).max(1),
-        line_num + ctx,
-    )
+    read(line_num.saturating_sub(ctx).max(1), line_num + ctx)
 }
 
-/// Lines `first..=last` (1-based, clamped to the file) with their numbers.
-fn read_file_range(path: &str, first: usize, last: usize) -> Result<String, LainError> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| LainError::NotFound(format!("Path not found: {path} ({e})")))?;
+fn read_file_range_scoped(
+    workspace: &std::path::Path,
+    path: &str,
+    first: usize,
+    last: usize,
+    snapshot: Option<(&crate::server::tools::registry::SnapshotToolContext, &str)>,
+) -> Result<String, LainError> {
+    let (display_path, content) = if let Some((snapshot, repo)) = snapshot {
+        (path.to_string(), snapshot.read_source(repo, path)?)
+    } else {
+        let disk_path = resolve_against_workspace(workspace, path)?;
+        let content = std::fs::read_to_string(&disk_path)
+            .map_err(|e| LainError::NotFound(format!("Path not found: {disk_path} ({e})")))?;
+        (disk_path, content)
+    };
     let lines: Vec<&str> = content.lines().collect();
     let first = first.max(1);
     let last = last.min(lines.len());
@@ -235,7 +248,7 @@ fn read_file_range(path: &str, first: usize, last: usize) -> Result<String, Lain
         .collect();
     Ok(format!(
         "File: {}\nShowing lines {}-{}\n\n{}\n",
-        path,
+        display_path,
         first,
         last,
         snippet.join("\n")
@@ -248,10 +261,46 @@ pub fn get_call_sites(
     overlay: &VolatileOverlay,
     symbol: &str,
 ) -> Result<String, LainError> {
+    get_call_sites_scoped(workspace, graph, overlay, symbol, None)
+}
+
+pub struct CallSiteEntry {
+    pub caller: crate::schema::GraphNode,
+    pub lines: Vec<usize>,
+}
+
+pub struct CallSitesReport {
+    pub text: String,
+    pub target: crate::schema::GraphNode,
+    pub other_definitions: Vec<crate::schema::GraphNode>,
+    pub sites: Vec<CallSiteEntry>,
+    pub total_sites: usize,
+}
+
+pub fn get_call_sites_scoped(
+    workspace: &std::path::Path,
+    graph: &GraphDatabase,
+    overlay: &VolatileOverlay,
+    symbol: &str,
+    snapshot: Option<(&crate::server::tools::registry::SnapshotToolContext, &str)>,
+) -> Result<String, LainError> {
+    get_call_sites_report_scoped(workspace, graph, overlay, symbol, snapshot)
+        .map(|report| report.text)
+}
+
+pub fn get_call_sites_report_scoped(
+    workspace: &std::path::Path,
+    graph: &GraphDatabase,
+    overlay: &VolatileOverlay,
+    symbol: &str,
+    snapshot: Option<(&crate::server::tools::registry::SnapshotToolContext, &str)>,
+) -> Result<CallSitesReport, LainError> {
     let (node, other_defs) =
         crate::server::tools::utils::resolve_node_ambiguous(graph, overlay, symbol)?;
     let amb = crate::server::tools::utils::ambiguity_note(&node, &other_defs);
-    let freshness = graph.freshness(workspace, &node.path);
+    let freshness = snapshot
+        .is_none()
+        .then(|| graph.freshness(workspace, &node.path));
     let target_id = &node.id;
 
     // Find all callers (edges of type Calls pointing to this node)
@@ -265,17 +314,24 @@ pub fn get_call_sites(
     if callers.is_empty() {
         // A leaf really has no callers; a stale file only looks like one. These
         // read identically to a caller acting on the answer, so distinguish them.
-        return Ok(match freshness.note(&node.path) {
+        let text = match freshness.as_ref().and_then(|f| f.note(&node.path)) {
             Some(note) => format!(
                 "{amb}{note}\nNo call sites found for '{symbol}' in the graph — \
                  callers added since the last index would not appear."
             ),
             None => format!("{amb}No call sites found for '{symbol}' ({symbol} is a leaf)"),
+        };
+        return Ok(CallSitesReport {
+            text,
+            target: node,
+            other_definitions: other_defs,
+            sites: Vec::new(),
+            total_sites: 0,
         });
     }
 
     let mut result = amb.clone();
-    if let Some(note) = freshness.note(&node.path) {
+    if let Some(note) = freshness.as_ref().and_then(|f| f.note(&node.path)) {
         result.push_str(&note);
         result.push('\n');
     }
@@ -295,7 +351,12 @@ pub fn get_call_sites(
             .find_nodes_by_name(&caller.name)
             .into_iter()
             .find(|o| o.path == caller.path && o.node_type == caller.node_type);
-        let sites = call_lines_in(workspace, current.as_ref().unwrap_or(caller), &node.name);
+        let sites = call_lines_in_scoped(
+            workspace,
+            current.as_ref().unwrap_or(caller),
+            &node.name,
+            snapshot,
+        );
         total_sites += sites.len();
         lines_by_caller.push((caller, sites));
     }
@@ -316,7 +377,7 @@ pub fn get_call_sites(
     };
     result.push_str(&heading);
 
-    for (caller, sites) in lines_by_caller {
+    for (caller, sites) in &lines_by_caller {
         if sites.is_empty() {
             // Nothing matched textually — the file may have moved on
             // since indexing. Fall back to the enclosing function and
@@ -345,7 +406,20 @@ pub fn get_call_sites(
         }
     }
 
-    Ok(result)
+    let sites = lines_by_caller
+        .into_iter()
+        .map(|(caller, lines)| CallSiteEntry {
+            caller: caller.clone(),
+            lines,
+        })
+        .collect();
+    Ok(CallSitesReport {
+        text: result,
+        target: node,
+        other_definitions: other_defs,
+        sites,
+        total_sites,
+    })
 }
 
 /// 1-based line numbers inside `caller`'s body where `callee` appears as
@@ -354,20 +428,41 @@ pub fn get_call_sites(
 /// `line_start` is used only to bound the scan and is treated as
 /// advisory: it has been observed one off from the definition line, so
 /// the range is widened by one rather than trusted exactly.
+#[cfg(test)]
 fn call_lines_in(
     workspace: &std::path::Path,
     caller: &crate::schema::GraphNode,
     callee: &str,
 ) -> Vec<usize> {
+    call_lines_in_scoped(workspace, caller, callee, None)
+}
+
+pub(crate) fn call_lines_in_scoped(
+    workspace: &std::path::Path,
+    caller: &crate::schema::GraphNode,
+    callee: &str,
+    snapshot: Option<(&crate::server::tools::registry::SnapshotToolContext, &str)>,
+) -> Vec<usize> {
     if callee.is_empty() {
         return Vec::new();
     }
-    let path = workspace.join(&caller.path);
-    if !crate::server::path_util::resolves_inside(workspace, &path) {
-        return Vec::new();
-    }
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return Vec::new();
+    let text = if let Some((snapshot, repo)) = snapshot {
+        let repo = snapshot
+            .repo_for_node(caller)
+            .unwrap_or_else(|_| repo.to_string());
+        match snapshot.read_source(&repo, &caller.path) {
+            Ok(text) => text,
+            Err(_) => return Vec::new(),
+        }
+    } else {
+        let path = workspace.join(&caller.path);
+        if !crate::server::path_util::resolves_inside(workspace, &path) {
+            return Vec::new();
+        }
+        match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(_) => return Vec::new(),
+        }
     };
     let (lo, hi) = match (caller.line_start, caller.line_end) {
         // Graph ranges are 0-based and inclusive; `lineno` below is 1-based.

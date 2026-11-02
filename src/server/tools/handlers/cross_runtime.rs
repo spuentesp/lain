@@ -15,11 +15,27 @@ use crate::schema::EdgeType;
 /// this surface resolves names — but this one looked up the id directly,
 /// so passing the documented thing returned `Node <name> not found`.
 /// `resolve_node` handles id, name, and path alike.
+pub struct CrossRuntimeReport {
+    pub text: String,
+    pub target: crate::schema::GraphNode,
+    pub http_routes: Vec<crate::schema::GraphNode>,
+    pub rpc_services: Vec<crate::schema::GraphNode>,
+    pub graphql_resolvers: Vec<crate::schema::GraphNode>,
+}
+
 pub fn get_cross_runtime_callers(
     graph: &GraphDatabase,
     overlay: &VolatileOverlay,
     node_id: &str,
 ) -> Result<String, LainError> {
+    get_cross_runtime_report(graph, overlay, node_id).map(|report| report.text)
+}
+
+pub fn get_cross_runtime_report(
+    graph: &GraphDatabase,
+    overlay: &VolatileOverlay,
+    node_id: &str,
+) -> Result<CrossRuntimeReport, LainError> {
     let node = crate::server::tools::utils::resolve_node(graph, overlay, node_id)?;
     let node_id = node.id.as_str();
 
@@ -65,7 +81,7 @@ pub fn get_cross_runtime_callers(
             );
         }
     } else {
-        for edge in http_incoming {
+        for edge in &http_incoming {
             if let Ok(Some(n)) = graph.get_node(&edge.source_id) {
                 output.push_str(&format!("- **{}** ({})\n", n.name, n.path));
             }
@@ -85,7 +101,7 @@ pub fn get_cross_runtime_callers(
             );
         }
     } else {
-        for edge in grpc_incoming {
+        for edge in &grpc_incoming {
             if let Ok(Some(n)) = graph.get_node(&edge.source_id) {
                 output.push_str(&format!("- **{}** ({})\n", n.name, n.path));
             }
@@ -97,14 +113,26 @@ pub fn get_cross_runtime_callers(
     if gql_incoming.is_empty() {
         output.push_str("- No GraphQL fields use this resolver\n");
     } else {
-        for edge in gql_incoming {
+        for edge in &gql_incoming {
             if let Ok(Some(n)) = graph.get_node(&edge.source_id) {
                 output.push_str(&format!("- **{}** ({})\n", n.name, n.path));
             }
         }
     }
 
-    Ok(output)
+    let nodes = |edges: &[crate::schema::GraphEdge]| {
+        edges
+            .iter()
+            .filter_map(|edge| graph.get_node(&edge.source_id).ok().flatten())
+            .collect::<Vec<_>>()
+    };
+    Ok(CrossRuntimeReport {
+        text: output,
+        target: node,
+        http_routes: nodes(&http_incoming),
+        rpc_services: nodes(&grpc_incoming),
+        graphql_resolvers: nodes(&gql_incoming),
+    })
 }
 #[cfg(test)]
 mod blind_spot_tests {

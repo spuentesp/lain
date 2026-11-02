@@ -36,6 +36,12 @@ pub struct QuerySpec {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub named: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
 }
 
 impl QuerySpec {
@@ -44,6 +50,8 @@ impl QuerySpec {
             ops,
             mode: QueryMode::Auto,
             named: None,
+            cursor: None,
+            limit: None,
         }
     }
 
@@ -859,6 +867,32 @@ pub struct GraphNodeRef {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line_start: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line_end: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo_id: Option<String>,
+}
+
+impl From<&crate::schema::GraphNode> for GraphNodeRef {
+    fn from(node: &crate::schema::GraphNode) -> Self {
+        Self {
+            id: node.id.clone(),
+            node_type: node.node_type.to_string(),
+            name: node.name.clone(),
+            label: node.query_label().map(str::to_string),
+            path: Some(node.path.clone()),
+            line_start: node.line_start,
+            line_end: node.line_end,
+            commit: node.commit_hash.clone(),
+            repo_id: node.repo_id.clone(),
+        }
+    }
 }
 
 /// A reference to one graph edge on the wire. `id` is the
@@ -871,6 +905,33 @@ pub struct GraphEdgeRef {
     pub edge_type: String,
     pub from: String,
     pub to: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<crate::schema::EdgeProvenance>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub site: Option<crate::federation::contracts::model::SourceSite>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<crate::schema::EdgeDetail>,
+}
+
+impl From<&crate::schema::GraphEdge> for GraphEdgeRef {
+    fn from(edge: &crate::schema::GraphEdge) -> Self {
+        let confidence = match &edge.provenance {
+            Some(crate::schema::EdgeProvenance::Heuristic { confidence, .. }) => Some(*confidence),
+            _ => edge.weight,
+        };
+        Self {
+            id: format!("{}->{}:{}", edge.source_id, edge.target_id, edge.edge_type),
+            edge_type: edge.edge_type.to_string(),
+            from: edge.source_id.clone(),
+            to: edge.target_id.clone(),
+            provenance: edge.provenance.clone(),
+            confidence,
+            site: edge.site.clone(),
+            detail: edge.detail.clone(),
+        }
+    }
 }
 
 /// The selected shortest matching-edge path to one reported node: `nodes`
@@ -900,6 +961,8 @@ pub struct QueryMeta {
     /// present when `truncated` is set.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub matched_before_limit: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

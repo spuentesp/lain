@@ -1379,3 +1379,192 @@ fn test_connect_depth_is_up_to_and_target_filters() {
     })]));
     assert!(bogus.is_err());
 }
+
+#[test]
+fn raw_refs_preserve_node_locations_and_edge_provenance() {
+    let graph = make_test_graph();
+    let (embedder, cache) = make_test_executor_params();
+    let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
+    let seed = GraphNode::new(NodeType::Function, "seed".into(), "src/seed.rs".into());
+    let mut target = GraphNode::new(NodeType::Function, "target".into(), "src/orders.rs".into());
+    target.line_start = Some(4);
+    target.line_end = Some(8);
+    target.commit_hash = Some("deadbeef".into());
+    target.repo_id = Some("orders".into());
+    graph
+        .insert_nodes_batch(&[seed.clone(), target.clone()])
+        .unwrap();
+    let mut heuristic = GraphEdge::new(
+        EdgeType::DynamicDispatch,
+        seed.id.clone(),
+        target.id.clone(),
+    );
+    heuristic.provenance = Some(crate::schema::EdgeProvenance::Heuristic {
+        detector: "resolver".into(),
+        confidence: 0.9,
+    });
+    heuristic.weight = Some(0.9);
+    heuristic.site = Some(crate::federation::contracts::model::SourceSite {
+        path: "src/seed.rs".into(),
+        line: 42,
+    });
+    let confirmed = GraphEdge {
+        provenance: Some(crate::schema::EdgeProvenance::Confirmed {
+            source: "repos.yaml#bindings[0]".into(),
+        }),
+        ..GraphEdge::new(EdgeType::Binds, seed.id.clone(), target.id.clone())
+    };
+    let runtime = GraphEdge {
+        provenance: Some(crate::schema::EdgeProvenance::Runtime {
+            trace_id: "trace-1".into(),
+            last_seen_unix: 123,
+        }),
+        ..GraphEdge::new(EdgeType::RuntimeCall, seed.id.clone(), target.id.clone())
+    };
+    let legacy = GraphEdge {
+        provenance: None,
+        ..GraphEdge::new(EdgeType::Uses, seed.id.clone(), target.id.clone())
+    };
+    graph
+        .insert_edges_batch(&[heuristic, confirmed, runtime, legacy])
+        .unwrap();
+
+    let mut execute = |kind: &str| {
+        let result = exec
+            .execute(&QuerySpec::new(vec![
+                GraphOp::Find(FindOp::new().name("seed")),
+                GraphOp::Connect(ConnectOp {
+                    edge: EdgeSelector::Single(kind.into()),
+                    direction: Direction::Outgoing,
+                    depth: DepthSpec::Single(1),
+                    target: None,
+                }),
+            ]))
+            .unwrap();
+        serde_json::to_value(&result).unwrap()
+    };
+    let json = execute("Binds");
+    assert_eq!(json["nodes"][0]["path"], "src/orders.rs");
+    assert_eq!(json["nodes"][0]["line_start"], 4);
+    assert_eq!(json["nodes"][0]["line_end"], 8);
+    assert_eq!(json["nodes"][0]["commit"], "deadbeef");
+    assert_eq!(json["nodes"][0]["repo_id"], "orders");
+    let mut edge = |kind: &str| execute(kind)["edges"][0].clone();
+    assert_eq!(
+        edge("DynamicDispatch")["provenance"]["Heuristic"]["detector"],
+        "resolver"
+    );
+    assert!((edge("DynamicDispatch")["confidence"].as_f64().unwrap() - 0.9).abs() < 1e-6);
+    assert_eq!(edge("DynamicDispatch")["site"]["line"], 42);
+    assert_eq!(
+        edge("Binds")["provenance"]["Confirmed"]["source"],
+        "repos.yaml#bindings[0]"
+    );
+    assert_eq!(
+        edge("RuntimeCall")["provenance"]["Runtime"]["trace_id"],
+        "trace-1"
+    );
+    assert!(edge("Uses").get("provenance").is_none());
+}
+
+#[test]
+fn chained_connects_compose_the_full_path() {
+    let graph = make_test_graph();
+    let (embedder, cache) = make_test_executor_params();
+    let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
+    let connect = || {
+        GraphOp::Connect(ConnectOp {
+            edge: EdgeSelector::Single("Calls".into()),
+            direction: Direction::Outgoing,
+            depth: DepthSpec::Single(1),
+            target: None,
+        })
+    };
+    let result = exec
+        .execute(&QuerySpec::new(vec![
+            GraphOp::Find(FindOp::new().r#type("Function").name("main")),
+            connect(),
+            connect(),
+        ]))
+        .unwrap();
+    let path = result
+        .paths
+        .iter()
+        .find(|path| path.nodes.last().is_some_and(|node| node.name == "b"))
+        .expect("composed path to b");
+    let names: Vec<&str> = path.nodes.iter().map(|node| node.name.as_str()).collect();
+    assert_eq!(names, vec!["main", "a", "b"]);
+    assert_eq!(path.edges.len(), 2);
+}
+
+#[test]
+fn cursor_pages_are_deterministic_complete_and_query_bound() {
+    let graph = make_test_graph();
+    let (embedder, cache) = make_test_executor_params();
+    let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
+    let find = || GraphOp::Find(FindOp::new().r#type("Function"));
+    let mut first = exec
+        .execute(&QuerySpec {
+            ops: vec![find()],
+            limit: Some(2),
+            ..QuerySpec::default()
+        })
+        .unwrap();
+    assert_eq!(first.count, 2);
+    let names = |result: &QueryResult| {
+        result
+            .nodes
+            .iter()
+            .map(|node| node.name.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(names(&first), vec!["a", "b"]);
+    let cursor = first
+        .meta
+        .as_ref()
+        .unwrap()
+        .next_cursor
+        .clone()
+        .expect("next page");
+    let mut second = exec
+        .execute(&QuerySpec {
+            ops: vec![find()],
+            cursor: Some(cursor),
+            limit: Some(2),
+            ..QuerySpec::default()
+        })
+        .unwrap();
+    assert_eq!(names(&second), vec!["c", "main"]);
+    let cursor = second
+        .meta
+        .as_ref()
+        .unwrap()
+        .next_cursor
+        .clone()
+        .expect("third page");
+    let third = exec
+        .execute(&QuerySpec {
+            ops: vec![find()],
+            cursor: Some(cursor.clone()),
+            limit: Some(2),
+            ..QuerySpec::default()
+        })
+        .unwrap();
+    assert_eq!(names(&third), vec!["x", "y"]);
+    assert!(third.meta.as_ref().unwrap().next_cursor.is_none());
+    first.nodes.append(&mut second.nodes);
+    assert_eq!(first.nodes.len() + third.nodes.len(), 6);
+
+    let malformed = exec.execute(&QuerySpec {
+        ops: vec![find()],
+        cursor: Some("not-a-cursor".into()),
+        ..QuerySpec::default()
+    });
+    assert!(malformed.is_err());
+    let other_query = exec.execute(&QuerySpec {
+        ops: vec![GraphOp::Find(FindOp::new().r#type("Function").name("main"))],
+        cursor: Some(cursor),
+        ..QuerySpec::default()
+    });
+    assert!(other_query.is_err());
+}

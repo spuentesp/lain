@@ -1,0 +1,21 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["count", "legacy", "occupancy"],
+  "properties": {
+    "nodes": {"type": "array", "items": {"type": "object"}},
+    "edges": {"type": "array", "items": {"type": "object"}},
+    "paths": {"type": "array", "items": {"type": "object"}},
+    "count": {"type": "integer", "minimum": 0},
+    "legacy": {"type": "boolean"},
+    "meta": {"type": "object"},
+    "groups": {"type": "array", "items": {"type": "object"}},
+    "occupancy": {
+      "type": "object",
+      "required": ["active_agents"],
+      "properties": {
+        "active_agents": {"type": "array", "items": {"type": "object"}}
+      }
+    }
+  }
+}

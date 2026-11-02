@@ -133,6 +133,7 @@ pub enum SensorOwner {
     /// Phase F (Gap 19): the WebSocket sensor family owns nodes
     /// carrying WebSocketProvider / WebSocketConsumer / WebSocketHandler facts.
     WebSocketSensor,
+    OrmModelSensor,
 }
 
 /// Map a node to its sensor owner (§6.1 derivation rules). Returns
@@ -327,6 +328,9 @@ fn derive_owner(
         {
             Some(SensorOwner::GraphqlSensor)
         }
+        (_, Some(ContractFact::OrmModel(_)))
+        | (_, Some(ContractFact::OrmTable(_)))
+        | (_, Some(ContractFact::OrmColumn(_))) => Some(SensorOwner::OrmModelSensor),
         // Node-type catch-alls last.
         (NodeType::HttpClientCall, _) => Some(SensorOwner::HttpClientSensor),
         (NodeType::FieldRef, _) => Some(SensorOwner::FieldAccessSensor),
@@ -5054,6 +5058,7 @@ mod survivor_pin_tests {
                 chain: "customer_id".parse().unwrap(),
                 exact: true,
                 origin,
+                operation: None,
             })];
             n
         };

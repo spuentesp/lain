@@ -672,7 +672,8 @@ fn golden_get_contract_data_matches_per_tool_schema() {
                 {
                     "endpoint": {"service": "orders", "key": "http:GET /api/orders/{}"},
                     "providers": [
-                        {"id": "orders:HttpRoute:get_order:1", "repo": "orders", "commit": "abc", "path": "src/main.rs", "line": 1, "text": "fn get_order()"}
+                        {"id": "orders:HttpRoute:get_order:1", "repo": "orders", "commit": "abc", "path": "src/main.rs", "line": 1, "text": "fn get_order()",
+                         "handlers": [{"repo": "orders", "file": "src/main.rs", "symbol": "get_order"}]}
                     ],
                     "schemas": [
                         {

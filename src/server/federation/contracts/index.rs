@@ -296,6 +296,9 @@ pub fn node_type_of(fact: &ContractFact) -> NodeType {
         // Module-level SQL gets the same synthetic Function shape,
         // so this mapping is exact for every `TableConsumer`.
         ContractFact::TableConsumer(_) => NodeType::Function,
+        ContractFact::OrmModel(_) => NodeType::Class,
+        ContractFact::OrmTable(_) => NodeType::Table,
+        ContractFact::OrmColumn(_) => NodeType::Column,
     }
 }
 
@@ -366,6 +369,7 @@ mod tests {
             chain: JsonPath(vec![PathSegment::Name("x".into())]),
             exact: true,
             origin: crate::federation::contracts::model::FieldReadOrigin::FieldAccess,
+            operation: None,
         });
         assert_eq!(node_type_of(&fr), NodeType::FieldRef);
         // `repo` used to silence the unused warning.

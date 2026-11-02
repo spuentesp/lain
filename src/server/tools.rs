@@ -20,7 +20,7 @@ use crate::graph::GraphDatabase;
 use crate::lsp::LspPool;
 use crate::nlp::NlpEmbedder;
 use crate::overlay::VolatileOverlay;
-use crate::server::tools::registry::{ToolContext, ToolContextDeps, ToolRegistry};
+use crate::server::tools::registry::{ToolContext, ToolContextDeps, ToolOutput, ToolRegistry};
 use crate::tuning::TuningConfig;
 use parking_lot::Mutex;
 use reqwest::Client;
@@ -96,6 +96,8 @@ pub struct BlastRadiusNode {
     pub path: String,
     pub depth: u32,
     pub is_direct: bool,
+    #[serde(default)]
+    pub is_heuristic: bool,
 }
 
 /// Tool executor - orchestrates MCP tool execution by delegating to specialized handlers.
@@ -440,6 +442,35 @@ impl ToolExecutor {
         return self.call_inner(name, arguments).await;
     }
 
+    pub async fn call_with_output(
+        &self,
+        name: &str,
+        arguments: Option<&Map<String, Value>>,
+    ) -> Result<ToolOutput, LainError> {
+        let special = matches!(
+            name,
+            "get_health"
+                | "get_capabilities"
+                | "get_agent_strategy"
+                | "install_language_server"
+                | "register_job_webhook"
+                | "get_job_status"
+                | "debug_sleep"
+                | "debug_panic"
+        ) || arguments.is_some_and(|args| {
+            args.get("background")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
+        });
+        if special {
+            let text = self.call(name, arguments).await?;
+            let structured = serde_json::from_str(&text).ok();
+            return Ok(ToolOutput { text, structured });
+        }
+        let args = arguments.cloned().unwrap_or_default();
+        ToolRegistry::dispatch_with_output(&self.ctx, name, &args).await
+    }
+
     async fn call_inner(
         &self,
         name: &str,
@@ -619,6 +650,42 @@ impl ToolExecutor {
             }
         }
 
+        fn engine_metadata(ctx: &ToolContext, structural: CapabilityState) -> serde_json::Value {
+            let state = serde_json::to_value(structural).unwrap_or_default();
+            let mut relations: Vec<serde_json::Value> = crate::schema::EdgeType::all()
+                .iter()
+                .map(|edge| {
+                    serde_json::json!({
+                        "name": edge.to_string(),
+                        "indexed": edge.is_indexed(),
+                        "state": state,
+                    })
+                })
+                .collect();
+            relations.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+            let mut emitters: Vec<serde_json::Value> =
+                inventory::iter::<crate::server::sensors::SensorEntry>()
+                    .map(|entry| {
+                        serde_json::json!({
+                            "name": entry.0.name(),
+                            "state": state,
+                        })
+                    })
+                    .collect();
+            emitters.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+            let snapshots_supported = ctx.snapshots.is_some();
+            serde_json::json!({
+                "relations": relations,
+                "emitters": emitters,
+                "snapshots": {
+                    "supported": snapshots_supported,
+                    "state": if snapshots_supported { state } else {
+                        serde_json::to_value(CapabilityState::UnavailableOptional).unwrap_or_default()
+                    },
+                }
+            })
+        }
+
         /// `call_graph` must mean "call answers are complete for the
         /// indexed commit". A pass replaces nodes (and their incident
         /// `Calls` edges) before its resolve phase re-inserts them, so
@@ -702,9 +769,12 @@ impl ToolExecutor {
                         embeddings_running,
                     );
                     let r = readiness_by_id.get(id);
+                    let metadata = engine_metadata(&self.ctx, structural);
                     serde_json::json!({
                         "id": id.as_str(),
                         "capabilities": caps,
+                        "relations": metadata["relations"],
+                        "emitters": metadata["emitters"],
                         "indexed_signal": r.map(|r| r.indexed_signal).unwrap_or(false),
                         "last_indexed_commit": r.and_then(|r| r.last_indexed_commit.clone()),
                         "last_indexed_at_unix_ms": r.and_then(|r| r.last_indexed_at_unix_ms),
@@ -734,6 +804,7 @@ impl ToolExecutor {
                 "repository": self.ctx.workspace.file_name().map(|name| name.to_string_lossy()),
                 "capabilities": aggregate,
                 "repositories": repositories,
+                "snapshots": engine_metadata(&self.ctx, worst)["snapshots"],
             }))
             .map_err(Into::into);
         }
@@ -776,11 +847,15 @@ impl ToolExecutor {
                 // this at None, matching their actual surface.
                 self.ctx.workspaces.is_some(),
             );
+        let metadata = engine_metadata(&self.ctx, structural);
         serde_json::to_string(&serde_json::json!({
             "schema_version": SCHEMA_VERSION,
             "server_version": env!("CARGO_PKG_VERSION"),
             "repository": self.ctx.workspace.file_name().map(|name| name.to_string_lossy()),
             "capabilities": capabilities,
+            "relations": metadata["relations"],
+            "emitters": metadata["emitters"],
+            "snapshots": metadata["snapshots"],
             // New in PR3 (semantic-default tool profile).
             "tool_profile": {
                 "name": profile.as_str(),

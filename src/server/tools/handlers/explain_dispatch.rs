@@ -81,8 +81,40 @@ pub async fn explain_dispatch(
     overlay: &VolatileOverlay,
     symbol: &str,
 ) -> Result<String, LainError> {
+    explain_dispatch_scoped(graph, overlay, symbol, false).await
+}
+
+pub struct ExplainDispatchReport {
+    pub text: String,
+    pub report: ExplainDispatch,
+}
+
+pub async fn explain_dispatch_scoped(
+    graph: &GraphDatabase,
+    overlay: &VolatileOverlay,
+    symbol: &str,
+    historical: bool,
+) -> Result<String, LainError> {
+    explain_dispatch_report_scoped(graph, overlay, symbol, historical)
+        .await
+        .map(|report| report.text)
+}
+
+pub async fn explain_dispatch_report_scoped(
+    graph: &GraphDatabase,
+    overlay: &VolatileOverlay,
+    symbol: &str,
+    historical: bool,
+) -> Result<ExplainDispatchReport, LainError> {
     let node = resolve_node(graph, overlay, symbol)?;
-    let report = build_with_store(graph, overlay, &node, RuntimeTraceStore::global());
+    let empty_store;
+    let store = if historical {
+        empty_store = RuntimeTraceStore::new(Default::default());
+        &empty_store
+    } else {
+        RuntimeTraceStore::global()
+    };
+    let report = build_with_store(graph, overlay, &node, store);
 
     // Human-readable summary at the top, JSON-ish body at the bottom
     // so existing tools that expect prose still get it.
@@ -117,7 +149,7 @@ pub async fn explain_dispatch(
         &serde_json::to_string_pretty(&report)
             .unwrap_or_else(|e| format!("{{\"serialise_error\": \"{e}\"}}")),
     );
-    Ok(out)
+    Ok(ExplainDispatchReport { text: out, report })
 }
 
 /// Pure builder. Public so tests can call it without going through the

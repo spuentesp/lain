@@ -1,0 +1,20 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["target", "http_routes", "rpc_services", "graphql_resolvers", "availability"],
+  "properties": {
+    "target": {"type": "object"},
+    "http_routes": {"type": "array", "items": {"type": "object"}},
+    "rpc_services": {"type": "array", "items": {"type": "object"}},
+    "graphql_resolvers": {"type": "array", "items": {"type": "object"}},
+    "availability": {
+      "type": "object",
+      "required": ["http", "rpc", "graphql"],
+      "properties": {
+        "http": {"type": "boolean"},
+        "rpc": {"type": "boolean"},
+        "graphql": {"type": "boolean"}
+      }
+    }
+  }
+}

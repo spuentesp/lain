@@ -271,6 +271,7 @@ fn live_tools_list_byte_matches_on_disk_schema_dump() {
         // everything not in `SEMANTIC_PROFILE`, breaking the
         // byte-comparison invariant.
         .env("LAIN_TOOL_PROFILE", "full")
+        .env("LAIN_MODEL_DIR", project.path().join("empty-models"))
         // Suppress LAIN_EMBEDDING_MODEL so the server falls back to the
         // relative `models/all-MiniLM-L6-v2.onnx` path, which doesn't
         // exist in the repo root and forces a stub embedder — matching

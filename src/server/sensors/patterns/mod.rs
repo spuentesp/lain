@@ -207,22 +207,30 @@ pub struct YamlFile {
     /// Django ORM table sensor vocabulary (`crate::server::sensors::django_orm_sensor`).
     #[serde(default)]
     pub django_orm: DjangoOrmShapes,
+    #[serde(default)]
+    pub orm_models: OrmModelShapes,
+    #[serde(default)]
+    pub frontend_values: FrontendValueShapes,
 }
 
 impl YamlFile {
     /// Concatenate `doc` onto `self`: framework entries extend their
-    /// language bucket, anchor and ORM shapes merge additively.
+    /// language bucket, anchor and sensor shapes merge additively.
     fn merge_from(&mut self, doc: YamlFile) {
         let YamlFile {
             languages,
             anchors,
             django_orm,
+            orm_models,
+            frontend_values,
         } = doc;
         for (lang, list) in languages {
             self.languages.entry(lang).or_default().extend(list);
         }
         self.anchors.merge(&anchors);
         self.django_orm.merge(&django_orm);
+        self.orm_models.merge(&orm_models);
+        self.frontend_values.merge(&frontend_values);
     }
 
     /// Load every `*.yaml` in `dir` and concatenate the entries.
@@ -489,6 +497,30 @@ impl AnchorShapes {
                 }
             }
         }
+    }
+}
+
+#[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq)]
+pub struct OrmModelShapes {
+    #[serde(default)]
+    pub patterns: std::collections::BTreeMap<String, String>,
+}
+
+impl OrmModelShapes {
+    fn merge(&mut self, other: &Self) {
+        self.patterns.extend(other.patterns.clone());
+    }
+}
+
+#[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq)]
+pub struct FrontendValueShapes {
+    #[serde(default)]
+    pub patterns: std::collections::BTreeMap<String, String>,
+}
+
+impl FrontendValueShapes {
+    fn merge(&mut self, other: &Self) {
+        self.patterns.extend(other.patterns.clone());
     }
 }
 
@@ -936,6 +968,14 @@ impl Patterns {
         &self.yaml.django_orm
     }
 
+    pub fn orm_model_shapes(&self) -> &OrmModelShapes {
+        &self.yaml.orm_models
+    }
+
+    pub fn frontend_value_shapes(&self) -> &FrontendValueShapes {
+        &self.yaml.frontend_values
+    }
+
     /// Look up a framework by `id` across every language.
     pub fn framework(&self, id: &str) -> Option<&FrameworkDef> {
         self.yaml
@@ -1258,6 +1298,8 @@ impl Patterns {
             languages: override_langs,
             anchors: override_anchors,
             django_orm: override_django_orm,
+            orm_models: override_orm_models,
+            frontend_values: override_frontend_values,
         } = overrides;
         for (lang, list) in override_langs {
             for new_def in list {
@@ -1278,6 +1320,8 @@ impl Patterns {
         // has no analogue for anonymous keyword lists.
         self.yaml.anchors.merge(&override_anchors);
         self.yaml.django_orm.merge(&override_django_orm);
+        self.yaml.orm_models.merge(&override_orm_models);
+        self.yaml.frontend_values.merge(&override_frontend_values);
         // Populate the override cache. Bodies were validated above
         // (Step 1); the cache is a plain `Vec` so the second-call
         // behaviour is **all-or-nothing**: a subsequent

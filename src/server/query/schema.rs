@@ -447,6 +447,10 @@ mod indexed_flag_tests {
             EdgeType::Binds,
             EdgeType::ReadsTable,
             EdgeType::WritesTable,
+            EdgeType::Renders,
+            EdgeType::Stores,
+            EdgeType::Forwards,
+            EdgeType::Discards,
             // `event_sensor::scan_payload_schemas` mints it from
             // Avro/JSON-Schema payload files.
             EdgeType::PayloadSchema,

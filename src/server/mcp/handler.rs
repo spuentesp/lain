@@ -436,6 +436,13 @@ fn gate_for_dispatch(
     name: &str,
     args: &Map<String, serde_json::Value>,
 ) -> Option<crate::server::readiness::GatedResponse> {
+    if args
+        .get("snapshot")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| s != "live")
+    {
+        return None;
+    }
     let semantic_model_configured = !executor.embedder().is_stub();
 
     let Some(fed) = federation else {
@@ -720,6 +727,137 @@ fn tool_result(name: &str, result: Result<serde_json::Value, String>) -> (String
     }
 }
 
+const RAW_SNAPSHOT_TOOLS: &[&str] = &[
+    "query_graph",
+    "find_symbol",
+    "get_context",
+    "get_call_sites",
+    "get_cross_runtime_callers",
+    "explain_symbol",
+    "assess_change",
+    "explain_dispatch",
+];
+
+fn scoped_snapshot_graph(
+    graph: &crate::graph::GraphDatabase,
+    repo: &str,
+) -> Result<crate::graph::GraphDatabase, String> {
+    let nodes: Vec<_> = graph
+        .get_all_nodes()
+        .into_iter()
+        .filter(|node| {
+            node.repo_id.as_deref() == Some(repo)
+                || crate::federation::repo_id::GlobalId::parse(&node.id)
+                    .is_ok_and(|id| id.repo_id() == repo)
+        })
+        .collect();
+    let ids: std::collections::BTreeSet<String> =
+        nodes.iter().map(|node| node.id.clone()).collect();
+    let edges: Vec<_> = graph
+        .all_edges()
+        .into_iter()
+        .filter(|edge| ids.contains(&edge.source_id) && ids.contains(&edge.target_id))
+        .collect();
+    let scoped = crate::graph::GraphDatabase::empty_writable();
+    scoped
+        .insert_nodes_batch(&nodes)
+        .map_err(|e| e.to_string())?;
+    scoped
+        .insert_edges_batch(&edges)
+        .map_err(|e| e.to_string())?;
+    Ok(scoped)
+}
+
+async fn dispatch_raw_snapshot(
+    executor: &ToolExecutor,
+    snapshots: Option<&Arc<crate::federation::contracts::snapshots::SnapshotManager>>,
+    name: &str,
+    args: &Map<String, serde_json::Value>,
+) -> Option<(String, bool, Option<serde_json::Value>)> {
+    let snapshot_id = args.get("snapshot").and_then(|v| v.as_str())?;
+    if snapshot_id == "live" {
+        return None;
+    }
+    if !RAW_SNAPSHOT_TOOLS.contains(&name) {
+        return Some((
+            format!("Error: tool {name} does not support named snapshots"),
+            true,
+            None,
+        ));
+    }
+    let result = async {
+        let manager = snapshots
+            .ok_or_else(|| "snapshot manager is not configured for this server".to_string())?;
+        let outcome = manager
+            .get(snapshot_id, 5_000)
+            .await
+            .map_err(|e| format!("snapshot {snapshot_id} is unavailable: {e:?}"))?;
+        if outcome.record.state != crate::federation::contracts::snapshots::SnapshotState::Ready {
+            return Err(format!(
+                "snapshot {snapshot_id} is not ready (state: {})",
+                outcome.record.state.as_str()
+            ));
+        }
+        if let Some(repo) = args.get("repo_id").and_then(|v| v.as_str()) {
+            if !outcome.record.repos.contains_key(repo) {
+                return Err(format!(
+                    "repo '{repo}' is not present in snapshot {snapshot_id}"
+                ));
+            }
+        }
+        let record = outcome.record;
+        let (snapshot_federation, _hold) = manager
+            .from_snapshot_with_wait_ms(&record, 5_000)
+            .map_err(|e| format!("snapshot {snapshot_id} could not be loaded: {e}"))?;
+        let graph = snapshot_federation.backend.db().clone();
+        if record.repos.len() > 1 && args.get("repo_id").is_none() {
+            if let Some(symbol) = args
+                .get("symbol")
+                .or_else(|| args.get("name"))
+                .and_then(|value| value.as_str())
+            {
+                let repos: std::collections::BTreeSet<String> = graph
+                    .find_all_nodes_by_name(symbol)
+                    .into_iter()
+                    .filter_map(|node| {
+                        node.repo_id.clone().or_else(|| {
+                            crate::federation::repo_id::GlobalId::parse(&node.id)
+                                .ok()
+                                .map(|id| id.repo_id().to_string())
+                        })
+                    })
+                    .collect();
+                if repos.len() > 1 {
+                    return Err(format!(
+                        "repo_id is required for ambiguous symbol '{symbol}' in snapshot {snapshot_id}"
+                    ));
+                }
+            }
+        }
+        let mut bound = executor.clone();
+        bound.ctx.graph = match args.get("repo_id").and_then(|value| value.as_str()) {
+            Some(repo) => scoped_snapshot_graph(&graph, repo)?,
+            None => graph,
+        };
+        bound.ctx.overlay = crate::overlay::VolatileOverlay::new();
+        bound.ctx.federation = None;
+        bound.ctx.snapshot = Some(crate::server::tools::registry::SnapshotToolContext {
+            id: snapshot_id.to_string(),
+            record,
+            data_dir: manager.data_dir().to_path_buf(),
+        });
+        bound
+            .call_with_output(name, Some(args))
+            .await
+            .map_err(|e| e.to_string())
+    }
+    .await;
+    Some(match result {
+        Ok(output) => (output.text, false, output.structured),
+        Err(error) => (format!("Error: {error}"), true, None),
+    })
+}
+
 /// Unified MCP tool dispatcher shared by Stdio and HTTP transports.
 ///
 /// Dispatches server-status, reload, multiplayer presence, federation,
@@ -773,6 +911,10 @@ async fn dispatch_tool_call(
         }
     }
 
+    if let Some(result) = dispatch_raw_snapshot(executor, snapshots, name, &args_map).await {
+        return result;
+    }
+
     if let Some(fed) = federation {
         // A health check that fails unless you already know a repo id is
         // no health check: unscoped `get_health` across several repos
@@ -805,8 +947,8 @@ async fn dispatch_tool_call(
         Some(&args_map)
     };
 
-    match executor.call(name, args).await {
-        Ok(mut text) => {
+    match executor.call_with_output(name, args).await {
+        Ok(mut output) => {
             let scoped = args_map.get("repo_id").and_then(|v| v.as_str());
             let note = match federation {
                 Some(fed) => indexing_notice(fed, name, scoped),
@@ -817,9 +959,9 @@ async fn dispatch_tool_call(
                     .then(|| indexing_note("this repository")),
             };
             if let Some(note) = note {
-                text.push_str(&note);
+                output.text.push_str(&note);
             }
-            (text, false, None)
+            (output.text, false, output.structured)
         }
         Err(e) => (format!("Error: {e}"), true, None),
     }
@@ -1064,11 +1206,15 @@ pub(crate) fn advertised_tools_json(
             if let Some(fed) = federation {
                 advertise_repo_scope(def.name, &mut schema, fed);
             }
-            serde_json::json!({
+            let mut tool = serde_json::json!({
                 "name": def.name,
                 "description": def.description,
                 "inputSchema": schema
-            })
+            });
+            if let Some(output) = &def.output_schema {
+                tool["outputSchema"] = output.clone();
+            }
+            tool
         })
         .collect();
     if federation.is_some() {
@@ -1117,7 +1263,10 @@ impl ServerHandler for LainHandler {
                     execution: None,
                     icons: vec![],
                     meta: None,
-                    output_schema: None,
+                    output_schema: def
+                        .output_schema
+                        .clone()
+                        .and_then(|schema| serde_json::from_value(schema).ok()),
                     title: None,
                 }
             })
@@ -1144,7 +1293,10 @@ impl ServerHandler for LainHandler {
                 execution: None,
                 icons: vec![],
                 meta: None,
-                output_schema: None,
+                output_schema: special
+                    .output_schema
+                    .clone()
+                    .and_then(|schema| serde_json::from_value(schema).ok()),
                 title: None,
             });
         }
@@ -1504,6 +1656,7 @@ impl LainMcpServer {
             // happens to start the pool.
             snapshots.ensure_workers_running();
         }
+        self.executor.ctx.snapshots = Some(Arc::clone(&snapshots));
         self.snapshots = Some(snapshots);
         self
     }
@@ -3013,18 +3166,21 @@ pub(crate) fn special_tool_definitions() -> Vec<crate::tools::definitions::ToolD
             name: "get_health",
             description: "Return server health, node/edge counts, last enriched commit, and language-server availability.",
             input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+            output_schema: None,
             readiness: crate::tools::definitions::ReadinessRequirement::GraphIndependent,
         },
         ToolDefinition {
             name: "get_capabilities",
             description: "Return the current repository capability states, freshness, and indexing progress. Warming states are retryable.",
             input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+            output_schema: None,
             readiness: crate::tools::definitions::ReadinessRequirement::GraphIndependent,
         },
         ToolDefinition {
             name: "list_packages",
             description: "The skill menu: every capability package with its pitch, level, why it is off by default, and its tools.",
             input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+            output_schema: None,
             readiness: crate::tools::definitions::ReadinessRequirement::GraphIndependent,
         },
         ToolDefinition {
@@ -3037,12 +3193,14 @@ pub(crate) fn special_tool_definitions() -> Vec<crate::tools::definitions::ToolD
                 },
                 "required": ["package"]
             }),
+            output_schema: None,
             readiness: crate::tools::definitions::ReadinessRequirement::GraphIndependent,
         },
         ToolDefinition {
             name: "get_agent_strategy",
             description: "Return the recommended tool sequence and quick-reference for working with Lain.",
             input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+            output_schema: None,
             readiness: crate::tools::definitions::ReadinessRequirement::GraphIndependent,
         },
         ToolDefinition {
@@ -3059,6 +3217,7 @@ pub(crate) fn special_tool_definitions() -> Vec<crate::tools::definitions::ToolD
                     }
                 }
             }),
+            output_schema: None,
             readiness: crate::tools::definitions::ReadinessRequirement::GraphIndependent,
         },
         ToolDefinition {
@@ -3069,6 +3228,7 @@ pub(crate) fn special_tool_definitions() -> Vec<crate::tools::definitions::ToolD
                 "properties": { "url": { "type": "string" } },
                 "required": ["url"]
             }),
+            output_schema: None,
             readiness: crate::tools::definitions::ReadinessRequirement::GraphIndependent,
         },
         ToolDefinition {
@@ -3079,6 +3239,7 @@ pub(crate) fn special_tool_definitions() -> Vec<crate::tools::definitions::ToolD
                 "properties": { "job_id": { "type": "string" } },
                 "required": ["job_id"]
             }),
+            output_schema: None,
             readiness: crate::tools::definitions::ReadinessRequirement::GraphIndependent,
         },
         ToolDefinition {
@@ -3088,6 +3249,7 @@ pub(crate) fn special_tool_definitions() -> Vec<crate::tools::definitions::ToolD
                 "type": "object",
                 "properties": { "secs": { "type": "integer", "default": 1 } }
             }),
+            output_schema: None,
             readiness: crate::tools::definitions::ReadinessRequirement::GraphIndependent,
         },
     ]

@@ -868,7 +868,7 @@ fn innermost_node_at_line(
         })
 }
 
-fn is_secret_basename(basename_lower: &str) -> bool {
+pub(crate) fn is_secret_basename(basename_lower: &str) -> bool {
     if basename_lower.is_empty() {
         return false;
     }

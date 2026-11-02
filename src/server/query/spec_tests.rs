@@ -687,6 +687,7 @@ fn test_query_meta_has_no_plan_field() {
         nodes_visited: 2,
         truncated: false,
         matched_before_limit: None,
+        next_cursor: None,
     };
     let json = serde_json::to_value(&meta).unwrap();
     assert!(

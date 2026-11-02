@@ -1,0 +1,214 @@
+mod common;
+
+use common::{
+    boot_single_repo_in_dir, git_init_committed, tools_call_envelope, wait_for_repo_index,
+};
+use serde_json::{json, Value};
+use std::path::Path;
+use std::process::Command;
+
+struct RawSnapshotFixture {
+    _tmp: tempfile::TempDir,
+    host: String,
+    _server: common::ServerGuard,
+    snapshot: String,
+}
+
+impl RawSnapshotFixture {
+    async fn new() -> Self {
+        let tmp = tempfile::tempdir().expect("fixture tempdir");
+        let root = tmp.path().to_path_buf();
+        let repo = root.join("orders");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(
+            repo.join("src/lib.rs"),
+            "pub fn old_callee() -> u32 { 42 }\n\npub fn old_caller() -> u32 {\n    old_callee()\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            repo.join("Cargo.toml"),
+            "[package]\nname = \"orders\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        git_init_committed(&repo);
+        let commit = git(&repo, &["rev-parse", "HEAD"]);
+        let repos_yaml = root.join("repos.yaml");
+        std::fs::write(
+            &repos_yaml,
+            format!(
+                "data_dir: {}/data\nrepos:\n  - id: orders\n    source:\n      type: workspace_dir\n      path: {}\n",
+                root.display(),
+                repo.display()
+            ),
+        )
+        .unwrap();
+        let (host, server) =
+            boot_single_repo_in_dir(&root, &repo, &repos_yaml, &["old_callee", "old_caller"]);
+        let prepared = tools_call_envelope(
+            &host,
+            "prepare_snapshot",
+            json!({"repos": {"orders": commit}, "wait_ms": 60_000}),
+        );
+        assert_eq!(
+            prepared.pointer("/result/isError").and_then(Value::as_bool),
+            Some(false),
+            "prepare_snapshot failed: {prepared}"
+        );
+        let prepared_text = prepared
+            .pointer("/result/content/0/text")
+            .and_then(Value::as_str)
+            .expect("snapshot text");
+        let prepared_json: Value = serde_json::from_str(prepared_text).expect("snapshot json");
+        assert_eq!(prepared_json["data"]["state"], "ready");
+        let snapshot = prepared_json["data"]["snapshot"]
+            .as_str()
+            .expect("snapshot id")
+            .to_string();
+
+        std::fs::write(
+            repo.join("src/lib.rs"),
+            "pub fn live_only_caller() -> u32 { 99 }\n",
+        )
+        .unwrap();
+        git(&repo, &["add", "-A"]);
+        git(
+            &repo,
+            &[
+                "-c",
+                "user.email=test@lain",
+                "-c",
+                "user.name=test",
+                "commit",
+                "-q",
+                "-m",
+                "live replacement",
+            ],
+        );
+        let sync = tools_call_envelope(&host, "sync_state", json!({}));
+        assert_eq!(
+            sync.pointer("/result/isError").and_then(Value::as_bool),
+            Some(false),
+            "sync_state failed: {sync}"
+        );
+        wait_for_repo_index(&host, &["live_only_caller"]);
+
+        Self {
+            _tmp: tmp,
+            host,
+            _server: server,
+            snapshot,
+        }
+    }
+
+    fn call(&self, name: &str, args: Value) -> Value {
+        let mut args = args;
+        args["snapshot"] = json!(self.snapshot);
+        if args.get("repo_id").is_none() {
+            args["repo_id"] = json!("orders");
+        }
+        tools_call_envelope(&self.host, name, args)
+    }
+}
+
+fn git(repo: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .expect("git command");
+    assert!(
+        out.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap().trim().to_string()
+}
+
+fn text(result: &Value) -> &str {
+    result
+        .pointer("/result/content/0/text")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+}
+
+#[tokio::test]
+async fn all_raw_snapshot_reads_stay_on_the_pinned_graph_and_source() {
+    let fixture = RawSnapshotFixture::new().await;
+    let calls = [
+        (
+            "query_graph",
+            json!({"spec": {"ops": [{"op": "find", "name": "old_callee"}]}}),
+        ),
+        ("find_symbol", json!({"name": "old_callee"})),
+        ("get_context", json!({"symbol": "old_callee"})),
+        ("get_call_sites", json!({"symbol": "old_callee"})),
+        (
+            "get_cross_runtime_callers",
+            json!({"node_id": "old_callee"}),
+        ),
+        ("explain_symbol", json!({"symbol": "old_callee"})),
+        ("assess_change", json!({"symbol": "old_callee"})),
+        ("explain_dispatch", json!({"symbol": "old_callee"})),
+    ];
+    for (name, args) in calls {
+        let result = fixture.call(name, args);
+        assert_eq!(
+            result.pointer("/result/isError").and_then(Value::as_bool),
+            Some(false),
+            "{name} failed: {result}"
+        );
+        let body = text(&result);
+        assert!(
+            body.contains("old_callee"),
+            "{name} lost pinned symbol: {body}"
+        );
+        assert!(
+            !body.contains("live_only_caller"),
+            "{name} read live state: {body}"
+        );
+    }
+
+    let context = fixture.call("get_context", json!({"symbol": "old_callee"}));
+    assert!(
+        text(&context).contains("42"),
+        "pinned source body missing: {context}"
+    );
+    let sites = fixture.call("get_call_sites", json!({"symbol": "old_callee"}));
+    assert!(
+        text(&sites).contains("old_caller"),
+        "pinned caller missing: {sites}"
+    );
+}
+
+#[tokio::test]
+async fn unknown_raw_snapshot_is_an_error_not_a_live_fallback() {
+    let fixture = RawSnapshotFixture::new().await;
+    let result = tools_call_envelope(
+        &fixture.host,
+        "find_symbol",
+        json!({"name": "live_only_caller", "snapshot": "snap_does_not_exist", "repo_id": "orders"}),
+    );
+    assert_eq!(
+        result.pointer("/result/isError").and_then(Value::as_bool),
+        Some(true),
+        "unknown snapshot silently answered from the live graph: {result}"
+    );
+    assert!(
+        text(&result).contains("snapshot"),
+        "error should name the snapshot: {result}"
+    );
+}
+
+#[tokio::test]
+async fn excluded_snapshot_repo_is_an_error_not_a_live_fallback() {
+    let fixture = RawSnapshotFixture::new().await;
+    let result = fixture.call(
+        "find_symbol",
+        json!({"name": "live_only_caller", "repo_id": "billing"}),
+    );
+    assert_eq!(
+        result.pointer("/result/isError").and_then(Value::as_bool),
+        Some(true),
+        "unregistered snapshot repo silently answered live: {result}"
+    );
+}
