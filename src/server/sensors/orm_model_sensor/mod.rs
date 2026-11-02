@@ -1,4 +1,5 @@
 pub(crate) mod django;
+mod migrations;
 mod python;
 
 use crate::error::LainError;
@@ -137,81 +138,6 @@ fn add_column(
         site: site(path, line),
         source,
     });
-}
-
-fn analyze_sqlalchemy(
-    analysis: &mut OrmAnalysis,
-    path: &str,
-    content: &str,
-    shapes: &OrmModelShapes,
-) {
-    let class_re = pattern(
-        shapes,
-        "sqlalchemy_class",
-        r#"(?m)^class\s+(\w+)\([^\)]*\):[ \t]*$"#,
-    );
-    let table_re = pattern(
-        shapes,
-        "sqlalchemy_table",
-        r#"__tablename__\s*=\s*['\"]([^'\"]+)['\"]"#,
-    );
-    let field_re = pattern(
-        shapes,
-        "sqlalchemy_field",
-        r#"(?m)^\s*(\w+)\s*=\s*Column\("#,
-    );
-    let column_re = pattern(shapes, "sqlalchemy_column", r#"['\"]([^'\"]+)['\"]"#);
-    let classes: Vec<_> = class_re.captures_iter(content).collect();
-    for (index, class) in classes.iter().enumerate() {
-        let model = class.get(1).unwrap();
-        let body_start = class.get(0).unwrap().end();
-        let body_end = classes
-            .get(index + 1)
-            .and_then(|next| next.get(0))
-            .map(|next| next.start())
-            .unwrap_or(content.len());
-        let body = &content[body_start..body_end];
-        let Some(table) = table_re.captures(body).and_then(|m| m.get(1)) else {
-            continue;
-        };
-        add_model(
-            analysis,
-            "sqlalchemy",
-            model.as_str(),
-            table.as_str(),
-            path,
-            line_of(content, model.start()),
-            StaticSource::Regex,
-        );
-        for field in field_re.captures_iter(body) {
-            let attribute = field.get(1).unwrap();
-            let open = field.get(0).unwrap().end() - 1;
-            let Some((args, _)) = paren_region(body, open) else {
-                continue;
-            };
-            let literal = column_re.captures(args).and_then(|m| m.get(1));
-            let first = args.split(',').next().unwrap_or("").trim();
-            let dynamic = literal.is_none()
-                && !first.is_empty()
-                && (first.starts_with("name=")
-                    || first.chars().next().is_some_and(char::is_lowercase));
-            if dynamic {
-                analysis
-                    .unresolved
-                    .push(format!("{path}: dynamic column on {}", model.as_str()));
-                continue;
-            }
-            let name = literal.map(|m| m.as_str()).unwrap_or(attribute.as_str());
-            add_column(
-                analysis,
-                table.as_str(),
-                name,
-                path,
-                line_of(content, body_start + attribute.start()),
-                StaticSource::Regex,
-            );
-        }
-    }
 }
 
 fn analyze_prisma(analysis: &mut OrmAnalysis, path: &str, content: &str, shapes: &OrmModelShapes) {
@@ -595,7 +521,7 @@ fn attach_migrations(root: &Path, analysis: &mut OrmAnalysis) {
         (is_migration
             && matches!(
                 path.extension().and_then(|e| e.to_str()),
-                Some("py" | "sql" | "ts" | "js")
+                Some("sql" | "ts" | "js")
             ))
         .then_some(())
     }) {
@@ -640,7 +566,7 @@ pub fn analyze_orm_models(root: &Path) -> OrmAnalysis {
         let path = graph_path(root, &path);
         match extension.as_str() {
             "py" => {
-                analyze_sqlalchemy(&mut analysis, &path, &content, shapes);
+                python::analyze_sqlalchemy(&mut analysis, &path, &content, &patterns);
             }
             "prisma" => analyze_prisma(&mut analysis, &path, &content, shapes),
             "ts" | "tsx" => {
@@ -657,6 +583,7 @@ pub fn analyze_orm_models(root: &Path) -> OrmAnalysis {
         }
     }
     python::add_django(&mut analysis, &django_models);
+    migrations::attach_python_migrations(root, &mut analysis, &patterns);
     attach_migrations(root, &mut analysis);
     analysis
         .models

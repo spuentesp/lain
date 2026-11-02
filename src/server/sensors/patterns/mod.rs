@@ -506,6 +506,8 @@ pub struct OrmModelShapes {
     pub patterns: std::collections::BTreeMap<String, String>,
     #[serde(default)]
     pub django_field_suffixes: Vec<String>,
+    #[serde(default)]
+    pub sqlalchemy_column_calls: Vec<String>,
 }
 
 impl OrmModelShapes {
@@ -513,6 +515,8 @@ impl OrmModelShapes {
         self.patterns.extend(other.patterns.clone());
         self.django_field_suffixes
             .extend(other.django_field_suffixes.clone());
+        self.sqlalchemy_column_calls
+            .extend(other.sqlalchemy_column_calls.clone());
     }
 }
 

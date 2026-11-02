@@ -49,11 +49,11 @@ pub(crate) struct DjangoModelMap {
     pub is_model: Vec<bool>,
 }
 
-fn text(node: Node, src: &[u8]) -> String {
+pub(super) fn text(node: Node, src: &[u8]) -> String {
     node.utf8_text(src).unwrap_or("").to_string()
 }
 
-fn string_literal(node: Node, src: &[u8]) -> Option<String> {
+pub(super) fn string_literal(node: Node, src: &[u8]) -> Option<String> {
     if node.kind() != "string" {
         return None;
     }
@@ -68,7 +68,7 @@ fn string_literal(node: Node, src: &[u8]) -> Option<String> {
     None
 }
 
-fn assignment(node: Node) -> Option<(Node, Node)> {
+pub(super) fn assignment(node: Node) -> Option<(Node, Node)> {
     let expression = (node.kind() == "expression_statement").then_some(node)?;
     let assignment = expression.named_child(0)?;
     (assignment.kind() == "assignment").then_some(assignment)?;
@@ -204,7 +204,7 @@ fn parse_class(
     model
 }
 
-fn capture_index(query: &Query, name: &str) -> Option<u32> {
+pub(super) fn capture_index(query: &Query, name: &str) -> Option<u32> {
     query
         .capture_names()
         .iter()

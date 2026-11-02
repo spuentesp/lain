@@ -749,11 +749,8 @@ django_orm:
 
 orm_models:
   django_field_suffixes: [Field]
+  sqlalchemy_column_calls: [Column]
   patterns:
-    sqlalchemy_class: '(?m)^class\s+(\w+)\([^\)]*\):[ \t]*$'
-    sqlalchemy_table: '__tablename__\s*=\s*[''"'']([^''""]+)[''"'']'
-    sqlalchemy_field: '(?m)^\s*(\w+)\s*=\s*Column\('
-    sqlalchemy_column: '[''"'']([^''""]+)[''"'']'
     prisma_model: 'model\s+(\w+)\s*\{([\s\S]*?)\}'
     prisma_table: '@@map\(\"([^\"]+)\"\)'
     prisma_column: '@map\(\"([^\"]+)\"\)'

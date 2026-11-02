@@ -488,3 +488,40 @@ fn django_ast_query_honors_repository_overrides() {
     let analysis = analyze_orm_models(tmp.path());
     assert!(analysis.models.is_empty());
 }
+
+#[test]
+fn sqlalchemy_and_python_migrations_require_structural_identity() {
+    let tmp = tempfile::tempdir().unwrap();
+    write(
+        tmp.path(),
+        "models.py",
+        "from sqlalchemy import Column, String\nclass Price(Base):\n    __tablename__ = 'prices'\n    amount = Column(String(50), name='price_usd')\n",
+    );
+    write(
+        tmp.path(),
+        "alembic/versions/0001.py",
+        "def upgrade():\n    # prices is mentioned only in this comment.\n    op.add_column('orders', sa.Column('price_usd', sa.String()))\n",
+    );
+    let analysis = analyze_orm_models(tmp.path());
+    assert!(relation(
+        &analysis,
+        EdgeType::HasColumn,
+        "prices",
+        "price_usd"
+    ));
+    assert!(analysis
+        .columns
+        .iter()
+        .all(|column| column.migration.is_none()));
+
+    write(
+        tmp.path(),
+        "alembic/versions/0002.py",
+        "def upgrade():\n    op.add_column('prices', sa.Column('price_usd', sa.String()))\n",
+    );
+    let analysis = analyze_orm_models(tmp.path());
+    assert!(analysis
+        .columns
+        .iter()
+        .any(|column| column.migration.is_some()));
+}
