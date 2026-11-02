@@ -47,6 +47,10 @@ enum EmbedInner {
     Stub {
         embedding_dim: usize,
     },
+    Lazy {
+        initialized: Arc<std::sync::OnceLock<EmbedInner>>,
+        loader: Arc<dyn Fn() -> Result<EmbedInner, LainError> + Send + Sync + 'static>,
+    },
 }
 
 /// Default sequence-length cap when the tokenizer doesn't publish one.
@@ -199,22 +203,58 @@ impl NlpEmbedder {
         }
     }
 
+    fn lazy_with_loader<F>(loader: F) -> Self
+    where
+        F: Fn() -> Result<EmbedInner, LainError> + Send + Sync + 'static,
+    {
+        Self {
+            inner: EmbedInner::Lazy {
+                initialized: Arc::new(std::sync::OnceLock::new()),
+                loader: Arc::new(loader),
+            },
+            query_prefix: String::new(),
+            pooling: Pooling::from_env(),
+        }
+    }
+
+    fn resolved_inner(&self) -> &EmbedInner {
+        match &self.inner {
+            EmbedInner::Lazy {
+                initialized,
+                loader,
+            } => initialized.get_or_init(|| {
+                loader().unwrap_or_else(|error| {
+                    tracing::warn!(
+                        "embedding model not loaded ({error}); semantic search is unavailable"
+                    );
+                    EmbedInner::Stub { embedding_dim: 384 }
+                })
+            }),
+            inner => inner,
+        }
+    }
+
     /// The embedder for `model` (or `LAIN_EMBEDDING_MODEL` when `None`),
     /// or the stub when it cannot load. Semantic search is optional: a
     /// wrong path or a corrupt model file used to stop `lain mcp` from
     /// starting at all, taking every other tool down with it.
     pub fn load_or_stub(model: Option<&Path>, max_threads: usize) -> Self {
-        let loaded = match model {
-            Some(p) => {
-                let (model, tokenizer) = Self::resolve_model_paths(p);
-                Self::with_max_threads(&model, &tokenizer, max_threads)
+        match model {
+            Some(path) => {
+                let (model, tokenizer) = Self::resolve_model_paths(path);
+                if !model.exists() || !tokenizer.exists() {
+                    return Self::new_stub();
+                }
+                Self::lazy_with_loader(move || {
+                    Self::with_max_threads(&model, &tokenizer, max_threads)
+                        .map(|loaded| loaded.inner)
+                })
             }
-            None => Self::new_with_threads(max_threads),
-        };
-        loaded.unwrap_or_else(|e| {
-            tracing::warn!("embedding model not loaded ({e}); semantic search is unavailable");
-            Self::new_stub()
-        })
+            None => Self::new_with_threads(max_threads).unwrap_or_else(|e| {
+                tracing::warn!("embedding model not loaded ({e}); semantic search is unavailable");
+                Self::new_stub()
+            }),
+        }
     }
 
     /// Initialize with default paths (models/all-MiniLM-L6-v2.onnx).
@@ -242,13 +282,14 @@ impl NlpEmbedder {
         // Tests stay on the stub.
         #[cfg(not(test))]
         let installed = if std::env::var_os("LAIN_EMBEDDING_MODEL").is_none() {
-            crate::server::models::installed_default()
+            crate::server::models::default_model_candidate()
         } else {
             None
         };
         #[cfg(test)]
         let installed: Option<(PathBuf, PathBuf, Pooling)> = None;
         let declared = installed.as_ref().map(|(_, _, p)| *p);
+        let verify_default = installed.is_some();
         let (model_path, tokenizer_path) = match installed {
             Some((m, t, _)) => (m, t),
             None => (model_path, tokenizer_path),
@@ -262,7 +303,20 @@ impl NlpEmbedder {
             return Ok(Self::new_stub());
         }
 
-        let mut embedder = Self::with_max_threads(&model_path, &tokenizer_path, max_threads)?;
+        let mut embedder = Self::lazy_with_loader(move || {
+            let (model, tokenizer) = if verify_default {
+                let (model, tokenizer, _) =
+                    crate::server::models::installed_default().ok_or_else(|| {
+                        LainError::Nlp(
+                            "default embedding model failed checksum verification".into(),
+                        )
+                    })?;
+                (model, tokenizer)
+            } else {
+                (model_path.clone(), tokenizer_path.clone())
+            };
+            Self::with_max_threads(&model, &tokenizer, max_threads).map(|loaded| loaded.inner)
+        });
         if let Some(p) = declared {
             embedder.set_pooling(p);
         }
@@ -367,16 +421,36 @@ impl NlpEmbedder {
         }
     }
 
-    /// Returns true if this embedder is a stub (no actual model loaded)
+    /// Returns true when no usable model is available. A configured lazy
+    /// model is not a stub unless its cached initialization falls back to one.
     pub fn is_stub(&self) -> bool {
-        matches!(self.inner, EmbedInner::Stub { .. })
+        match &self.inner {
+            EmbedInner::Stub { .. } => true,
+            EmbedInner::Onnx { .. } => false,
+            EmbedInner::Lazy { initialized, .. } => initialized
+                .get()
+                .is_some_and(|inner| matches!(inner, EmbedInner::Stub { .. })),
+        }
+    }
+
+    fn is_initialized(&self) -> bool {
+        match &self.inner {
+            EmbedInner::Lazy { initialized, .. } => initialized.get().is_some(),
+            _ => true,
+        }
+    }
+
+    /// Returns true only after a real model has finished loading.
+    pub fn is_ready(&self) -> bool {
+        self.is_initialized() && !self.is_stub()
     }
 
     /// Returns the embedding dimension this model produces
     pub fn embedding_dim(&self) -> usize {
-        match &self.inner {
+        match self.resolved_inner() {
             EmbedInner::Stub { embedding_dim } => *embedding_dim,
             EmbedInner::Onnx { embedding_dim, .. } => *embedding_dim,
+            EmbedInner::Lazy { .. } => unreachable!("lazy embedder resolved"),
         }
     }
 
@@ -441,7 +515,7 @@ impl NlpEmbedder {
         if n == 0 {
             return Ok(Vec::new());
         }
-        let (session, tokenizer, embedding_dim, max_len) = match &self.inner {
+        let (session, tokenizer, embedding_dim, max_len) = match self.resolved_inner() {
             EmbedInner::Stub { embedding_dim } => {
                 return Ok((0..n).map(|_| vec![0.0f32; *embedding_dim]).collect());
             }
@@ -451,6 +525,7 @@ impl NlpEmbedder {
                 embedding_dim,
                 max_seq_len,
             } => (session, tokenizer, *embedding_dim, *max_seq_len),
+            EmbedInner::Lazy { .. } => unreachable!("lazy embedder resolved"),
         };
         let pad_id: i64 = tokenizer
             .token_to_id("[PAD]")
@@ -873,6 +948,39 @@ mod query_prefix_tests {
 }
 
 #[cfg(test)]
+mod lazy_model_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    #[test]
+    fn lazy_loading_does_not_block_construction_and_clones_share_one_attempt() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let loader_attempts = Arc::clone(&attempts);
+        let embedder = NlpEmbedder::lazy_with_loader(move || {
+            loader_attempts.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(200));
+            Ok(EmbedInner::Stub { embedding_dim: 7 })
+        });
+
+        assert!(!embedder.is_initialized());
+        assert!(!embedder.is_stub());
+        assert_eq!(attempts.load(Ordering::SeqCst), 0);
+
+        let first = embedder.clone();
+        let second = embedder.clone();
+        let first_use = std::thread::spawn(move || first.embed("first"));
+        let second_use = std::thread::spawn(move || second.embed("second"));
+        assert_eq!(first_use.join().unwrap().unwrap(), vec![0.0; 7]);
+        assert_eq!(second_use.join().unwrap().unwrap(), vec![0.0; 7]);
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert!(embedder.is_initialized());
+        assert!(embedder.is_stub());
+        assert!(!embedder.is_ready());
+    }
+}
+
+#[cfg(test)]
 mod environment_tests {
     #[test]
     fn embedder_and_reranker_share_one_environment_under_concurrency() {
@@ -912,7 +1020,10 @@ mod model_path_tests {
         assert!(NlpEmbedder::load_or_stub(Some(&d.path().join("nope.onnx")), 1).is_stub());
         std::fs::write(d.path().join("m.onnx"), b"not a model").unwrap();
         std::fs::write(d.path().join("tokenizer.json"), b"{").unwrap();
-        assert!(NlpEmbedder::load_or_stub(Some(&d.path().join("m.onnx")), 1).is_stub());
+        let embedder = NlpEmbedder::load_or_stub(Some(&d.path().join("m.onnx")), 1);
+        assert!(!embedder.is_stub());
+        embedder.embed("trigger lazy initialization").unwrap();
+        assert!(embedder.is_stub());
     }
 }
 

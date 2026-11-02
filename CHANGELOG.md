@@ -11,6 +11,7 @@ All notable changes to LAIN are documented here. Versions follow
 - Add first-class ORM model/table/column relations and migration evidence for Django, SQLAlchemy, Prisma, Drizzle, TypeORM, and Sequelize. `FEDERATION_GRAPH_VERSION` advances from 4 to 5; run `lain reindex` to back up and rebuild older graphs.
 - Add operation-scoped topic/GraphQL payload reads and frontend `Renders`, `Stores`, `Forwards`, and `Discards` relations, keeping dynamic or ambiguous lineage explicitly unresolved.
 - Preserve OpenTelemetry resource and scope identity, and report relation, emitter, and snapshot readiness through `get_capabilities`.
+- Keep MCP cold-start handshakes non-blocking with an installed default embedding model by deferring checksum verification and ONNX initialization until first use; semantic capability reports warming until the model is ready.
 
 ## [0.14.0] - 2026-10-30
 

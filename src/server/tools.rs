@@ -603,6 +603,7 @@ impl ToolExecutor {
             mirrors_state: CapabilityState,
             retry_after_ms: Option<u64>,
             semantic_stub: bool,
+            semantic_ready: bool,
             embeddings_running: bool,
         ) -> Capabilities {
             let mut symbols = Capability::new(structural, false);
@@ -619,9 +620,11 @@ impl ToolExecutor {
             }
             let semantic_search = if semantic_stub {
                 Capability::new(CapabilityState::UnavailableOptional, true)
-            } else if structural == CapabilityState::Ready && embeddings_running {
-                // Answers already, but from a partial embedding set that
-                // keeps changing until the background pass ends.
+            } else if structural == CapabilityState::Ready
+                && (!semantic_ready || embeddings_running)
+            {
+                // Model loading or the background embedding pass is still
+                // in flight, so semantic answers are not complete yet.
                 let mut c = Capability::new(CapabilityState::WarmingUp, true);
                 c.retry_after_ms = Some(5_000);
                 c
@@ -703,6 +706,7 @@ impl ToolExecutor {
         }
 
         let semantic_stub = self.ctx.embedder.is_stub();
+        let semantic_ready = self.ctx.embedder.is_ready();
         let embeddings_running = self
             .ctx
             .readiness
@@ -766,6 +770,7 @@ impl ToolExecutor {
                         structural,
                         snapshot.retry_after_ms,
                         semantic_stub,
+                        semantic_ready,
                         embeddings_running,
                     );
                     let r = readiness_by_id.get(id);
@@ -795,6 +800,7 @@ impl ToolExecutor {
                 worst,
                 worst_retry_after_ms,
                 semantic_stub,
+                semantic_ready,
                 embeddings_running,
             );
 
@@ -820,6 +826,7 @@ impl ToolExecutor {
             structural,
             lifecycle.retry_after_ms,
             semantic_stub,
+            semantic_ready,
             embeddings_running,
         );
         // Surface the active tool profile so an agent can self-
@@ -1597,6 +1604,32 @@ mod tests {
         assert_eq!(snapshot.state, crate::server::readiness::IndexState::Ready);
         assert!(
             crate::server::readiness::gate_tool_call("find_anchors", &snapshot, true).is_none()
+        );
+    }
+
+    #[test]
+    fn lazy_embedding_model_reports_semantic_warming_until_loaded() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("model.onnx"), b"not loaded yet").unwrap();
+        std::fs::write(tmp.path().join("tokenizer.json"), b"{}").unwrap();
+        let embedder = crate::nlp::NlpEmbedder::load_or_stub(Some(tmp.path()), 1);
+        assert!(!embedder.is_stub());
+        assert!(!embedder.is_ready());
+
+        let graph = crate::graph::GraphDatabase::empty_read_only();
+        let overlay = crate::overlay::VolatileOverlay::new();
+        let mut executor =
+            ToolExecutor::new_read_only(graph, overlay, std::path::PathBuf::from("."));
+        executor.ctx.embedder = embedder;
+        let value: serde_json::Value =
+            serde_json::from_str(&executor.get_capabilities().unwrap()).unwrap();
+        assert_eq!(
+            value["capabilities"]["semantic_search"]["state"],
+            "warming_up"
+        );
+        assert_eq!(
+            value["capabilities"]["semantic_search"]["retry_after_ms"],
+            5_000
         );
     }
 
