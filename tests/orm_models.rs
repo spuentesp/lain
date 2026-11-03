@@ -552,3 +552,41 @@ fn prisma_parser_ignores_comments_and_nested_attribute_parentheses() {
         .iter()
         .any(|column| column.name == "fake" || column.name == "//"));
 }
+
+#[test]
+fn typeorm_and_drizzle_use_ast_names_and_locations() {
+    let tmp = tempfile::tempdir().unwrap();
+    write(
+        tmp.path(),
+        "src/entities.ts",
+        "@Entity()\nexport class OrderItem {\n  @Column({ name: 'display_name', transformer: { to: value => value } })\n  name: string;\n}\n",
+    );
+    write(
+        tmp.path(),
+        "src/schema.ts",
+        "export const orders = pgTable('orders', {\n  total: numeric('total_amount', { precision: 10, scale: 2 }),\n});\n",
+    );
+    let analysis = analyze_orm_models(tmp.path());
+    assert!(relation(
+        &analysis,
+        EdgeType::MapsTo,
+        "OrderItem",
+        "order_item"
+    ));
+    assert!(relation(
+        &analysis,
+        EdgeType::HasColumn,
+        "order_item",
+        "display_name"
+    ));
+    assert!(relation(
+        &analysis,
+        EdgeType::HasColumn,
+        "orders",
+        "total_amount"
+    ));
+    assert!(analysis
+        .columns
+        .iter()
+        .any(|column| column.name == "total_amount" && column.line == 2));
+}

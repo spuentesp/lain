@@ -751,12 +751,6 @@ orm_models:
   django_field_suffixes: [Field]
   sqlalchemy_column_calls: [Column]
   patterns:
-    drizzle_table: '(?:const|let|var)\s+(\w+)\s*=\s*(?:pgTable|mysqlTable|sqliteTable)\(\s*[''"'']([^''""]+)[''"'']\s*,\s*\{([\s\S]*?)\}\s*\)'
-    drizzle_column: '(?m)^\s*(\w+)\s*:\s*\w+\(\s*[''"'']([^''""]+)[''"'']'
-    typeorm_entity: '@Entity\(([^\)]*)\)\s*export\s+class\s+(\w+)'
-    typeorm_name: 'name\s*:\s*[''"'']([^''""]+)[''"'']'
-    typeorm_column: '@Column\('
-    typeorm_property: '(?m)^\s*(\w+)'
     sequelize_define: 'sequelize\.define\(\s*[''"''](\w+)[''"'']\s*,\s*\{'
     sequelize_init: '(?m)(\w+)\.init\(\s*\{'
     sequelize_table: 'tableName\s*:\s*[''"'']([^''""]+)[''"'']'

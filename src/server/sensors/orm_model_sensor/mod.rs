@@ -2,6 +2,7 @@ pub(crate) mod django;
 mod migrations;
 mod prisma;
 mod python;
+mod typescript;
 
 use crate::error::LainError;
 use crate::federation::contracts::coverage::UnresolvedRecord;
@@ -87,10 +88,6 @@ fn must_materialize(graph: &GraphDatabase, id: &str) -> Result<bool, LainError> 
     })
 }
 
-fn table_name(model: &str) -> String {
-    model.to_lowercase()
-}
-
 fn add_model(
     analysis: &mut OrmAnalysis,
     orm: &str,
@@ -141,111 +138,6 @@ fn add_column(
     });
 }
 
-fn analyze_drizzle(analysis: &mut OrmAnalysis, path: &str, content: &str, shapes: &OrmModelShapes) {
-    let table_re = pattern(
-        shapes,
-        "drizzle_table",
-        r#"(?:const|let|var)\s+(\w+)\s*=\s*(?:pgTable|mysqlTable|sqliteTable)\(\s*['\"]([^'\"]+)['\"]\s*,\s*\{([\s\S]*?)\}\s*\)"#,
-    );
-    let column_re = pattern(
-        shapes,
-        "drizzle_column",
-        r#"(?m)^\s*(\w+)\s*:\s*\w+\(\s*['\"]([^'\"]+)['\"]"#,
-    );
-    for table in table_re.captures_iter(content) {
-        let model = table.get(1).unwrap();
-        let table_name = table.get(2).unwrap().as_str();
-        let body = table.get(3).unwrap().as_str();
-        add_model(
-            analysis,
-            "drizzle",
-            model.as_str(),
-            table_name,
-            path,
-            line_of(content, model.start()),
-            StaticSource::Regex,
-        );
-        for column in column_re.captures_iter(body) {
-            let _property = column.get(1).unwrap();
-            let name = column.get(2).unwrap().as_str();
-            add_column(
-                analysis,
-                table_name,
-                name,
-                path,
-                line_of(
-                    content,
-                    table.get(3).unwrap().start() + column.get(0).unwrap().start(),
-                ),
-                StaticSource::Regex,
-            );
-        }
-    }
-}
-
-fn analyze_typeorm(analysis: &mut OrmAnalysis, path: &str, content: &str, shapes: &OrmModelShapes) {
-    let entity_re = pattern(
-        shapes,
-        "typeorm_entity",
-        r#"@Entity\(([^\)]*)\)\s*export\s+class\s+(\w+)"#,
-    );
-    let name_re = pattern(shapes, "typeorm_name", r#"name\s*:\s*['\"]([^'\"]+)['\"]"#);
-    let column_re = pattern(shapes, "typeorm_column", r#"@Column\("#);
-    let property_re = pattern(shapes, "typeorm_property", r#"(?m)^\s*(\w+)"#);
-    let entities: Vec<_> = entity_re.captures_iter(content).collect();
-    for (index, entity) in entities.iter().enumerate() {
-        let options = entity.get(1).unwrap().as_str();
-        let model = entity.get(2).unwrap().as_str();
-        let table = name_re
-            .captures(options)
-            .and_then(|m| m.get(1))
-            .map(|m| m.as_str().to_string())
-            .unwrap_or_else(|| table_name(model));
-        add_model(
-            analysis,
-            "typeorm",
-            model,
-            &table,
-            path,
-            line_of(content, entity.get(0).unwrap().start()),
-            StaticSource::Regex,
-        );
-        let body_start = entity.get(0).unwrap().end();
-        let body_end = entities
-            .get(index + 1)
-            .and_then(|next| next.get(0))
-            .map(|next| next.start())
-            .unwrap_or(content.len());
-        let body = &content[body_start..body_end];
-        for column in column_re.captures_iter(body) {
-            let open = column.get(0).unwrap().end() - 1;
-            let Some((options, closing)) = paren_region(body, open) else {
-                continue;
-            };
-            let Some(property_match) = property_re.captures(&body[closing + 1..]) else {
-                continue;
-            };
-            let property = property_match.get(1).unwrap().as_str();
-            let literal = name_re.captures(options).and_then(|m| m.get(1));
-            if options.contains("name") && literal.is_none() {
-                analysis
-                    .unresolved
-                    .push(format!("{path}: dynamic column on {model}"));
-                continue;
-            }
-            let name = literal.map(|m| m.as_str()).unwrap_or(property);
-            add_column(
-                analysis,
-                &table,
-                name,
-                path,
-                line_of(content, body_start + column.get(0).unwrap().start()),
-                StaticSource::Regex,
-            );
-        }
-    }
-}
-
 fn braced_region(text: &str, open: usize) -> Option<(&str, usize)> {
     if text.as_bytes().get(open) != Some(&b'{') {
         return None;
@@ -275,46 +167,6 @@ fn braced_region(text: &str, open: usize) -> Option<(&str, usize)> {
         match ch {
             '{' => depth += 1,
             '}' => {
-                depth = depth.checked_sub(1)?;
-                if depth == 0 {
-                    return Some((&text[open + 1..open + offset], open + offset));
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-fn paren_region(text: &str, open: usize) -> Option<(&str, usize)> {
-    if text.as_bytes().get(open) != Some(&b'(') {
-        return None;
-    }
-    let mut depth = 0usize;
-    let mut quote = None;
-    let mut escaped = false;
-    for (offset, ch) in text[open..].char_indices() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        if ch == '\\' {
-            escaped = true;
-            continue;
-        }
-        if let Some(active) = quote {
-            if ch == active {
-                quote = None;
-            }
-            continue;
-        }
-        if matches!(ch, '\'' | '"' | '`') {
-            quote = Some(ch);
-            continue;
-        }
-        match ch {
-            '(' => depth += 1,
-            ')' => {
                 depth = depth.checked_sub(1)?;
                 if depth == 0 {
                     return Some((&text[open + 1..open + offset], open + offset));
@@ -526,8 +378,13 @@ pub fn analyze_orm_models(root: &Path) -> OrmAnalysis {
             }
             "prisma" => prisma::analyze(&mut analysis, &path, &content),
             "ts" | "tsx" => {
-                analyze_drizzle(&mut analysis, &path, &content, shapes);
-                analyze_typeorm(&mut analysis, &path, &content, shapes);
+                let lang = if extension == "tsx" {
+                    crate::server::sensors::util::Lang::Tsx
+                } else {
+                    crate::server::sensors::util::Lang::Ts
+                };
+                typescript::analyze_drizzle(&mut analysis, &path, &content, &patterns, lang);
+                typescript::analyze_typeorm(&mut analysis, &path, &content, &patterns, lang);
             }
             "js" | "jsx" => analyze_sequelize(&mut analysis, &path, &content, shapes),
             _ => {}
