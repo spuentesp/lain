@@ -525,3 +525,30 @@ fn sqlalchemy_and_python_migrations_require_structural_identity() {
         .iter()
         .any(|column| column.migration.is_some()));
 }
+
+#[test]
+fn prisma_parser_ignores_comments_and_nested_attribute_parentheses() {
+    let tmp = tempfile::tempdir().unwrap();
+    write(
+        tmp.path(),
+        "schema.prisma",
+        "// model Fake {\n// ignored String\nmodel OrderItem {\n  id Int @id @default(autoincrement())\n  label String @default(db.generated(\"x)y\")) @map(\"display_name\")\n  // fake String @map(\"fake\")\n}\n",
+    );
+    let analysis = analyze_orm_models(tmp.path());
+    assert!(relation(
+        &analysis,
+        EdgeType::MapsTo,
+        "OrderItem",
+        "OrderItem"
+    ));
+    assert!(relation(
+        &analysis,
+        EdgeType::HasColumn,
+        "OrderItem",
+        "display_name"
+    ));
+    assert!(!analysis
+        .columns
+        .iter()
+        .any(|column| column.name == "fake" || column.name == "//"));
+}

@@ -1,5 +1,6 @@
 pub(crate) mod django;
 mod migrations;
+mod prisma;
 mod python;
 
 use crate::error::LainError;
@@ -138,51 +139,6 @@ fn add_column(
         site: site(path, line),
         source,
     });
-}
-
-fn analyze_prisma(analysis: &mut OrmAnalysis, path: &str, content: &str, shapes: &OrmModelShapes) {
-    let model_re = pattern(shapes, "prisma_model", r#"model\s+(\w+)\s*\{([\s\S]*?)\}"#);
-    let table_re = pattern(shapes, "prisma_table", r#"@@map\(\"([^\"]+)\"\)"#);
-    let map_re = pattern(shapes, "prisma_column", r#"@map\(\"([^\"]+)\"\)"#);
-    for model in model_re.captures_iter(content) {
-        let name = model.get(1).unwrap();
-        let body = model.get(2).unwrap().as_str();
-        let table = table_re
-            .captures(body)
-            .and_then(|m| m.get(1))
-            .map(|m| m.as_str().to_string())
-            .unwrap_or_else(|| name.as_str().to_string());
-        add_model(
-            analysis,
-            "prisma",
-            name.as_str(),
-            &table,
-            path,
-            line_of(content, name.start()),
-            StaticSource::Regex,
-        );
-        for (offset, line) in body.lines().enumerate() {
-            let trimmed = line.trim();
-            let mut parts = trimmed.split_whitespace();
-            let Some(field) = parts.next() else { continue };
-            if trimmed.starts_with("//") || field.starts_with('@') || parts.next().is_none() {
-                continue;
-            }
-            let column = map_re
-                .captures(trimmed)
-                .and_then(|m| m.get(1))
-                .map(|m| m.as_str())
-                .unwrap_or(field);
-            add_column(
-                analysis,
-                &table,
-                column,
-                path,
-                line_of(content, model.get(0).unwrap().start()) + offset as u32 + 1,
-                StaticSource::Regex,
-            );
-        }
-    }
 }
 
 fn analyze_drizzle(analysis: &mut OrmAnalysis, path: &str, content: &str, shapes: &OrmModelShapes) {
@@ -568,7 +524,7 @@ pub fn analyze_orm_models(root: &Path) -> OrmAnalysis {
             "py" => {
                 python::analyze_sqlalchemy(&mut analysis, &path, &content, &patterns);
             }
-            "prisma" => analyze_prisma(&mut analysis, &path, &content, shapes),
+            "prisma" => prisma::analyze(&mut analysis, &path, &content),
             "ts" | "tsx" => {
                 analyze_drizzle(&mut analysis, &path, &content, shapes);
                 analyze_typeorm(&mut analysis, &path, &content, shapes);
