@@ -1633,6 +1633,19 @@ mod tests {
         );
     }
 
+    fn assert_engine_lifecycle(repo: &serde_json::Value, state: &str) {
+        assert!(repo["relations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|relation| { relation["state"] == state && relation["indexed"].is_boolean() }));
+        assert!(repo["emitters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|emitter| { emitter["state"] == state && emitter["name"].is_string() }));
+    }
+
     /// AGENT_UX_ROADMAP.md M4 step 8: in federation mode, `get_capabilities`
     /// must report both each repo's own state (`repositories`) and a
     /// worst-of aggregate under the existing `capabilities` key, not the
@@ -1684,6 +1697,26 @@ mod tests {
         assert_eq!(repos[0]["capabilities"]["symbols"]["state"], "ready");
         assert_eq!(repos[1]["id"], "beta");
         assert_eq!(repos[1]["capabilities"]["symbols"]["state"], "warming_up");
+        assert_engine_lifecycle(&repos[1], "warming_up");
+
+        executor
+            .ctx
+            .federation
+            .as_ref()
+            .unwrap()
+            .get_repo(&RepoId::new("beta").unwrap())
+            .unwrap()
+            .set_health(RepoHealth::Unavailable);
+        let unavailable: serde_json::Value =
+            serde_json::from_str(&executor.get_capabilities().unwrap()).unwrap();
+        let beta = &unavailable["repositories"][1];
+        assert_engine_lifecycle(beta, "unavailable_error");
+        assert!(beta["relations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|relation| relation["indexed"].is_boolean()));
+        assert_eq!(unavailable["snapshots"]["state"], "unavailable_optional");
 
         drop(src_dirs);
     }

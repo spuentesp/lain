@@ -1187,13 +1187,8 @@ fn capped_names_in_insertion_order(order: &[&str]) -> Vec<String> {
         .collect();
     graph.insert_nodes_batch(&nodes).unwrap();
     let (embedder, cache) = make_test_executor_params();
-    let mut executor = Executor::with_default_limit(
-        &graph,
-        &embedder,
-        &cache,
-        std::path::Path::new(""),
-        2,
-    );
+    let mut executor =
+        Executor::with_default_limit(&graph, &embedder, &cache, std::path::Path::new(""), 2);
     let spec = QuerySpec::new(vec![GraphOp::Find(FindOp::new().r#type("Function"))]);
     executor
         .execute(&spec)

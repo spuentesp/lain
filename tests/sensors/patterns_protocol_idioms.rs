@@ -571,16 +571,28 @@ fn tier1_did_not_add_a_new_scm_file() {
     // would shift the build-time `OUT_DIR/queries.rs` and the
     // `LEN` const. Pin `LEN` so the change is visible.
     let len = patterns::generated::LEN;
-    // The known-good count from the Tier-0 baseline
-    // (HTTP-route + HTTP-outbound + entry-point .scm files).
-    // Rust gRPC discovery independently adds one structural query. Tier 1
-    // protocol idioms still contribute no queries to this baseline.
+    // The Tier-0 baseline is 39 files. The ORM AST extractors add nine
+    // structural queries (Django model, SQLAlchemy model, two Python
+    // migrations, TypeORM and Drizzle in TS/TSX, and Sequelize). Tier 1
+    // protocol idioms still contribute no queries beyond that baseline.
     assert!(patterns::generated::get("rust/grpc-candidate.scm").is_some());
+    for query in [
+        "python/django-orm-model.scm",
+        "python/sqlalchemy-orm-model.scm",
+        "python/django-orm-migration.scm",
+        "python/sqlalchemy-orm-migration.scm",
+        "ts/typeorm-orm-model.scm",
+        "tsx/typeorm-orm-model.scm",
+        "ts/drizzle-orm-model.scm",
+        "tsx/drizzle-orm-model.scm",
+        "tsjs/sequelize-orm-model.scm",
+    ] {
+        assert!(patterns::generated::get(query).is_some(), "missing {query}");
+    }
     assert_eq!(
-        len, 39,
+        len, 48,
         "patterns/build.rs generated count changed unexpectedly. \
-         Tier 1 must not add a new .scm file to the build pipeline — \
-         idioms are pure regex data in frameworks.yaml."
+         The Tier-0 baseline plus nine ORM AST queries must stay stable."
     );
 }
 

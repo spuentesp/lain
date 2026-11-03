@@ -768,7 +768,7 @@ fn analyze_file(
         }
     }
 
-    // Instance creation (`x = Model(...)`) and plain reassignments that
+    // Instance creation (`x = Model(...)`) and later assignments that
     // aren't already handled by `.objects` or `get_object_or_404`.
     for (idx, line_text) in m.lines().enumerate() {
         let line_no = (idx + 1) as u32;

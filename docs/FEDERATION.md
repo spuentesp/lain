@@ -604,6 +604,10 @@ a precise measurement.
 - **`unavailable`**: source `fetch()` failed (e.g., unreachable remote).
 - **`missing`**: expected repository data directory is missing.
 
+### Relation, emitter, and snapshot capabilities
+
+`relations[].indexed` and `emitters[]` describe compiled-in support from the edge registry and sensor inventory. Their `state`, and `snapshots.state`, describe the owning repository's index lifecycle (`ready`, `warming_up`, or `unavailable_error`). They do not assert that a relation occurred in source or that every sensor completed without an extraction gap. Zero detections therefore leave a registered emitter ready. Use contract coverage and unresolved records for per-sensor extraction gaps.
+
 ### Git sensor & sidecar troubleshooting
 
 Git operations run via the `lain-git-sidecar` child daemon by default (2 s IPC timeout, automatic bounded recovery).
