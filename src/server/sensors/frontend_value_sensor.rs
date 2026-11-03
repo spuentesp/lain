@@ -1,22 +1,49 @@
 use crate::error::LainError;
-use crate::federation::contracts::model::{ContractFact, SourceSite};
+use crate::federation::contracts::coverage::UnresolvedRecord;
+use crate::federation::contracts::model::{ContractFact, SourceSite, UnresolvedReason};
 use crate::graph::{graph_path, GraphDatabase};
 use crate::schema::{EdgeType, GraphEdge, NodeType, RepoNamespace};
-use crate::server::sensors::patterns::{FrontendValueShapes, Patterns};
+use crate::server::sensors::patterns::Patterns;
 use crate::server::sensors::util::{enclosing_symbol, parse_for_lang, Lang};
-use regex::Regex;
+use crate::server::sensors::{ScanReport, SensorEntry};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use tree_sitter::Node;
 
 pub struct FrontendValueSensor;
-crate::server::sensors::register_sensor!(
-    FrontendValueSensor,
-    "frontend_values",
-    FrontendValues,
-    2,
-    scan_workspace_frontend_values
-);
+
+impl crate::server::sensors::Sensor for FrontendValueSensor {
+    fn name(&self) -> &'static str {
+        "frontend_values"
+    }
+
+    fn count_field(&self) -> crate::server::sensors::SensorCountField {
+        crate::server::sensors::SensorCountField::FrontendValues
+    }
+
+    fn phase(&self) -> u8 {
+        2
+    }
+
+    fn scan(
+        &self,
+        graph: &GraphDatabase,
+        root: &Path,
+        namespace: &RepoNamespace,
+    ) -> Result<usize, LainError> {
+        scan_workspace_frontend_values(graph, root, namespace)
+    }
+
+    fn scan_with_report(
+        &self,
+        graph: &GraphDatabase,
+        root: &Path,
+        namespace: &RepoNamespace,
+    ) -> Result<ScanReport, LainError> {
+        scan_workspace_frontend_values_with_report(graph, root, namespace)
+    }
+}
+inventory::submit!(SensorEntry(&FrontendValueSensor));
 
 #[derive(Debug, Clone)]
 struct Binding {
@@ -27,16 +54,7 @@ struct Binding {
     declaration_start: u32,
     scope_start: u32,
     scope_end: u32,
-}
-
-fn pattern(shapes: &FrontendValueShapes, key: &str, fallback: &str) -> Regex {
-    let source = shapes
-        .patterns
-        .get(key)
-        .map(String::as_str)
-        .unwrap_or(fallback);
-    Regex::new(source)
-        .unwrap_or_else(|error| panic!("invalid frontend value pattern {key}: {error}"))
+    react_setters: BTreeSet<String>,
 }
 
 fn line(node: Node) -> u32 {
@@ -64,6 +82,122 @@ fn call_using(node: Node, src: &[u8]) -> Option<String> {
         .utf8_text(src)
         .ok()
         .map(str::to_string)
+}
+
+#[derive(Clone, Copy)]
+enum ReactHook {
+    UseState,
+    UseReducer,
+}
+
+struct ReactImports {
+    by_local_name: BTreeMap<String, ReactHook>,
+    namespaces: BTreeSet<String>,
+}
+
+impl ReactImports {
+    fn kind_of(&self, local_name: &str) -> Option<ReactHook> {
+        self.by_local_name.get(local_name).copied()
+    }
+}
+
+fn hook_from_name(name: &str) -> Option<ReactHook> {
+    match name {
+        "useState" => Some(ReactHook::UseState),
+        "useReducer" => Some(ReactHook::UseReducer),
+        _ => None,
+    }
+}
+
+fn react_imports(root: Node, src: &[u8]) -> ReactImports {
+    let mut imports = ReactImports {
+        by_local_name: BTreeMap::new(),
+        namespaces: BTreeSet::new(),
+    };
+    let mut pending = vec![root];
+    while let Some(node) = pending.pop() {
+        if node.kind() == "import_statement" {
+            let source = node
+                .child_by_field_name("source")
+                .and_then(|source| source.utf8_text(src).ok())
+                .unwrap_or("");
+            if source == "\"react\"" || source == "'react'" {
+                let mut cursor = node.walk();
+                let children: Vec<_> = node.named_children(&mut cursor).collect();
+                pending.extend(children);
+                continue;
+            }
+        } else if node.kind() == "import_specifier" {
+            let original = node
+                .child_by_field_name("name")
+                .and_then(|name| name.utf8_text(src).ok())
+                .unwrap_or("");
+            if let Some(hook) = hook_from_name(original) {
+                let local = node
+                    .child_by_field_name("alias")
+                    .and_then(|alias| alias.utf8_text(src).ok())
+                    .unwrap_or(original);
+                imports.by_local_name.insert(local.to_string(), hook);
+            }
+        } else if node.kind() == "namespace_import" {
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                if child.kind() == "identifier" {
+                    if let Ok(name) = child.utf8_text(src) {
+                        imports.namespaces.insert(name.to_string());
+                    }
+                }
+            }
+        } else if node.kind() == "identifier" {
+            if let Ok(name) = node.utf8_text(src) {
+                if name == "React" {
+                    imports.namespaces.insert(name.to_string());
+                }
+            }
+        }
+        let mut cursor = node.walk();
+        let children: Vec<_> = node.named_children(&mut cursor).collect();
+        pending.extend(children);
+    }
+    imports
+}
+
+fn called_hook_name(value: Node, src: &[u8], imports: &ReactImports) -> Option<ReactHook> {
+    let call = (value.kind() == "call_expression").then_some(value)?;
+    let function = call.child_by_field_name("function")?;
+    match function.kind() {
+        "identifier" => imports.kind_of(function.utf8_text(src).ok()?),
+        "member_expression" => {
+            let object = function.child_by_field_name("object")?;
+            if !imports.namespaces.contains(object.utf8_text(src).ok()?) {
+                return None;
+            }
+            let property = function.child_by_field_name("property")?;
+            hook_from_name(property.utf8_text(src).ok()?)
+        }
+        _ => None,
+    }
+}
+
+fn array_pattern_element(name: Node, slot: usize, src: &[u8]) -> Option<String> {
+    if name.kind() != "array_pattern" {
+        return None;
+    }
+    let mut cursor = name.walk();
+    let element = name.named_children(&mut cursor).nth(slot)?;
+    if element.kind() != "identifier" {
+        return None;
+    }
+    element.utf8_text(src).ok().map(str::to_string)
+}
+
+fn react_setter(node: Node, src: &[u8], react_hooks: &ReactImports) -> Option<String> {
+    let declarator = (node.kind() == "variable_declarator").then_some(node)?;
+    let name = declarator.child_by_field_name("name")?;
+    let value = declarator.child_by_field_name("value")?;
+    match called_hook_name(value, src, react_hooks)? {
+        ReactHook::UseState | ReactHook::UseReducer => array_pattern_element(name, 1, src),
+    }
 }
 
 fn variable_declaration(node: Node, src: &[u8]) -> Option<(String, u32)> {
@@ -133,13 +267,13 @@ fn emit(
     edges.push(edge);
 }
 
-pub fn scan_workspace_frontend_values(
+pub fn scan_workspace_frontend_values_with_report(
     graph: &GraphDatabase,
     root: &Path,
     _namespace: &RepoNamespace,
-) -> Result<usize, LainError> {
+) -> Result<ScanReport, LainError> {
     if graph.is_read_only() {
-        return Ok(0);
+        return Ok(ScanReport::default());
     }
     let patterns = Patterns::with_overrides(root).unwrap_or_else(|error| {
         tracing::warn!(
@@ -148,12 +282,7 @@ pub fn scan_workspace_frontend_values(
         std::borrow::Cow::Borrowed(Patterns::patterns())
     });
     let shapes = patterns.frontend_value_shapes();
-    let storage_call = pattern(
-        shapes,
-        "storage_call",
-        r"^(?:localStorage|sessionStorage)\.setItem$",
-    );
-    let state_setter = pattern(shapes, "state_setter", r"^set[A-Z_]");
+    let storage_calls = &shapes.storage_calls;
     let nodes = graph.get_all_nodes();
     let mut field_nodes = BTreeMap::new();
     for node in &nodes {
@@ -173,6 +302,7 @@ pub fn scan_workspace_frontend_values(
     }
     let graph_edges = graph.all_edges();
     let mut edges = Vec::new();
+    let mut unclassified_sites = Vec::new();
 
     for (file_path, content, extension) in crate::server::sensors::util::scan_files(root, |path| {
         path.extension()
@@ -190,6 +320,18 @@ pub fn scan_workspace_frontend_values(
             continue;
         };
         let src = content.as_bytes();
+        let react_hooks = react_imports(tree.root_node(), src);
+        let mut setter_scopes = Vec::new();
+        let mut setter_pending = vec![tree.root_node()];
+        while let Some(node) = setter_pending.pop() {
+            if let Some(setter) = react_setter(node, src, &react_hooks) {
+                let (scope_start, scope_end) = lexical_scope(node);
+                setter_scopes.push((scope_start, scope_end, setter));
+            }
+            let mut cursor = node.walk();
+            let children: Vec<_> = node.named_children(&mut cursor).collect();
+            setter_pending.extend(children.into_iter().rev());
+        }
         let mut pending = vec![tree.root_node()];
         let mut bindings = Vec::new();
         while let Some(node) = pending.pop() {
@@ -214,6 +356,13 @@ pub fn scan_workspace_frontend_values(
                                 declaration_start: node.start_byte() as u32,
                                 scope_start,
                                 scope_end,
+                                react_setters: setter_scopes
+                                    .iter()
+                                    .filter(|(start, end, _)| {
+                                        *start == scope_start && *end == scope_end
+                                    })
+                                    .map(|(_, _, setter)| setter.clone())
+                                    .collect(),
                             });
                         }
                     }
@@ -258,35 +407,27 @@ pub fn scan_workspace_frontend_values(
                             let binding = &bindings[index];
                             if !is_declaration_name(node, src, name) {
                                 used.insert(index);
-                                if inside_jsx_attribute(node) {
-                                    emit(
-                                        &mut edges,
-                                        &mut seen,
-                                        EdgeType::Forwards,
-                                        binding,
-                                        &path,
-                                        use_line,
-                                    );
+                                let disposition = if inside_jsx_attribute(node) {
+                                    Some(EdgeType::Forwards)
                                 } else if inside_jsx_expression(node) {
-                                    emit(
-                                        &mut edges,
-                                        &mut seen,
-                                        EdgeType::Renders,
-                                        binding,
-                                        &path,
-                                        use_line,
-                                    );
+                                    Some(EdgeType::Renders)
                                 } else if let Some(call) = call_using(node, src) {
-                                    let edge_type = if storage_call.is_match(&call)
-                                        || state_setter.is_match(&call)
+                                    if storage_calls.contains(&call)
+                                        || binding.react_setters.contains(&call)
                                     {
-                                        EdgeType::Stores
+                                        Some(EdgeType::Stores)
                                     } else {
-                                        EdgeType::Forwards
-                                    };
+                                        Some(EdgeType::Forwards)
+                                    }
+                                } else {
+                                    None
+                                };
+                                if let Some(edge_type) = disposition {
                                     emit(
                                         &mut edges, &mut seen, edge_type, binding, &path, use_line,
                                     );
+                                } else {
+                                    unclassified_sites.push(format!("{path}:{use_line}"));
                                 }
                             }
                         }
@@ -321,7 +462,31 @@ pub fn scan_workspace_frontend_values(
         })
         .collect();
     graph.remove_edges(&stale)?;
-    let emitted = edges.len();
     graph.insert_edges_batch(&edges)?;
-    Ok(emitted)
+    unclassified_sites.sort();
+    unclassified_sites.dedup();
+    Ok(ScanReport {
+        emitted: edges.len(),
+        error: None,
+        unresolved: grouped_unresolved(&unclassified_sites),
+    })
+}
+
+fn grouped_unresolved(sites: &[String]) -> Vec<UnresolvedRecord> {
+    if sites.is_empty() {
+        return Vec::new();
+    }
+    vec![UnresolvedRecord {
+        reason: UnresolvedReason::FrontendValueUnclassified,
+        count: sites.len(),
+        sample_ids: sites.iter().take(5).cloned().collect(),
+    }]
+}
+
+pub fn scan_workspace_frontend_values(
+    graph: &GraphDatabase,
+    root: &Path,
+    namespace: &RepoNamespace,
+) -> Result<usize, LainError> {
+    scan_workspace_frontend_values_with_report(graph, root, namespace).map(|report| report.emitted)
 }

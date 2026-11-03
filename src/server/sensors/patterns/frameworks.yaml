@@ -753,6 +753,6 @@ orm_models:
 
 
 frontend_values:
-  patterns:
-    storage_call: '^(?:localStorage|sessionStorage)\.setItem$'
-    state_setter: '^set[A-Z_]'
+  storage_calls:
+    - localStorage.setItem
+    - sessionStorage.setItem

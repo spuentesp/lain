@@ -1,9 +1,12 @@
 use lain::federation::contracts::model::{
-    ContractFact, FieldReadFact, FieldReadOrigin, JsonPath, SourceSite,
+    ContractFact, FieldReadFact, FieldReadOrigin, JsonPath, SourceSite, UnresolvedReason,
 };
 use lain::graph::GraphDatabase;
 use lain::schema::{EdgeProvenance, EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace};
-use lain::server::sensors::frontend_value_sensor::scan_workspace_frontend_values;
+use lain::server::sensors::frontend_value_sensor::{
+    scan_workspace_frontend_values, scan_workspace_frontend_values_with_report,
+};
+use lain::server::sensors::ScanReport;
 use std::str::FromStr;
 
 const PATH: &str = "src/Orders.tsx";
@@ -196,4 +199,103 @@ fn dispositions_resolve_shadowing_sibling_scopes_and_declaration_order() {
             "missing discard for {field:#?}"
         );
     }
+}
+
+struct FrontendFixture {
+    _temp: tempfile::TempDir,
+    graph: GraphDatabase,
+    component: GraphNode,
+    fields: std::collections::BTreeMap<String, GraphNode>,
+}
+
+impl FrontendFixture {
+    fn new(source: &str) -> Self {
+        let (_temp, graph, component, fields) = build_exact_frontend_graph(source);
+        Self {
+            _temp,
+            graph,
+            component,
+            fields,
+        }
+    }
+
+    fn scan(&self) -> ScanReport {
+        scan_workspace_frontend_values_with_report(
+            &self.graph,
+            self._temp.path(),
+            &RepoNamespace::for_test(),
+        )
+        .unwrap()
+    }
+
+    fn has(&self, edge_type: EdgeType, field: &str) -> bool {
+        let field = &self.fields[field];
+        self.graph.all_edges().iter().any(|edge| {
+            edge.edge_type == edge_type
+                && edge.source_id == self.component.id
+                && edge.target_id == field.id
+        })
+    }
+}
+
+fn build_exact_frontend_graph(
+    source: &str,
+) -> (
+    tempfile::TempDir,
+    GraphDatabase,
+    GraphNode,
+    std::collections::BTreeMap<String, GraphNode>,
+) {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(temp.path().join("src")).unwrap();
+    std::fs::write(temp.path().join(PATH), source).unwrap();
+    let graph = GraphDatabase::new(&temp.path().join("graph.bin")).unwrap();
+    let namespace = RepoNamespace::for_test();
+    let mut component =
+        GraphNode::new_in(NodeType::Function, "Orders".into(), PATH.into(), &namespace);
+    component.id = GraphNode::generate_id(&NodeType::Function, PATH, "Orders", Some(1), &namespace);
+    component.line_start = Some(1);
+    component.line_end = Some(20);
+    graph.insert_nodes_batch(&[component.clone()]).unwrap();
+    let fields = [("customer.id", 4), ("total", 5), ("internal", 6)]
+        .into_iter()
+        .map(|(name, line)| {
+            (
+                name.to_string(),
+                add_field(&graph, &component, name, line, true),
+            )
+        })
+        .collect();
+    (temp, graph, component, fields)
+}
+
+#[test]
+fn frontend_storage_uses_bindings_and_unclassified_use_is_not_discarded() {
+    let source = r#"import { useState as useReactState } from "react";
+export function Orders({ data }) {
+  const [ignored, refresh] = useReactState(null);
+  const stored = data.customer.id;
+  const returned = data.total;
+  const unused = data.internal;
+  refresh(stored);
+  setCustomer(returned);
+  let assigned;
+  assigned = returned;
+  return returned;
+}
+"#;
+    let fixture = FrontendFixture::new(source);
+    let report = fixture.scan();
+    assert!(fixture.has(EdgeType::Stores, "customer.id"));
+    assert!(!fixture.has(EdgeType::Stores, "total"));
+    assert!(fixture.has(EdgeType::Forwards, "total"));
+    assert!(fixture.has(EdgeType::Discards, "internal"));
+    assert!(!fixture.has(EdgeType::Discards, "total"));
+    assert!(report.unresolved.iter().any(|record| {
+        record.reason == UnresolvedReason::FrontendValueUnclassified
+            && record
+                .sample_ids
+                .iter()
+                .any(|site| site.contains("Orders.tsx"))
+    }));
 }

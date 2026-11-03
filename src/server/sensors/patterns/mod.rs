@@ -520,12 +520,12 @@ impl OrmModelShapes {
 #[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq)]
 pub struct FrontendValueShapes {
     #[serde(default)]
-    pub patterns: std::collections::BTreeMap<String, String>,
+    pub storage_calls: std::collections::BTreeSet<String>,
 }
 
 impl FrontendValueShapes {
     fn merge(&mut self, other: &Self) {
-        self.patterns.extend(other.patterns.clone());
+        self.storage_calls.extend(other.storage_calls.clone());
     }
 }
 

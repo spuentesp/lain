@@ -1159,6 +1159,9 @@ pub enum UnresolvedReason {
     /// Phase D (Gap 23): ORM or query-builder call where the table reference
     /// is dynamic or unresolved statically.
     OrmDynamicQuery,
+    /// A frontend value was used, but its disposition was not established by
+    /// structural evidence. It must not be reported as discarded or guessed.
+    FrontendValueUnclassified,
 }
 
 /// A JSON pointer (or, here, JSON path) into a payload. Segments are
