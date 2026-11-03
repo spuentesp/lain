@@ -5,7 +5,7 @@ use crate::server::sensors::patterns::Patterns;
 use crate::server::sensors::util::{language_for, parse_for_lang, to_snake_case, Lang};
 use tree_sitter::{Node, Query, QueryCursor, StreamingIterator};
 
-fn string_literal(node: Node, src: &[u8]) -> Option<String> {
+pub(super) fn string_literal(node: Node, src: &[u8]) -> Option<String> {
     if node.kind() != "string" {
         return None;
     }

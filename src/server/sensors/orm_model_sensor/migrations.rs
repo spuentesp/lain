@@ -220,3 +220,167 @@ pub(super) fn attach_python_migrations(
         );
     }
 }
+
+#[derive(Debug, Clone)]
+struct SqlToken {
+    text: String,
+    quoted: bool,
+}
+
+fn sql_tokens(statement: &str) -> Vec<SqlToken> {
+    let bytes = statement.as_bytes();
+    let mut tokens = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index].is_ascii_whitespace() || matches!(bytes[index], b',' | b'(' | b')' | b';') {
+            index += 1;
+            continue;
+        }
+        if bytes[index] == b'-' && bytes.get(index + 1) == Some(&b'-') {
+            break;
+        }
+        if matches!(bytes[index], b'\'' | b'"' | b'`' | b'[') {
+            let closing = match bytes[index] {
+                b'\'' => b'\'',
+                b'"' => b'"',
+                b'`' => b'`',
+                _ => b']',
+            };
+            let start = index + 1;
+            let mut end = start;
+            while end < bytes.len() && bytes[end] != closing {
+                end += 1;
+            }
+            if end < bytes.len() {
+                tokens.push(SqlToken {
+                    text: statement[start..end].to_string(),
+                    quoted: true,
+                });
+                index = end + 1;
+            } else {
+                index = start;
+            }
+            continue;
+        }
+        let start = index;
+        while index < bytes.len()
+            && (bytes[index].is_ascii_alphanumeric() || matches!(bytes[index], b'_' | b'.' | b'$'))
+        {
+            index += 1;
+        }
+        if start < index {
+            tokens.push(SqlToken {
+                text: statement[start..index].to_string(),
+                quoted: false,
+            });
+        } else {
+            index += 1;
+        }
+    }
+    tokens
+}
+
+fn token_eq(token: &SqlToken, expected: &str) -> bool {
+    if token.quoted {
+        token.text == expected
+    } else {
+        token.text.eq_ignore_ascii_case(expected)
+    }
+}
+
+fn keyword(token: &SqlToken, expected: &str) -> bool {
+    !token.quoted && token.text.eq_ignore_ascii_case(expected)
+}
+
+fn alter_identity(statement: &str) -> Option<(SqlToken, SqlToken)> {
+    let tokens = sql_tokens(statement);
+    if tokens.len() < 6 || !keyword(&tokens[0], "ALTER") || !keyword(&tokens[1], "TABLE") {
+        return None;
+    }
+    let table = tokens[2].clone();
+    if !keyword(&tokens[3], "ADD") || !keyword(&tokens[4], "COLUMN") {
+        return None;
+    }
+    let (column, _) = if tokens.len() >= 9
+        && keyword(&tokens[5], "IF")
+        && keyword(&tokens[6], "NOT")
+        && keyword(&tokens[7], "EXISTS")
+    {
+        (tokens[8].clone(), 8)
+    } else {
+        (tokens[5].clone(), 5)
+    };
+    Some((table, column))
+}
+
+fn quoted_statements(line: &str) -> Vec<String> {
+    let bytes = line.as_bytes();
+    let mut statements = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if !matches!(bytes[index], b'\'' | b'"' | b'`') {
+            index += 1;
+            continue;
+        }
+        let quote = bytes[index];
+        let start = index + 1;
+        let mut end = start;
+        let mut escaped = false;
+        while end < bytes.len() {
+            if escaped {
+                escaped = false;
+            } else if bytes[end] == b'\\' {
+                escaped = true;
+            } else if bytes[end] == quote {
+                break;
+            }
+            end += 1;
+        }
+        if end < bytes.len() {
+            statements.push(line[start..end].to_string());
+            index = end;
+        } else {
+            index = start;
+        }
+        index += 1;
+    }
+    statements
+}
+
+fn attach_sql_statement(analysis: &mut OrmAnalysis, path: &str, line: u32, statement: &str) {
+    let Some((table, column)) = alter_identity(statement) else {
+        return;
+    };
+    let site = SourceSite {
+        path: path.to_string(),
+        line,
+    };
+    for candidate in analysis.columns.iter_mut().filter(|candidate| {
+        token_eq(&table, &candidate.table) && token_eq(&column, &candidate.name)
+    }) {
+        candidate.migration = Some(site.clone());
+    }
+}
+
+pub(super) fn attach_sql_migrations(root: &Path, analysis: &mut OrmAnalysis) {
+    for (file, content, _) in crate::server::sensors::util::scan_files(root, |path| {
+        let normalized = crate::graph::graph_path(root, path);
+        (normalized.contains("migration") || normalized.contains("alembic"))
+            .then_some(())
+            .filter(|_| {
+                matches!(
+                    path.extension().and_then(|extension| extension.to_str()),
+                    Some("sql" | "ts" | "js")
+                )
+            })
+    }) {
+        let path = crate::graph::graph_path(root, &file);
+        for (offset, line) in content.lines().enumerate() {
+            let line_number = offset as u32 + 1;
+            attach_sql_statement(analysis, &path, line_number, line);
+            for statement in quoted_statements(line) {
+                attach_sql_statement(analysis, &path, line_number, &statement);
+            }
+        }
+    }
+}

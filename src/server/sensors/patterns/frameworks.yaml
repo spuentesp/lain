@@ -750,12 +750,6 @@ django_orm:
 orm_models:
   django_field_suffixes: [Field]
   sqlalchemy_column_calls: [Column]
-  patterns:
-    sequelize_define: 'sequelize\.define\(\s*[''"''](\w+)[''"'']\s*,\s*\{'
-    sequelize_init: '(?m)(\w+)\.init\(\s*\{'
-    sequelize_table: 'tableName\s*:\s*[''"'']([^''""]+)[''"'']'
-    sequelize_column: 'column\s*:\s*[''"'']([^''""]+)[''"'']'
-    sequelize_property: '(?m)^\s*(\w+)\s*:\s*\{'
 
 
 frontend_values:

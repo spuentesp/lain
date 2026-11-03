@@ -503,8 +503,6 @@ impl AnchorShapes {
 #[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq)]
 pub struct OrmModelShapes {
     #[serde(default)]
-    pub patterns: std::collections::BTreeMap<String, String>,
-    #[serde(default)]
     pub django_field_suffixes: Vec<String>,
     #[serde(default)]
     pub sqlalchemy_column_calls: Vec<String>,
@@ -512,7 +510,6 @@ pub struct OrmModelShapes {
 
 impl OrmModelShapes {
     fn merge(&mut self, other: &Self) {
-        self.patterns.extend(other.patterns.clone());
         self.django_field_suffixes
             .extend(other.django_field_suffixes.clone());
         self.sqlalchemy_column_calls

@@ -341,12 +341,16 @@ fn prisma_and_sequelize_defaults_and_model_init_are_extracted() {
         "OrderItem",
         "OrderItem"
     ));
-    assert!(relation(
+    assert!(!relation(
         &analysis,
         EdgeType::MapsTo,
         "OrderItem",
         "OrderItems"
     ));
+    assert!(analysis
+        .unresolved
+        .iter()
+        .any(|item| item.contains("OrderItem")));
     assert!(relation(&analysis, EdgeType::MapsTo, "Product", "products"));
     assert!(relation(
         &analysis,
@@ -589,4 +593,63 @@ fn typeorm_and_drizzle_use_ast_names_and_locations() {
         .columns
         .iter()
         .any(|column| column.name == "total_amount" && column.line == 2));
+}
+
+#[test]
+fn sequelize_implicit_tables_are_unresolved_and_explicit_names_survive() {
+    let tmp = tempfile::tempdir().unwrap();
+    write(
+        tmp.path(),
+        "src/models.js",
+        "const OrderItem = sequelize.define('OrderItem', { name: { type: DataTypes.STRING } }, {});\nclass Product extends Model {}\nProduct.init({ name: { type: DataTypes.STRING, column: 'display_name' } }, { sequelize, tableName: 'products' });\n",
+    );
+    let analysis = analyze_orm_models(tmp.path());
+    assert!(!analysis
+        .models
+        .iter()
+        .any(|model| model.name == "OrderItem"));
+    assert!(analysis
+        .unresolved
+        .iter()
+        .any(|item| item.contains("OrderItem")));
+    assert!(relation(&analysis, EdgeType::MapsTo, "Product", "products"));
+    assert!(relation(
+        &analysis,
+        EdgeType::HasColumn,
+        "products",
+        "display_name"
+    ));
+}
+
+#[test]
+fn sql_migration_requires_matching_table_and_column_tokens() {
+    let tmp = tempfile::tempdir().unwrap();
+    write(
+        tmp.path(),
+        "schema.prisma",
+        "model Product {\n  name String @map(\"display_name\")\n  @@map(\"products\")\n}\n",
+    );
+    write(
+        tmp.path(),
+        "migrations/0001.sql",
+        "ALTER TABLE orders ADD COLUMN display_name text;\n",
+    );
+    let analysis = analyze_orm_models(tmp.path());
+    assert!(analysis
+        .columns
+        .iter()
+        .all(|column| column.migration.is_none()));
+
+    write(
+        tmp.path(),
+        "migrations/0002.sql",
+        "ALTER TABLE products ADD COLUMN display_name text;\n",
+    );
+    let analysis = analyze_orm_models(tmp.path());
+    let column = analysis
+        .columns
+        .iter()
+        .find(|column| column.name == "display_name")
+        .unwrap();
+    assert_eq!(column.migration.as_ref().map(|site| site.line), Some(1));
 }

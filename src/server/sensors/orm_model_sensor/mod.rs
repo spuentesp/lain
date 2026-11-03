@@ -1,4 +1,5 @@
 pub(crate) mod django;
+mod javascript;
 mod migrations;
 mod prisma;
 mod python;
@@ -13,18 +14,8 @@ use crate::graph::{graph_path, sensor_owner_of, GraphDatabase, SensorOwner};
 use crate::schema::{
     EdgeProvenance, EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace, StaticSource,
 };
-use crate::server::sensors::patterns::{OrmModelShapes, Patterns};
-use regex::Regex;
+use crate::server::sensors::patterns::Patterns;
 use std::collections::BTreeMap;
-
-fn pattern(shapes: &OrmModelShapes, key: &str, fallback: &str) -> Regex {
-    let source = shapes
-        .patterns
-        .get(key)
-        .map(String::as_str)
-        .unwrap_or(fallback);
-    Regex::new(source).unwrap_or_else(|e| panic!("invalid ORM pattern {key}: {e}"))
-}
 use std::path::Path;
 
 #[derive(Debug, Clone)]
@@ -69,10 +60,6 @@ crate::server::sensors::register_sensor!(
     1,
     scan_workspace_orm_models
 );
-
-fn line_of(text: &str, offset: usize) -> u32 {
-    text[..offset].bytes().filter(|byte| *byte == b'\n').count() as u32 + 1
-}
 
 fn site(path: &str, line: u32) -> SourceSite {
     SourceSite {
@@ -138,231 +125,11 @@ fn add_column(
     });
 }
 
-fn braced_region(text: &str, open: usize) -> Option<(&str, usize)> {
-    if text.as_bytes().get(open) != Some(&b'{') {
-        return None;
-    }
-    let mut depth = 0usize;
-    let mut quote = None;
-    let mut escaped = false;
-    for (offset, ch) in text[open..].char_indices() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        if ch == '\\' {
-            escaped = true;
-            continue;
-        }
-        if let Some(active) = quote {
-            if ch == active {
-                quote = None;
-            }
-            continue;
-        }
-        if matches!(ch, '\'' | '"' | '`') {
-            quote = Some(ch);
-            continue;
-        }
-        match ch {
-            '{' => depth += 1,
-            '}' => {
-                depth = depth.checked_sub(1)?;
-                if depth == 0 {
-                    return Some((&text[open + 1..open + offset], open + offset));
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-fn following_braced_region(text: &str, closing: usize) -> Option<(&str, usize)> {
-    let open = text[closing + 1..].find('{')? + closing + 1;
-    braced_region(text, open)
-}
-
-fn analyze_sequelize_definition(
-    analysis: &mut OrmAnalysis,
-    path: &str,
-    model: &str,
-    body: &str,
-    options: &str,
-    definition_start: usize,
-    content: &str,
-    table_re: &Regex,
-    column_re: &Regex,
-    property_re: &Regex,
-) {
-    let literal_table = table_re.captures(options).and_then(|m| m.get(1));
-    if options.contains("tableName") && literal_table.is_none() {
-        analysis
-            .unresolved
-            .push(format!("{path}: dynamic table name on {model}"));
-        return;
-    }
-    let table = literal_table
-        .map(|name| name.as_str().to_string())
-        .unwrap_or_else(|| format!("{model}s"));
-    add_model(
-        analysis,
-        "sequelize",
-        model,
-        &table,
-        path,
-        line_of(content, definition_start),
-        StaticSource::Regex,
-    );
-    for property in property_re.captures_iter(body) {
-        let name = property.get(1).unwrap();
-        let open = property.get(0).unwrap().end() - 1;
-        let Some((property_options, _)) = braced_region(body, open) else {
-            continue;
-        };
-        let literal = column_re.captures(property_options).and_then(|m| m.get(1));
-        if property_options.contains("column") && literal.is_none() {
-            analysis
-                .unresolved
-                .push(format!("{path}: dynamic column on {model}"));
-            continue;
-        }
-        let column = literal.map(|m| m.as_str()).unwrap_or(name.as_str());
-        add_column(
-            analysis,
-            &table,
-            column,
-            path,
-            line_of(content, definition_start + name.start()),
-            StaticSource::Regex,
-        );
-    }
-}
-
-fn analyze_sequelize(
-    analysis: &mut OrmAnalysis,
-    path: &str,
-    content: &str,
-    shapes: &OrmModelShapes,
-) {
-    let define_re = pattern(
-        shapes,
-        "sequelize_define",
-        r#"sequelize\.define\(\s*['\"](\w+)['\"]\s*,\s*\{"#,
-    );
-    let init_re = pattern(shapes, "sequelize_init", r#"(?m)(\w+)\.init\(\s*\{"#);
-    let table_re = pattern(
-        shapes,
-        "sequelize_table",
-        r#"tableName\s*:\s*['\"]([^'\"]+)['\"]"#,
-    );
-    let column_re = pattern(
-        shapes,
-        "sequelize_column",
-        r#"column\s*:\s*['\"]([^'\"]+)['\"]"#,
-    );
-    let property_re = pattern(shapes, "sequelize_property", r#"(?m)^\s*(\w+)\s*:\s*\{"#);
-    for definition in define_re.captures_iter(content) {
-        let model = definition.get(1).unwrap();
-        let open = definition.get(0).unwrap().end() - 1;
-        let Some((body, closing)) = braced_region(content, open) else {
-            continue;
-        };
-        let Some((options, _)) = following_braced_region(content, closing) else {
-            continue;
-        };
-        analyze_sequelize_definition(
-            analysis,
-            path,
-            model.as_str(),
-            body,
-            options,
-            definition.get(0).unwrap().start(),
-            content,
-            &table_re,
-            &column_re,
-            &property_re,
-        );
-    }
-    for definition in init_re.captures_iter(content) {
-        let model = definition.get(1).unwrap();
-        let open = definition.get(0).unwrap().end() - 1;
-        let Some((body, closing)) = braced_region(content, open) else {
-            continue;
-        };
-        let Some((options, _)) = following_braced_region(content, closing) else {
-            continue;
-        };
-        analyze_sequelize_definition(
-            analysis,
-            path,
-            model.as_str(),
-            body,
-            options,
-            definition.get(0).unwrap().start(),
-            content,
-            &table_re,
-            &column_re,
-            &property_re,
-        );
-    }
-}
-
-fn contains_identifier(content: &str, name: &str) -> bool {
-    content.match_indices(name).any(|(offset, _)| {
-        let before = content[..offset].chars().next_back();
-        let after = content[offset + name.len()..].chars().next();
-        !before.is_some_and(|ch| ch.is_alphanumeric() || ch == '_')
-            && !after.is_some_and(|ch| ch.is_alphanumeric() || ch == '_')
-    })
-}
-
-fn attach_migrations(root: &Path, analysis: &mut OrmAnalysis) {
-    let model_tables: BTreeMap<String, String> = analysis
-        .models
-        .iter()
-        .map(|model| (model.name.to_lowercase(), model.table.clone()))
-        .collect();
-    for (path, content, _) in crate::server::sensors::util::scan_files(root, |path| {
-        let normalized = graph_path(root, path);
-        let is_migration = normalized.contains("migration") || normalized.contains("alembic");
-        (is_migration
-            && matches!(
-                path.extension().and_then(|e| e.to_str()),
-                Some("sql" | "ts" | "js")
-            ))
-        .then_some(())
-    }) {
-        let path = graph_path(root, &path);
-        for column in &mut analysis.columns {
-            let found_table = model_tables
-                .values()
-                .any(|table| table == &column.table && contains_identifier(&content, table));
-            let sql_alter = found_table
-                && (content.contains("ADD COLUMN") || content.contains("add_column"))
-                && contains_identifier(&content, &column.name);
-            let found_django_model = model_tables.iter().any(|(model, table)| {
-                table == &column.table
-                    && (contains_identifier(&content, model)
-                        || contains_identifier(&content, table))
-            });
-            let django_add = content.contains("AddField")
-                && contains_identifier(&content, &column.name)
-                && found_django_model;
-            if sql_alter || django_add {
-                let offset = content.find(&column.name).unwrap_or(0);
-                column.migration = Some(site(&path, line_of(&content, offset)));
-            }
-        }
-    }
-}
-
 pub fn analyze_orm_models(root: &Path) -> OrmAnalysis {
     let patterns = Patterns::with_overrides(root).unwrap_or_else(|e| {
         tracing::warn!("orm_model_sensor: override load failed ({e}); using bundled patterns");
         std::borrow::Cow::Borrowed(Patterns::patterns())
     });
-    let shapes = patterns.orm_model_shapes();
     let django_models = django::DjangoModelMap::load(root, patterns.django_orm_shapes());
     let mut analysis = OrmAnalysis::default();
     for (path, content, extension) in crate::server::sensors::util::scan_files(root, |path| {
@@ -386,7 +153,9 @@ pub fn analyze_orm_models(root: &Path) -> OrmAnalysis {
                 typescript::analyze_drizzle(&mut analysis, &path, &content, &patterns, lang);
                 typescript::analyze_typeorm(&mut analysis, &path, &content, &patterns, lang);
             }
-            "js" | "jsx" => analyze_sequelize(&mut analysis, &path, &content, shapes),
+            "js" | "jsx" => {
+                javascript::analyze_sequelize(&mut analysis, &path, &content, &patterns)
+            }
             _ => {}
         }
         if content.contains("process.env") || content.contains("os.environ") {
@@ -397,7 +166,7 @@ pub fn analyze_orm_models(root: &Path) -> OrmAnalysis {
     }
     python::add_django(&mut analysis, &django_models);
     migrations::attach_python_migrations(root, &mut analysis, &patterns);
-    attach_migrations(root, &mut analysis);
+    migrations::attach_sql_migrations(root, &mut analysis);
     analysis
         .models
         .sort_by(|a, b| (&a.name, &a.table, &a.path).cmp(&(&b.name, &b.table, &b.path)));
