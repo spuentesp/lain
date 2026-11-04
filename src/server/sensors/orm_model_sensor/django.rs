@@ -39,6 +39,7 @@ pub(crate) struct DjangoModel {
     pub proxy: bool,
     pub db_table: DbTable,
     pub app_label: Option<String>,
+    pub app_label_dynamic: bool,
     pub fields: Vec<DjangoField>,
 }
 
@@ -59,6 +60,9 @@ pub(super) fn string_literal(node: Node, src: &[u8]) -> Option<String> {
     }
     let mut pending = vec![node];
     while let Some(current) = pending.pop() {
+        if current.kind() == "interpolation" {
+            return None;
+        }
         if current.kind() == "string_content" {
             return Some(text(current, src));
         }
@@ -114,7 +118,10 @@ fn parse_meta(model: &mut DjangoModel, class_body: Node, src: &[u8]) {
                 model.db_table =
                     string_literal(right, src).map_or(DbTable::Dynamic, DbTable::Literal);
             }
-            "app_label" => model.app_label = string_literal(right, src),
+            "app_label" => {
+                model.app_label = string_literal(right, src);
+                model.app_label_dynamic = model.app_label.is_none();
+            }
             _ => {}
         }
     }
@@ -180,6 +187,7 @@ fn parse_class(
         proxy: false,
         db_table: DbTable::Default,
         app_label: None,
+        app_label_dynamic: false,
         fields: Vec::new(),
     };
     let mut cursor = body.walk();
@@ -396,6 +404,9 @@ impl DjangoModelMap {
         match &model.db_table {
             DbTable::Literal(table) => TableResolution::Table(table.clone()),
             DbTable::Dynamic => TableResolution::Unresolved("non-literal db_table"),
+            DbTable::Default if model.app_label_dynamic => {
+                TableResolution::Unresolved("dynamic app_label")
+            }
             DbTable::Default => TableResolution::Table(format!(
                 "{}_{}",
                 self.app_of(index).to_lowercase(),

@@ -167,7 +167,17 @@ pub(super) fn analyze_sequelize(
         let Some(receiver) = callee.node.child_by_field_name("object") else {
             continue;
         };
-        if receiver.kind() != "identifier" {
+        if receiver.kind() != "identifier"
+            || !receiver
+                .utf8_text(src)
+                .ok()
+                .and_then(|name| name.chars().next())
+                .is_some_and(|first| first.is_ascii_uppercase())
+        {
+            analysis.unresolved.push(format!(
+                "{path}: non-model init receiver {}",
+                text(receiver, src)
+            ));
             continue;
         }
         let model = text(receiver, src);

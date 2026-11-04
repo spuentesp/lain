@@ -299,3 +299,23 @@ export function Orders({ data }) {
                 .any(|site| site.contains("Orders.tsx"))
     }));
 }
+
+#[test]
+fn react_storage_requires_real_imports_and_accepts_enclosing_scope_setters() {
+    let source = r#"import { useState as useX } from "not-react";
+import { useState } from "react";
+export function Orders({ data }) {
+  const stored = data.customer.id;
+  const [ignored, refresh] = useState(null);
+  const [other, wrong] = useX(null);
+  {
+    refresh(stored);
+    wrong(stored);
+  }
+}
+"#;
+    let fixture = FrontendFixture::new(source);
+    fixture.scan();
+    assert!(fixture.has(EdgeType::Stores, "customer.id"));
+    assert!(fixture.has(EdgeType::Forwards, "customer.id"));
+}

@@ -180,15 +180,22 @@ pub fn analyze_orm_models(root: &Path) -> OrmAnalysis {
         .columns
         .dedup_by(|a, b| a.table == b.table && a.name == b.name && a.path == b.path);
     analysis.relations.sort_by(|a, b| {
-        (a.from.clone(), a.to.clone(), a.edge_type.to_string()).cmp(&(
-            b.from.clone(),
-            b.to.clone(),
-            b.edge_type.to_string(),
-        ))
+        (
+            a.site.path.clone(),
+            a.from.clone(),
+            a.to.clone(),
+            a.edge_type.to_string(),
+        )
+            .cmp(&(
+                b.site.path.clone(),
+                b.from.clone(),
+                b.to.clone(),
+                b.edge_type.to_string(),
+            ))
     });
-    analysis
-        .relations
-        .dedup_by(|a, b| a.from == b.from && a.to == b.to && a.edge_type == b.edge_type);
+    analysis.relations.dedup_by(|a, b| {
+        a.site.path == b.site.path && a.from == b.from && a.to == b.to && a.edge_type == b.edge_type
+    });
     analysis.unresolved.sort();
     analysis.unresolved.dedup();
     analysis

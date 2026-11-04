@@ -29,11 +29,19 @@ fn positional_strings(arguments: Node, src: &[u8]) -> Vec<String> {
         .collect()
 }
 
-fn nested_column_call(arguments: Node) -> Option<Node> {
+fn nested_column_call<'a>(arguments: Node<'a>, src: &'a [u8]) -> Option<Node<'a>> {
     let mut cursor = arguments.walk();
-    let found = arguments
-        .named_children(&mut cursor)
-        .find(|argument| argument.kind() == "call");
+    let found = arguments.named_children(&mut cursor).find(|argument| {
+        if argument.kind() != "call" {
+            return false;
+        }
+        argument
+            .child_by_field_name("function")
+            .is_some_and(|function| {
+                let name = text(function, src);
+                name == "Column" || name.ends_with(".Column")
+            })
+    });
     found
 }
 
@@ -55,7 +63,7 @@ fn attach_alembic(
     let Some(table) = positional_strings(arguments, src).into_iter().next() else {
         return;
     };
-    let Some(column_call) = nested_column_call(arguments) else {
+    let Some(column_call) = nested_column_call(arguments, src) else {
         return;
     };
     let Some(column) = column_name_from_call(column_call, src) else {
@@ -100,21 +108,17 @@ fn attach_django(
         .and_then(|arguments| keyword_argument(arguments, "db_column", src))
         .and_then(|value| string_literal(value, src))
         .unwrap_or(attribute);
-    let model_matches = analysis
+    let mut matching_models = analysis
         .models
         .iter()
-        .any(|model| model.name.to_lowercase() == model_name || model.table == model_name);
-    if !model_matches {
-        return;
-    }
-    let table = analysis
-        .models
-        .iter()
-        .find(|model| model.name.to_lowercase() == model_name || model.table == model_name)
-        .map(|model| model.table.clone());
-    let Some(table) = table else {
+        .filter(|model| model.name.to_lowercase() == model_name);
+    let Some(model) = matching_models.next() else {
         return;
     };
+    if matching_models.next().is_some() {
+        return;
+    }
+    let table = model.table.clone();
     let site = SourceSite {
         path: path.to_string(),
         line: operation.start_position().row as u32 + 1,

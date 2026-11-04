@@ -109,6 +109,33 @@ fn hook_from_name(name: &str) -> Option<ReactHook> {
     }
 }
 
+fn process_react_import(node: Node, src: &[u8], imports: &mut ReactImports) {
+    if node.kind() == "import_specifier" {
+        let original = node
+            .child_by_field_name("name")
+            .and_then(|name| name.utf8_text(src).ok())
+            .unwrap_or("");
+        if let Some(hook) = hook_from_name(original) {
+            let local = node
+                .child_by_field_name("alias")
+                .and_then(|alias| alias.utf8_text(src).ok())
+                .unwrap_or(original);
+            imports.by_local_name.insert(local.to_string(), hook);
+        }
+    } else if node.kind() == "namespace_import" || node.kind() == "identifier" {
+        if let Ok(name) = node.utf8_text(src) {
+            if name == "React" {
+                imports.namespaces.insert(name.to_string());
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    let children: Vec<_> = node.named_children(&mut cursor).collect();
+    for child in children {
+        process_react_import(child, src, imports);
+    }
+}
+
 fn react_imports(root: Node, src: &[u8]) -> ReactImports {
     let mut imports = ReactImports {
         by_local_name: BTreeMap::new(),
@@ -122,37 +149,7 @@ fn react_imports(root: Node, src: &[u8]) -> ReactImports {
                 .and_then(|source| source.utf8_text(src).ok())
                 .unwrap_or("");
             if source == "\"react\"" || source == "'react'" {
-                let mut cursor = node.walk();
-                let children: Vec<_> = node.named_children(&mut cursor).collect();
-                pending.extend(children);
-                continue;
-            }
-        } else if node.kind() == "import_specifier" {
-            let original = node
-                .child_by_field_name("name")
-                .and_then(|name| name.utf8_text(src).ok())
-                .unwrap_or("");
-            if let Some(hook) = hook_from_name(original) {
-                let local = node
-                    .child_by_field_name("alias")
-                    .and_then(|alias| alias.utf8_text(src).ok())
-                    .unwrap_or(original);
-                imports.by_local_name.insert(local.to_string(), hook);
-            }
-        } else if node.kind() == "namespace_import" {
-            let mut cursor = node.walk();
-            for child in node.named_children(&mut cursor) {
-                if child.kind() == "identifier" {
-                    if let Ok(name) = child.utf8_text(src) {
-                        imports.namespaces.insert(name.to_string());
-                    }
-                }
-            }
-        } else if node.kind() == "identifier" {
-            if let Ok(name) = node.utf8_text(src) {
-                if name == "React" {
-                    imports.namespaces.insert(name.to_string());
-                }
+                process_react_import(node, src, &mut imports);
             }
         }
         let mut cursor = node.walk();
@@ -198,6 +195,29 @@ fn react_setter(node: Node, src: &[u8], react_hooks: &ReactImports) -> Option<St
     match called_hook_name(value, src, react_hooks)? {
         ReactHook::UseState | ReactHook::UseReducer => array_pattern_element(name, 1, src),
     }
+}
+
+fn setters_for_scope(
+    setter_scopes: &[(u32, u32, String)],
+    scope_start: u32,
+    scope_end: u32,
+) -> BTreeSet<String> {
+    let mut closest = BTreeMap::<String, (u32, u32)>::new();
+    for (start, end, setter) in setter_scopes {
+        if *start > scope_start || *end < scope_end {
+            continue;
+        }
+        let candidate = (*start, *end);
+        closest
+            .entry(setter.clone())
+            .and_modify(|current| {
+                if end - start < current.1 - current.0 || *start > current.0 {
+                    *current = candidate;
+                }
+            })
+            .or_insert(candidate);
+    }
+    closest.into_keys().collect()
 }
 
 fn variable_declaration(node: Node, src: &[u8]) -> Option<(String, u32)> {
@@ -356,13 +376,11 @@ pub fn scan_workspace_frontend_values_with_report(
                                 declaration_start: node.start_byte() as u32,
                                 scope_start,
                                 scope_end,
-                                react_setters: setter_scopes
-                                    .iter()
-                                    .filter(|(start, end, _)| {
-                                        *start == scope_start && *end == scope_end
-                                    })
-                                    .map(|(_, _, setter)| setter.clone())
-                                    .collect(),
+                                react_setters: setters_for_scope(
+                                    &setter_scopes,
+                                    scope_start,
+                                    scope_end,
+                                ),
                             });
                         }
                     }

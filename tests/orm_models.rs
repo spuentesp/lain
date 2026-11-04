@@ -441,6 +441,15 @@ fn migration_matching_prisma_comments_and_table_identity_are_precise() {
         .filter(|node| node.name == "products")
         .collect();
     assert_eq!(tables.len(), 2, "{tables:#?}");
+    assert_eq!(
+        graph
+            .all_edges()
+            .iter()
+            .filter(|edge| edge.edge_type == EdgeType::HasColumn)
+            .count(),
+        3,
+        "each source path must retain its own table-to-column relation"
+    );
     assert!(graph
         .all_edges()
         .iter()
@@ -652,4 +661,89 @@ fn sql_migration_requires_matching_table_and_column_tokens() {
         .find(|column| column.name == "display_name")
         .unwrap();
     assert_eq!(column.migration.as_ref().map(|site| site.line), Some(1));
+}
+
+#[test]
+fn dynamic_typescript_orm_names_are_unresolved_not_defaults() {
+    let tmp = tempfile::tempdir().unwrap();
+    write(
+        tmp.path(),
+        "src/entities.ts",
+        "@Entity(OPTIONS)\nexport class OrderItem {\n  @Column(OPTIONS)\n  name: string;\n}\n",
+    );
+    write(
+        tmp.path(),
+        "src/schema.ts",
+        "export const orders = pgTable(TABLE_NAME, { id: serial('id') });\n",
+    );
+    let analysis = analyze_orm_models(tmp.path());
+    assert!(!analysis
+        .models
+        .iter()
+        .any(|model| model.name == "OrderItem" || model.name == "orders"));
+    assert!(analysis
+        .unresolved
+        .iter()
+        .any(|item| item.contains("OrderItem")));
+    assert!(analysis
+        .unresolved
+        .iter()
+        .any(|item| item.contains("orders")));
+}
+
+#[test]
+fn django_dynamic_app_label_and_interpolated_table_are_unresolved() {
+    let tmp = tempfile::tempdir().unwrap();
+    write(
+        tmp.path(),
+        "shop/models.py",
+        "from django.db import models\nclass Product(models.Model):\n    class Meta:\n        app_label = APP_LABEL\n        db_table = f\"shop_{SUFFIX}\"\n",
+    );
+    let analysis = analyze_orm_models(tmp.path());
+    assert!(!analysis.models.iter().any(|model| model.name == "Product"));
+    assert!(analysis
+        .unresolved
+        .iter()
+        .any(|item| item.contains("Product")));
+}
+
+#[test]
+fn arbitrary_init_receivers_do_not_create_sequelize_models() {
+    let tmp = tempfile::tempdir().unwrap();
+    write(
+        tmp.path(),
+        "src/cache.js",
+        "cache.init({ name: { type: DataTypes.STRING } }, { tableName: 'products' });\n",
+    );
+    let analysis = analyze_orm_models(tmp.path());
+    assert!(!analysis.models.iter().any(|model| model.name == "cache"));
+    assert!(analysis
+        .unresolved
+        .iter()
+        .any(|item| item.contains("cache")));
+}
+
+#[test]
+fn migration_requires_model_name_and_real_column_constructor() {
+    let tmp = tempfile::tempdir().unwrap();
+    write(
+        tmp.path(),
+        "shop/models.py",
+        "from django.db import models\nclass Product(models.Model):\n    name = models.CharField(db_column='display_name')\n    class Meta:\n        db_table = 'products'\n",
+    );
+    write(
+        tmp.path(),
+        "shop/migrations/0001_wrong.py",
+        "from django.db import migrations\nclass Migration(migrations.Migration):\n    operations = [migrations.AddField(model_name='products', name='name', field=models.CharField(db_column='display_name'))]\n",
+    );
+    write(
+        tmp.path(),
+        "alembic/versions/0001_wrong.py",
+        "def upgrade():\n    op.add_column('products', make_value('display_name'))\n",
+    );
+    let analysis = analyze_orm_models(tmp.path());
+    assert!(analysis
+        .columns
+        .iter()
+        .all(|column| column.migration.is_none()));
 }

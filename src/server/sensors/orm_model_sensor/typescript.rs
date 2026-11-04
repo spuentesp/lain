@@ -24,29 +24,41 @@ fn ancestors(node: Node) -> impl Iterator<Item = Node> {
     std::iter::successors(node.parent(), |parent| parent.parent())
 }
 
-fn object_name(arguments: Node, src: &[u8]) -> Option<Option<String>> {
+enum NameResolution {
+    Absent,
+    Literal(String),
+    Dynamic,
+}
+
+fn object_name(arguments: Node, src: &[u8]) -> NameResolution {
     let mut cursor = arguments.walk();
     for argument in arguments.named_children(&mut cursor) {
         if argument.kind() == "string" {
-            return Some(string_literal(argument, src));
+            return string_literal(argument, src)
+                .map_or(NameResolution::Dynamic, NameResolution::Literal);
         }
         if argument.kind() != "object" {
-            continue;
+            return NameResolution::Dynamic;
         }
         let mut object_cursor = argument.walk();
         for pair in argument.named_children(&mut object_cursor) {
             if pair.kind() != "pair" {
                 continue;
             }
-            let key = pair.child_by_field_name("key")?;
+            let Some(key) = pair.child_by_field_name("key") else {
+                continue;
+            };
             if text(key, src) != "name" {
                 continue;
             }
-            let value = pair.child_by_field_name("value")?;
-            return Some(string_literal(value, src));
+            let Some(value) = pair.child_by_field_name("value") else {
+                return NameResolution::Dynamic;
+            };
+            return string_literal(value, src)
+                .map_or(NameResolution::Dynamic, NameResolution::Literal);
         }
     }
-    None
+    NameResolution::Absent
 }
 
 fn class_declaration(decorator: Node) -> Option<Node> {
@@ -84,13 +96,15 @@ fn analyze_typeorm_class(
     let Some(arguments) = decorator_arguments(entity) else {
         return;
     };
-    let table =
-        object_name(arguments, src).map_or_else(|| Some(to_snake_case(&model)), |name| name);
-    let Some(table) = table else {
-        analysis
-            .unresolved
-            .push(format!("{path}: dynamic table name on {model}"));
-        return;
+    let table = match object_name(arguments, src) {
+        NameResolution::Literal(table) => table,
+        NameResolution::Absent => to_snake_case(&model),
+        NameResolution::Dynamic => {
+            analysis
+                .unresolved
+                .push(format!("{path}: dynamic table name on {model}"));
+            return;
+        }
     };
     add_model(
         analysis,
@@ -142,21 +156,26 @@ fn analyze_typeorm_class(
                     continue;
                 };
                 let attribute = text(property_name, src);
-                let column = object_name(arguments, src)
-                    .map_or_else(|| Some(attribute.clone()), |name| name);
-                if let Some(column) = column {
-                    add_column(
+                match object_name(arguments, src) {
+                    NameResolution::Literal(column) => add_column(
                         analysis,
                         &table,
                         &column,
                         path,
                         node.start_position().row as u32 + 1,
                         StaticSource::TreeSitter,
-                    );
-                } else {
-                    analysis
+                    ),
+                    NameResolution::Absent => add_column(
+                        analysis,
+                        &table,
+                        &attribute,
+                        path,
+                        node.start_position().row as u32 + 1,
+                        StaticSource::TreeSitter,
+                    ),
+                    NameResolution::Dynamic => analysis
                         .unresolved
-                        .push(format!("{path}: dynamic column on {model}"));
+                        .push(format!("{path}: dynamic column on {model}")),
                 }
             }
         } else {
@@ -285,6 +304,42 @@ fn analyze_drizzle_table(
     }
 }
 
+fn record_dynamic_drizzle_tables(analysis: &mut OrmAnalysis, path: &str, tree: Node, src: &[u8]) {
+    let mut pending = vec![tree];
+    while let Some(node) = pending.pop() {
+        if node.kind() == "call_expression" {
+            if let Some(function) = node.child_by_field_name("function") {
+                let constructor = text(function, src);
+                if matches!(
+                    constructor.as_str(),
+                    "pgTable" | "mysqlTable" | "sqliteTable"
+                ) {
+                    if let Some(arguments) = node.child_by_field_name("arguments") {
+                        if let Some(first) = argument_at(&arguments, 0) {
+                            if first.kind() != "string" {
+                                let model =
+                                    variable_model(node, src).unwrap_or_else(|| "unknown".into());
+                                analysis
+                                    .unresolved
+                                    .push(format!("{path}: dynamic table name on {model}"));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let mut cursor = node.walk();
+        let children: Vec<_> = node.named_children(&mut cursor).collect();
+        pending.extend(children.into_iter().rev());
+    }
+}
+
+fn argument_at<'a>(arguments: &Node<'a>, index: usize) -> Option<Node<'a>> {
+    let mut cursor = arguments.walk();
+    let found = arguments.named_children(&mut cursor).nth(index);
+    found
+}
+
 fn analyze_drizzle_file(
     analysis: &mut OrmAnalysis,
     path: &str,
@@ -348,6 +403,7 @@ fn analyze_drizzle_file(
             );
         }
     }
+    record_dynamic_drizzle_tables(analysis, path, tree.root_node(), content.as_bytes());
 }
 
 pub(super) fn analyze_typeorm(
