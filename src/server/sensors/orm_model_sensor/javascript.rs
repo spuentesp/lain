@@ -73,8 +73,7 @@ fn analyze_definition(
         let Some(options) = pair.child_by_field_name("value") else {
             continue;
         };
-        let column = object_option(options, "column", src)
-            .map_or_else(|| Some(attribute.clone()), |name| name);
+        let column = object_option(options, "column", src).unwrap_or_else(|| Some(attribute.clone()));
         if let Some(column) = column {
             add_column(
                 analysis,
