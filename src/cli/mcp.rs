@@ -257,6 +257,9 @@ pub async fn run_mcp(
     // (without `--daemon`) keeps its historical meaning: a private
     // server that also binds that socket. A no-share instance never
     // attaches and never starts a shared daemon — it serves privately.
+    // An INCOMPATIBLE daemon (a different build behind the socket) is
+    // not a fallback case: the error names the socket and both
+    // identities, and no rival daemon is started beside it.
     #[cfg(unix)]
     if socket.is_none() {
         if let Some(stream) = crate::cli::shared_daemon::attach_or_start(
@@ -264,7 +267,7 @@ pub async fn run_mcp(
             embedding_model,
             reindex_timeout,
             no_share,
-        ) {
+        )? {
             // `tokio::net::UnixStream::from_std` panics on a blocking
             // socket; the std connect is blocking by default.
             if let Err(e) = stream.set_nonblocking(true) {

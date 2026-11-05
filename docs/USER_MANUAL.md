@@ -275,6 +275,13 @@ inherit their environment, so an ambient `LAIN_MCP_NO_SHARE=1` also
 marks warm daemons started in that shell (e.g. `lain oneshot`'s)
 no-share — unset it there to keep those shared.
 
+**Stale daemons are refused.** A client bridges only when `version`,
+`build_commit`, and `index_build_id` match its own. A mismatch or
+missing identity produces an error naming the socket and both
+identities. Restart the daemon, or explicitly select a private instance
+with `--no-share` / `LAIN_MCP_NO_SHARE=1`; Lain never silently attaches
+to stale code or starts a competing indexer in response.
+
 Four-call dance per agent (sequence diagram in [multiplayer.md](multiplayer.md#agent-quickstart)):
 
 ```
