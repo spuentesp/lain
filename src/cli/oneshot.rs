@@ -46,16 +46,57 @@ const ID_INITIALIZE: i64 = 1;
 /// warming-up handling below) increments from here.
 const ID_CALL: i64 = 2;
 
+/// The remedy text for a shared daemon this client refuses: the
+/// daemon has to be restarted onto the same build, or the caller
+/// explicitly asks for a private instance.
+#[cfg(unix)]
+const ONESHOT_RECOVERY: &str =
+    "restart the daemon, or set LAIN_ONESHOT_NO_SHARE=1 to use a private instance";
+
+/// Is the daemon behind `socket` safe for this client to use?
+///
+/// * `Ok(true)` — it answered and its build identity matches ours.
+/// * `Ok(false)` — nothing answered: the caller keeps its previous
+///   fallback (no attachment). A daemon that cannot even report its
+///   identity is unknown, never silently trusted.
+/// * `Err` — a daemon IS there but answers with a different build:
+///   the caller must not use it and must not silently start a private
+///   indexer beside it.
+#[cfg(unix)]
+fn shared_daemon_is_usable(socket_path: &Path) -> Result<bool> {
+    match crate::cli::shared_daemon::query_daemon_info(socket_path) {
+        None => Ok(false),
+        Some(info) => match crate::cli::shared_daemon::compatibility_error(&info) {
+            Some(_) => Err(crate::cli::shared_daemon::incompatible_daemon_error(
+                &info,
+                socket_path,
+                ONESHOT_RECOVERY,
+            )),
+            None => Ok(true),
+        },
+    }
+}
+
 /// Connect to a live shared `lain mcp` on `socket_path`, if one is serving.
 /// Liveness is whether the socket accepts a connection: a PID file is wrong
 /// after PID reuse, and the old `/proc` check made this path Linux-only.
+///
+/// The daemon must also be the same build as this client: an older
+/// daemon would answer with stale code. `Ok(None)` means "no usable
+/// shared daemon" (nothing answered) — the caller falls back to
+/// starting one or to a private server. `Err` means a daemon with a
+/// different build identity is there; the caller must not work around
+/// it with a private indexer.
 #[cfg(unix)]
 fn connect_shared(
     socket_path: &std::path::Path,
-) -> Option<crate::cli::socket_session::SocketSession> {
+) -> Result<Option<crate::cli::socket_session::SocketSession>> {
+    if !shared_daemon_is_usable(socket_path)? {
+        return Ok(None);
+    }
     match crate::cli::socket_session::connect(socket_path) {
-        Ok(s) => Some(s),
-        Err(_) => None,
+        Ok(s) => Ok(Some(s)),
+        Err(_) => Ok(None),
     }
 }
 
@@ -63,25 +104,34 @@ fn connect_shared(
 /// socket accepts connections. The daemon outlives this process (own process
 /// group, no stdio) and exits by itself after an idle window, so the NEXT
 /// one-shot connects to the warm graph instead of cold-starting. Returns
-/// `None` if the daemon exits early or does not come up within `wait`; the
-/// caller then falls back to a private stdio server.
+/// `Ok(None)` if the daemon exits early or does not come up within `wait`;
+/// the caller then falls back to a private stdio server.
+///
+/// The daemon that won the socket is validated too: a start race can
+/// hand us an older daemon that already owned the path, and using it
+/// would answer with stale code.
 #[cfg(unix)]
 fn start_shared_daemon(
     workspace: &Path,
     socket_path: &std::path::Path,
     wait: Duration,
-) -> Option<crate::cli::socket_session::SocketSession> {
+) -> Result<Option<crate::cli::socket_session::SocketSession>> {
     // Generalized over workspace sets in `cli::shared_daemon` (the
     // zero-config multi-agent path spawns the same daemon shape).
-    let stream = crate::cli::shared_daemon::start_detached_daemon(
+    let Some(stream) = crate::cli::shared_daemon::start_detached_daemon(
         std::slice::from_ref(&workspace.to_path_buf()),
         socket_path,
         wait,
         None,
         None,
         false,
-    )?;
-    crate::cli::socket_session::from_stream(stream).ok()
+    ) else {
+        return Ok(None);
+    };
+    if !shared_daemon_is_usable(socket_path)? {
+        return Ok(None);
+    }
+    Ok(crate::cli::socket_session::from_stream(stream).ok())
 }
 
 /// Shut the session down and build an error carrying whatever it
@@ -310,19 +360,27 @@ pub fn run_oneshot(workspace: Option<&Path>, tool: &str, args: &[String]) -> Res
     // failure, a platform without Unix sockets, a socket path too long for
     // the platform, or `LAIN_ONESHOT_NO_SHARE=1` falls back to the private
     // stdio server below.
+    //
+    // A shared daemon whose build identity differs from this client's is
+    // NOT one of those fallbacks: it would answer with stale code, and
+    // quietly serving the call from a private indexer would double the
+    // machine's indexing load. The call fails with the socket and both
+    // identities instead; `LAIN_ONESHOT_NO_SHARE=1` is the explicit way
+    // to ask for a private instance.
     #[cfg(unix)]
     {
         let socket_path = crate::config::oneshot_socket_path(&workspace);
         let sharing = std::env::var_os("LAIN_ONESHOT_NO_SHARE").is_none()
             && crate::server::mcp::socket_server::path_fits(&socket_path);
         if sharing {
-            let session = connect_shared(&socket_path).or_else(|| {
-                start_shared_daemon(
+            let session = match connect_shared(&socket_path)? {
+                Some(session) => Some(session),
+                None => start_shared_daemon(
                     &workspace,
                     &socket_path,
                     Duration::from_secs(timeout_secs.min(60)),
-                )
-            });
+                )?,
+            };
             if let Some(session) = session {
                 return run_call_loop_via_socket(session, tool, args_obj, timeout_secs);
             }

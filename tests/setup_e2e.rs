@@ -42,10 +42,85 @@ fn lain_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_lain"))
 }
 
+/// An isolated runtime dir for one `lain setup` run.
+///
+/// The verification step spawns a real `lain mcp`. Without this, that
+/// client discovers the developer's RESIDENT shared daemon and is
+/// answered by it — the very silent-stale-daemon path the identity
+/// check now refuses, which made this test depend on the machine it
+/// ran on. Pinning `XDG_RUNTIME_DIR` keeps the check in place (it
+/// still runs; it just has no stale daemon to trip over) and makes the
+/// test hermetic.
+struct Hermetic {
+    run: tempfile::TempDir,
+}
+
+impl Hermetic {
+    fn new() -> Self {
+        Self {
+            run: tempfile::Builder::new()
+                .prefix("ls")
+                .tempdir_in("/tmp")
+                .expect("tempdir"),
+        }
+    }
+
+    /// A `lain setup` command pinned to the isolated runtime dir.
+    ///
+    /// The verification's `lain mcp` starts a daemon there; the short
+    /// idle window lets it exit by itself, and `Drop` reaps it if it
+    /// does not — a live process outliving the test binary corrupts
+    /// `cargo llvm-cov`'s profile merge.
+    fn setup_cmd(&self) -> Command {
+        let mut cmd = Command::new(lain_bin());
+        cmd.env("XDG_RUNTIME_DIR", self.run.path())
+            .env("LAIN_SHARED_IDLE_SECS", "2");
+        cmd
+    }
+}
+
+impl Drop for Hermetic {
+    fn drop(&mut self) {
+        fn alive(pid: &str) -> bool {
+            Command::new("kill")
+                .args(["-0", pid])
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        }
+        let Ok(entries) = std::fs::read_dir(self.run.path().join("lain")) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.extension().is_some_and(|e| e == "pid") {
+                continue;
+            }
+            let Ok(pid) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let pid = pid.trim().to_string();
+            if pid.is_empty() || !alive(&pid) {
+                continue;
+            }
+            let _ = Command::new("kill").args(["-TERM", &pid]).status();
+            for _ in 0..50 {
+                if !alive(&pid) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+    }
+}
+
 #[test]
 fn print_config_emits_valid_mcp_json_and_writes_nothing() {
     let fixture = build_fixture();
-    let out = Command::new(lain_bin())
+    let hermetic = Hermetic::new();
+    let out = hermetic
+        .setup_cmd()
         .args(["setup", "--workspace"])
         .arg(fixture.path())
         .args(["--agent", "generic", "--print-config", "--no-model"])
@@ -76,7 +151,9 @@ fn print_config_emits_valid_mcp_json_and_writes_nothing() {
 #[test]
 fn dry_run_reports_would_configure_and_writes_nothing() {
     let fixture = build_fixture();
-    let out = Command::new(lain_bin())
+    let hermetic = Hermetic::new();
+    let out = hermetic
+        .setup_cmd()
         .args(["setup", "--workspace"])
         .arg(fixture.path())
         .args(["--agent", "generic", "--dry-run", "--no-model", "--json"])
@@ -99,7 +176,9 @@ fn dry_run_reports_would_configure_and_writes_nothing() {
 fn dry_run_with_yes_does_not_download_the_model() {
     let fixture = build_fixture();
     let fake_home = tempfile::tempdir().unwrap();
-    let out = Command::new(lain_bin())
+    let hermetic = Hermetic::new();
+    let out = hermetic
+        .setup_cmd()
         .args(["setup", "--workspace"])
         .arg(fixture.path())
         .args(["--agent", "generic", "--dry-run", "--yes", "--json"])
@@ -124,7 +203,9 @@ fn dry_run_with_yes_does_not_download_the_model() {
 fn print_config_with_yes_does_not_download_the_model() {
     let fixture = build_fixture();
     let fake_home = tempfile::tempdir().unwrap();
-    let out = Command::new(lain_bin())
+    let hermetic = Hermetic::new();
+    let out = hermetic
+        .setup_cmd()
         .args(["setup", "--workspace"])
         .arg(fixture.path())
         .args(["--agent", "generic", "--print-config", "--yes"])
@@ -154,8 +235,10 @@ fn print_config_with_yes_does_not_download_the_model() {
 fn generic_setup_writes_config_and_verifies_successfully() {
     let fixture = build_fixture();
     let config_path = fixture.path().join(".mcp.json");
+    let hermetic = Hermetic::new();
 
-    let out = Command::new(lain_bin())
+    let out = hermetic
+        .setup_cmd()
         .args(["setup", "--workspace"])
         .arg(fixture.path())
         .args(["--agent", "generic", "--no-model", "--json"])
@@ -195,8 +278,10 @@ fn generic_setup_writes_config_and_verifies_successfully() {
 fn rerunning_setup_is_idempotent_and_backs_up() {
     let fixture = build_fixture();
     let config_path = fixture.path().join(".mcp.json");
+    let hermetic = Hermetic::new();
     let run = || {
-        Command::new(lain_bin())
+        hermetic
+            .setup_cmd()
             .args(["setup", "--workspace"])
             .arg(fixture.path())
             .args(["--agent", "generic", "--no-model", "--json"])
@@ -239,7 +324,9 @@ fn rerunning_setup_is_idempotent_and_backs_up() {
 #[test]
 fn unknown_agent_fails_clearly_without_writing_anything() {
     let fixture = build_fixture();
-    let out = Command::new(lain_bin())
+    let hermetic = Hermetic::new();
+    let out = hermetic
+        .setup_cmd()
         .args(["setup", "--workspace"])
         .arg(fixture.path())
         .args(["--agent", "not-a-real-agent", "--no-model"])
@@ -267,7 +354,9 @@ fn federation_root_setup_writes_server_config_entry_and_succeeds() {
     )
     .unwrap();
 
-    let out = Command::new(lain_bin())
+    let hermetic = Hermetic::new();
+    let out = hermetic
+        .setup_cmd()
         .args(["setup", "--agent", "generic", "--json", "--no-model"])
         .current_dir(fed.path())
         .env_remove("LAIN_URL")

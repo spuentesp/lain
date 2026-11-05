@@ -118,8 +118,10 @@ impl DaemonIdentity {
 /// build) is NOT compatible: it is unknown, not trusted.
 ///
 /// The message names both the expected and the actual values, so an
-/// operator can see which side moved.
-fn compatibility_error(info: &DaemonInfo) -> Option<String> {
+/// operator can see which side moved. Shared with `lain oneshot` (the
+/// other client of a shared daemon), so both refuse a stale daemon the
+/// same way.
+pub(crate) fn compatibility_error(info: &DaemonInfo) -> Option<String> {
     let expected = DaemonIdentity::current();
     let matches = info.version.as_deref() == Some(expected.version.as_str())
         && info.build_commit.as_deref() == Some(expected.build_commit.as_str())
@@ -130,6 +132,25 @@ fn compatibility_error(info: &DaemonInfo) -> Option<String> {
         info.version, info.build_commit, info.index_build_id,
     ))
 }
+
+/// The actionable refusal for a daemon whose identity differs from
+/// this client's: it names the socket, both identities, and how to
+/// recover. `recovery` is the caller's remedy text (the `lain mcp`
+/// bridge offers `--no-share`, `lain oneshot` its own env override).
+pub(crate) fn incompatible_daemon_error(
+    info: &DaemonInfo,
+    socket: &Path,
+    recovery: &str,
+) -> anyhow::Error {
+    anyhow!(
+        "{} at {}; {recovery}",
+        compatibility_error(info).unwrap_or_else(|| "incompatible shared daemon".into()),
+        socket.display(),
+    )
+}
+
+/// The remedy text for a client that can serve a private instance.
+const NO_SHARE_RECOVERY: &str = "restart the daemon or use --no-share";
 
 /// One newline-framed JSON-RPC round trip on a short-lived connection.
 /// Returns the `result` payload of the reply to `id`. Any timeout or
@@ -602,11 +623,9 @@ pub fn attach_or_start(
                 }
             }
         }
-        Discovery::Incompatible { socket, info } => Err(anyhow!(
-            "{} at {}; restart the daemon or use --no-share",
-            compatibility_error(&info).unwrap_or_else(|| "incompatible shared daemon".into()),
-            socket.display(),
-        )),
+        Discovery::Incompatible { socket, info } => {
+            Err(incompatible_daemon_error(&info, &socket, NO_SHARE_RECOVERY))
+        }
         Discovery::None => {
             tracing::info!(
                 "lain mcp: no shared daemon; starting one at {}",
@@ -650,10 +669,7 @@ fn only_shared(stream: UnixStream, socket: &Path) -> anyhow::Result<Option<UnixS
             Ok(None)
         }
         Some(info) => match compatibility_error(&info) {
-            Some(message) => Err(anyhow!(
-                "{message} at {}; restart the daemon or use --no-share",
-                socket.display()
-            )),
+            Some(_) => Err(incompatible_daemon_error(&info, socket, NO_SHARE_RECOVERY)),
             None => Ok(Some(stream)),
         },
         None => Ok(Some(stream)),

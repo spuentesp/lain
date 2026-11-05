@@ -280,7 +280,10 @@ no-share — unset it there to keep those shared.
 missing identity produces an error naming the socket and both
 identities. Restart the daemon, or explicitly select a private instance
 with `--no-share` / `LAIN_MCP_NO_SHARE=1`; Lain never silently attaches
-to stale code or starts a competing indexer in response.
+to stale code or starts a competing indexer in response. `lain oneshot`
+applies the same rule to the shared daemon it would reuse: an
+incompatible daemon fails the call instead of answering with stale
+code, and `LAIN_ONESHOT_NO_SHARE=1` is its explicit private fallback.
 
 Four-call dance per agent (sequence diagram in [multiplayer.md](multiplayer.md#agent-quickstart)):
 
