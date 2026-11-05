@@ -23,6 +23,41 @@
 //! | `LAIN_STARTUP_DIGEST_FILE`      | file holding the canonical digest        |
 //! | `LAIN_STARTUP_BUDGET_MS`        | per-run static-readiness budget          |
 //! | `LAIN_STARTUP_BASELINE_RSS_BYTES` | peak-RSS ceiling for later tasks        |
+//! | `LAIN_STARTUP_DIGEST_WRITE`     | `1` = this run may (re)write the digest   |
+//!
+//! # The digest check fails closed
+//!
+//! The digest is a function of the **input tree**, not of the analyzer
+//! alone: adding a function to the checkout changes the indexed node set
+//! and therefore the digest. A check that quietly rewrote its own
+//! baseline would pass on any tree and prove nothing, so the baseline is
+//! only ever written by an explicit
+//! `LAIN_STARTUP_DIGEST_WRITE=1` run. Without that variable a missing
+//! baseline is a **test failure**.
+//!
+//! # Comparing analyzers across a code change
+//!
+//! To compare the pre-change analyzer with the post-change one, both must
+//! see the *same input*. Pin the input to a worktree at the pre-change
+//! commit and point `LAIN_STARTUP_REPO_ROOT` at it — the harness never
+//! creates or moves a worktree itself:
+//!
+//! ```bash
+//! git worktree add /tmp/lain-startup-input ea91ef8c
+//!
+//! # baseline for the pinned input (explicit write run)
+//! LAIN_STARTUP_DIGEST_WRITE=1 \
+//! LAIN_STARTUP_REPO_ROOT=/tmp/lain-startup-input \
+//! LAIN_STARTUP_DIGEST_FILE=/tmp/lain-startup-baseline.digest \
+//!   cargo test --release --test startup_remediation \
+//!     real_checkout_digest_matches_baseline -- --ignored --nocapture
+//!
+//! # later, with the changed analyzer, against the same pinned input
+//! LAIN_STARTUP_REPO_ROOT=/tmp/lain-startup-input \
+//! LAIN_STARTUP_DIGEST_FILE=/tmp/lain-startup-baseline.digest \
+//!   cargo test --release --test startup_remediation \
+//!     real_checkout_digest_matches_baseline -- --ignored --nocapture
+//! ```
 
 use lain::federation::contracts::digest::canonical_digest_hex;
 use lain::federation::repo_id::RepoId;
@@ -47,6 +82,49 @@ fn parse_budget_ms(value: Option<&str>) -> u64 {
 #[test]
 fn configured_budget_rejects_zero() {
     assert!(std::panic::catch_unwind(|| parse_budget_ms(Some("0"))).is_err());
+}
+
+/// True only for the exact opt-in value `"1"`. Anything else — including
+/// `"true"`, `"0"` and the empty string — leaves the baseline read-only.
+fn digest_write_requested(value: Option<&str>) -> bool {
+    value == Some("1")
+}
+
+/// Compare `fresh` against the recorded baseline at `baseline`.
+///
+/// `write` is the operator's explicit opt-in
+/// (`LAIN_STARTUP_DIGEST_WRITE=1`). Only such a run may create or
+/// overwrite the baseline; every other run compares, and a missing
+/// baseline is an error rather than a silent self-seed.
+fn check_digest_against_baseline(baseline: &Path, fresh: &str, write: bool) -> Result<(), String> {
+    if write {
+        std::fs::write(baseline, format!("{fresh}\n")).map_err(|e| {
+            format!(
+                "could not write digest baseline {}: {e}",
+                baseline.display()
+            )
+        })?;
+        return Ok(());
+    }
+    let recorded = std::fs::read_to_string(baseline).map_err(|e| {
+        format!(
+            "digest baseline {} could not be read ({e}). The digest check fails closed: \
+             it never creates its own baseline. Create it deliberately with \
+             LAIN_STARTUP_DIGEST_WRITE=1.",
+            baseline.display()
+        )
+    })?;
+    let recorded = recorded.trim();
+    if recorded == fresh {
+        Ok(())
+    } else {
+        Err(format!(
+            "canonical digest mismatch.\n  baseline: {recorded}\n  fresh:    {fresh}\n\
+             The analyzer produced a different graph for the same input tree. If the \
+             input tree changed, re-pin it and regenerate the baseline deliberately \
+             with LAIN_STARTUP_DIGEST_WRITE=1."
+        ))
+    }
 }
 
 async fn static_index(root: &Path) -> (tempfile::TempDir, GraphDatabase) {
@@ -79,6 +157,65 @@ async fn static_index(root: &Path) -> (tempfile::TempDir, GraphDatabase) {
     (data_dir, db)
 }
 
+/// A missing baseline must be a failure, never a silent self-seed: a
+/// self-seeding check passes on any tree and proves nothing.
+#[test]
+fn digest_check_fails_closed_when_the_baseline_is_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    let baseline = dir.path().join("absent.digest");
+    let err = check_digest_against_baseline(&baseline, "deadbeef", false)
+        .expect_err("a missing baseline must be a failure");
+    assert!(
+        err.contains("LAIN_STARTUP_DIGEST_WRITE=1"),
+        "the error must name the opt-in variable, got: {err}"
+    );
+    assert!(
+        !baseline.exists(),
+        "a read-only run must not create the baseline"
+    );
+}
+
+/// Only an explicit write run may create or overwrite the baseline.
+#[test]
+fn digest_check_writes_only_when_explicitly_requested() {
+    let dir = tempfile::tempdir().unwrap();
+    let baseline = dir.path().join("baseline.digest");
+
+    check_digest_against_baseline(&baseline, "deadbeef", true).expect("explicit write");
+    assert_eq!(
+        std::fs::read_to_string(&baseline).unwrap().trim(),
+        "deadbeef"
+    );
+
+    // A write run may also overwrite an existing baseline.
+    check_digest_against_baseline(&baseline, "c0ffee", true).expect("explicit overwrite");
+    assert_eq!(std::fs::read_to_string(&baseline).unwrap().trim(), "c0ffee");
+}
+
+/// The comparison path: same digest passes, different digest fails.
+#[test]
+fn digest_check_compares_against_an_existing_baseline() {
+    let dir = tempfile::tempdir().unwrap();
+    let baseline = dir.path().join("baseline.digest");
+    std::fs::write(&baseline, "deadbeef\n").unwrap();
+
+    check_digest_against_baseline(&baseline, "deadbeef", false).expect("matching digest");
+    let err = check_digest_against_baseline(&baseline, "c0ffee", false)
+        .expect_err("a different digest must fail");
+    assert!(err.contains("mismatch"), "got: {err}");
+}
+
+/// The write opt-in is exact: nothing but `"1"` enables it.
+#[test]
+fn digest_write_is_opt_in_and_explicit() {
+    assert!(!digest_write_requested(None));
+    assert!(!digest_write_requested(Some("")));
+    assert!(!digest_write_requested(Some("0")));
+    assert!(!digest_write_requested(Some("true")));
+    assert!(!digest_write_requested(Some("yes")));
+    assert!(digest_write_requested(Some("1")));
+}
+
 #[tokio::test]
 #[ignore]
 async fn real_checkout_digest_matches_baseline() {
@@ -86,9 +223,8 @@ async fn real_checkout_digest_matches_baseline() {
     let baseline = PathBuf::from(std::env::var("LAIN_STARTUP_DIGEST_FILE").unwrap());
     let (_tmp, db) = static_index(&root).await;
     let fresh = canonical_digest_hex(&db);
-    if baseline.exists() {
-        assert_eq!(std::fs::read_to_string(&baseline).unwrap().trim(), fresh);
-    } else {
-        std::fs::write(&baseline, format!("{fresh}\n")).unwrap();
+    let write = digest_write_requested(std::env::var("LAIN_STARTUP_DIGEST_WRITE").ok().as_deref());
+    if let Err(message) = check_digest_against_baseline(&baseline, &fresh, write) {
+        panic!("{message}");
     }
 }

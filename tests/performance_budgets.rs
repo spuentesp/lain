@@ -167,19 +167,87 @@ struct StartupMetrics {
     listening: Duration,
     /// Wall time from process spawn to every repo reporting `ready`.
     indexed: Duration,
-    /// Highest resident set size observed while polling, in bytes.
-    /// `None` when the platform does not expose it (non-Linux) or the
-    /// child had already exited.
+    /// Peak resident set size of the server process, in bytes, taken
+    /// from the kernel's `VmHWM` high-water mark. `None` when the
+    /// platform does not expose it (non-Linux) or the child had already
+    /// exited.
     peak_rss_bytes: Option<u64>,
 }
 
-/// Resident set size of `pid`, in bytes, read from `/proc/<pid>/status`.
-/// `None` when the process is gone or the field cannot be parsed.
+/// Peak resident set size of `pid`, in bytes, read from the kernel's
+/// `VmHWM` high-water mark in `/proc/<pid>/status`.
+///
+/// `VmHWM` is the kernel's own record of the largest resident set the
+/// process ever had, so the value is not a polling sample: a spike
+/// between two polls is still counted. `None` when the process is gone
+/// or the field cannot be parsed.
 #[cfg(target_os = "linux")]
 fn rss_bytes(pid: u32) -> Option<u64> {
     let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    parse_peak_rss_bytes(&status)
+}
+
+/// A `/proc/<pid>/status` excerpt with a *different* current RSS and
+/// high-water mark, so a parser that picks the wrong field is caught.
+#[cfg(target_os = "linux")]
+const PROC_STATUS_SAMPLE: &str = "\
+Name:\tlain
+State:\tS (sleeping)
+VmPeak:\t  123456 kB
+VmSize:\t  234567 kB
+VmHWM:\t  111111 kB
+VmRSS:\t   99999 kB
+RssAnon:\t   90000 kB
+Threads:\t  12
+";
+
+/// The reported peak must be the kernel's high-water mark (`VmHWM`),
+/// not the instantaneous resident size (`VmRSS`): a polling sample of
+/// the latter under-reports every spike that happened between two
+/// polls.
+#[test]
+#[cfg(target_os = "linux")]
+fn peak_rss_parser_reads_the_high_water_mark_not_the_current_rss() {
+    let parsed = parse_peak_rss_bytes(PROC_STATUS_SAMPLE).expect("VmHWM must be present");
+    assert_eq!(
+        parsed,
+        111_111 * 1024,
+        "the parser must read VmHWM, the kernel's peak resident size"
+    );
+    assert_ne!(
+        parsed,
+        99_999 * 1024,
+        "the parser must not read VmRSS, the instantaneous resident size"
+    );
+}
+
+/// The parser must work on a real `/proc` entry too, and the kernel's
+/// high-water mark is never below the current resident size.
+#[test]
+#[cfg(target_os = "linux")]
+fn peak_rss_parser_reads_a_real_proc_status() {
+    let pid = std::process::id();
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap();
+    let hwm = parse_peak_rss_bytes(&status).expect("VmHWM for this process");
+    let rss = parse_current_rss_bytes(&status).expect("VmRSS for this process");
+    assert!(hwm > 0, "the high-water mark must be a positive byte count");
+    assert!(
+        hwm >= rss,
+        "the high-water mark ({hwm}) must never be below the current RSS ({rss})"
+    );
+}
+
+#[cfg(not(target_os = "linux"))]
+fn rss_bytes(_pid: u32) -> Option<u64> {
+    None
+}
+
+/// Extract the kernel's peak resident size (`VmHWM`) from the contents of
+/// a `/proc/<pid>/status` file.
+#[cfg(target_os = "linux")]
+fn parse_peak_rss_bytes(status: &str) -> Option<u64> {
     let kb = status.lines().find_map(|line| {
-        line.strip_prefix("VmRSS:")?
+        line.strip_prefix("VmHWM:")?
             .split_whitespace()
             .next()?
             .parse::<u64>()
@@ -188,9 +256,18 @@ fn rss_bytes(pid: u32) -> Option<u64> {
     Some(kb * 1024)
 }
 
-#[cfg(not(target_os = "linux"))]
-fn rss_bytes(_pid: u32) -> Option<u64> {
-    None
+/// Extract the current resident size from the contents of a
+/// `/proc/<pid>/status` file.
+#[cfg(target_os = "linux")]
+fn parse_current_rss_bytes(status: &str) -> Option<u64> {
+    let kb = status.lines().find_map(|line| {
+        line.strip_prefix("VmRSS:")?
+            .split_whitespace()
+            .next()?
+            .parse::<u64>()
+            .ok()
+    })?;
+    Some(kb * 1024)
 }
 
 /// Spawn the server, wait until `/health` returns 200, then until every
@@ -267,11 +344,16 @@ fn boot_and_measure(
 
     let guard = ServerGuard {
         child,
-        stderr_path: std::path::PathBuf::from(""),
+        // The child's stderr went to this file; handing the path to the
+        // guard is what lets `exit_diag` explain a crash instead of
+        // returning an empty diagnostic.
+        stderr_path: stderr_path.clone(),
     };
     let host = format!("127.0.0.1:{port}");
-    // Sampled in both polling loops: the peak usually lands during
-    // indexing, long after the first 200.
+    // Read in both polling loops because the peak usually lands during
+    // indexing, long after the first 200. The value is the kernel's
+    // `VmHWM` high-water mark, so it never shrinks and the retained
+    // maximum is the process's true peak resident size.
     let pid = guard.child.id();
     let mut peak_rss_bytes: Option<u64> = None;
 
@@ -347,6 +429,11 @@ fn boot_and_measure(
         }
         std::thread::sleep(Duration::from_millis(50));
     }
+    // One final read of the kernel high-water mark, so the recorded peak
+    // covers the whole window up to the moment readiness was observed.
+    if let Some(rss) = rss_bytes(pid) {
+        peak_rss_bytes = Some(peak_rss_bytes.unwrap_or(0).max(rss));
+    }
     let indexed = boot_start.elapsed();
     let metrics = StartupMetrics {
         listening,
@@ -366,6 +453,33 @@ fn boot_and_time(
 ) -> (ServerGuard, Duration, Duration, String) {
     let (guard, metrics, host) = boot_and_measure(project_dir, repo_dir, data_dir, port, None);
     (guard, metrics.listening, metrics.indexed, host)
+}
+
+/// The guard must carry the path of the file the child's stderr went
+/// to, so `exit_diag` can explain a crash instead of returning an
+/// empty diagnostic.
+#[test]
+fn boot_and_measure_records_the_child_stderr_path() {
+    let port = free_port();
+    let project = tempfile::tempdir().unwrap();
+    let repo_dir = project.path().join("repo");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    build_perf_fixture(&repo_dir);
+    let data_dir = project.path().join("data");
+
+    let (guard, _metrics, _host) =
+        boot_and_measure(project.path(), &repo_dir, &data_dir, port, None);
+
+    assert_eq!(
+        guard.stderr_path,
+        std::env::temp_dir().join(format!("perf-budgets-stderr-{port}.log")),
+        "the guard must point at the child's stderr log"
+    );
+    assert!(
+        guard.stderr_path.exists(),
+        "the stderr log must exist while the child runs"
+    );
+    drop(guard);
 }
 
 /// Build the standard fixture and boot a server against it. Used by
