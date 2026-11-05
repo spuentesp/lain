@@ -769,3 +769,54 @@ fn helpers_return_usable_fixtures() {
         .collect();
     assert_eq!(callers.len(), 2, "b should have exactly two callers");
 }
+
+// ---------------------------------------------------------------------------
+// Startup budget parsing
+// ---------------------------------------------------------------------------
+
+/// The startup budget used when none is configured, in milliseconds.
+pub const DEFAULT_STARTUP_BUDGET_MS: u64 = 60_000;
+
+/// Parse a configured startup budget, in milliseconds.
+///
+/// A configured budget must be strictly positive: `0` would turn every
+/// startup assertion into a coin flip. An absent value falls back to
+/// [`DEFAULT_STARTUP_BUDGET_MS`].
+///
+/// Panics when the value is present but not a positive integer — a
+/// misconfigured budget is a configuration error, not something to
+/// silently round to a default.
+///
+/// This is the single implementation of the rule: the budget parser
+/// test and the real startup benchmark both go through it, so the
+/// benchmark cannot drift away from the validation.
+pub fn parse_budget_ms(value: Option<&str>) -> u64 {
+    value
+        .map(|value| {
+            let budget = value.parse::<u64>().expect("numeric startup budget");
+            assert!(budget > 0, "startup budget must be greater than zero");
+            budget
+        })
+        .unwrap_or(DEFAULT_STARTUP_BUDGET_MS)
+}
+
+/// The startup budget configured in the environment, in milliseconds.
+///
+/// Reads `LAIN_STARTUP_BUDGET_MS`. An unset variable falls back to
+/// [`DEFAULT_STARTUP_BUDGET_MS`]; a set-but-invalid value panics, per
+/// [`parse_budget_ms`].
+pub fn startup_budget_ms_from_env() -> u64 {
+    parse_budget_ms(std::env::var("LAIN_STARTUP_BUDGET_MS").ok().as_deref())
+}
+
+#[test]
+fn parse_budget_ms_rejects_zero() {
+    assert!(std::panic::catch_unwind(|| parse_budget_ms(Some("0"))).is_err());
+}
+
+#[test]
+fn parse_budget_ms_defaults_and_accepts_positive_values() {
+    assert_eq!(parse_budget_ms(None), DEFAULT_STARTUP_BUDGET_MS);
+    assert_eq!(parse_budget_ms(Some("1")), 1);
+    assert_eq!(parse_budget_ms(Some("60000")), 60_000);
+}

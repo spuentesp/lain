@@ -38,27 +38,40 @@
 //! # Comparing analyzers across a code change
 //!
 //! To compare the pre-change analyzer with the post-change one, both must
-//! see the *same input*. Pin the input to a worktree at the pre-change
-//! commit and point `LAIN_STARTUP_REPO_ROOT` at it — the harness never
+//! see the *same input*. The input is a **worktree pinned to the
+//! pre-change commit**; the operator creates it and the harness never
 //! creates or moves a worktree itself:
 //!
 //! ```bash
-//! git worktree add /tmp/lain-startup-input ea91ef8c
+//! # one-time setup: a detached worktree at the pre-change commit
+//! git worktree add --detach /tmp/lain-startup-input-ea91ef8c ea91ef8c
 //!
-//! # baseline for the pinned input (explicit write run)
+//! # (1) seed the baseline — MUST run with the PRE-CHANGE analyzer, i.e.
+//! #     before any commit that touches src/. This is the only run that
+//! #     may write the baseline, and it must be an explicit write run.
 //! LAIN_STARTUP_DIGEST_WRITE=1 \
-//! LAIN_STARTUP_REPO_ROOT=/tmp/lain-startup-input \
+//! LAIN_STARTUP_REPO_ROOT=/tmp/lain-startup-input-ea91ef8c \
 //! LAIN_STARTUP_DIGEST_FILE=/tmp/lain-startup-baseline.digest \
 //!   cargo test --release --test startup_remediation \
 //!     real_checkout_digest_matches_baseline -- --ignored --nocapture
 //!
-//! # later, with the changed analyzer, against the same pinned input
-//! LAIN_STARTUP_REPO_ROOT=/tmp/lain-startup-input \
+//! # (2) later, with the CHANGED analyzer, against the SAME pinned input
+//! #     worktree. Never write here: the digest must equal the baseline
+//! #     the pre-change analyzer produced.
+//! LAIN_STARTUP_REPO_ROOT=/tmp/lain-startup-input-ea91ef8c \
 //! LAIN_STARTUP_DIGEST_FILE=/tmp/lain-startup-baseline.digest \
 //!   cargo test --release --test startup_remediation \
 //!     real_checkout_digest_matches_baseline -- --ignored --nocapture
 //! ```
+//!
+//! Pointing `LAIN_STARTUP_REPO_ROOT` at the moving checkout is *not* an
+//! equivalence check: every commit that adds or edits a tracked file
+//! changes the indexed node set and therefore the digest, which says
+//! nothing about the analyzer.
 
+mod common;
+
+use common::parse_budget_ms;
 use lain::federation::contracts::digest::canonical_digest_hex;
 use lain::federation::repo_id::RepoId;
 use lain::federation::repo_source::{RepoSource, WorkspaceDirSource};
@@ -67,17 +80,6 @@ use lain::graph::GraphDatabase;
 use lain::schema::RepoNamespace;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-
-#[allow(dead_code)]
-fn parse_budget_ms(value: Option<&str>) -> u64 {
-    value
-        .map(|value| {
-            let budget = value.parse::<u64>().expect("numeric startup budget");
-            assert!(budget > 0, "startup budget must be greater than zero");
-            budget
-        })
-        .unwrap_or(60_000)
-}
 
 #[test]
 fn configured_budget_rejects_zero() {

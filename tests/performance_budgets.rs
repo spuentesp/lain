@@ -36,7 +36,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use common::{free_port, ServerGuard};
+use common::{free_port, startup_budget_ms_from_env, ServerGuard};
 
 /// Bound applied on top of every documented budget. 4× absorbs a
 /// 2-core CI runner with the debug binary and in-binary parallel
@@ -482,6 +482,78 @@ fn boot_and_measure_records_the_child_stderr_path() {
     drop(guard);
 }
 
+/// The outcome of comparing a run's peak RSS against the configured
+/// budget.
+#[derive(Debug, PartialEq, Eq)]
+enum PeakRssBudget {
+    /// No baseline was configured, so there was nothing to compare.
+    NotConfigured,
+    /// The platform does not expose a peak RSS (`/proc` is Linux-only),
+    /// so the comparison was skipped explicitly.
+    Unavailable,
+    /// The peak was measured and is within `baseline * 110 / 100`.
+    Within(u64),
+}
+
+/// Compare a run's peak RSS against the configured baseline.
+///
+/// The budget is 110 % of the baseline, matching the rule the
+/// remediation spec sets for peak RSS. A `None` peak means the
+/// platform cannot report one, so the comparison is skipped
+/// explicitly instead of failing a run that has no number to
+/// compare.
+fn check_peak_rss_budget(
+    run: usize,
+    peak: Option<u64>,
+    baseline: Option<u64>,
+) -> Result<PeakRssBudget, String> {
+    let Some(baseline) = baseline else {
+        return Ok(PeakRssBudget::NotConfigured);
+    };
+    let Some(peak) = peak else {
+        return Ok(PeakRssBudget::Unavailable);
+    };
+    let ceiling = baseline * 110 / 100;
+    if peak <= ceiling {
+        Ok(PeakRssBudget::Within(peak))
+    } else {
+        Err(format!(
+            "run {run}: peak RSS {peak} exceeds 110% of baseline {baseline} (ceiling {ceiling})"
+        ))
+    }
+}
+
+/// A platform that cannot report a peak RSS must skip the comparison
+/// explicitly, not fail the run.
+#[test]
+fn peak_rss_budget_skips_when_the_platform_cannot_report_a_peak() {
+    assert_eq!(
+        check_peak_rss_budget(0, None, Some(100)),
+        Ok(PeakRssBudget::Unavailable)
+    );
+    assert_eq!(
+        check_peak_rss_budget(0, Some(100), None),
+        Ok(PeakRssBudget::NotConfigured)
+    );
+}
+
+/// Linux keeps the 110 % assertion: ten percent of headroom is
+/// allowed, one byte more is not.
+#[test]
+fn peak_rss_budget_allows_ten_percent_of_headroom() {
+    assert_eq!(
+        check_peak_rss_budget(0, Some(100), Some(100)),
+        Ok(PeakRssBudget::Within(100))
+    );
+    assert_eq!(
+        check_peak_rss_budget(0, Some(110), Some(100)),
+        Ok(PeakRssBudget::Within(110))
+    );
+    let err = check_peak_rss_budget(2, Some(111), Some(100)).expect_err("111 exceeds 110%");
+    assert!(err.contains("run 2"), "the error must name the run: {err}");
+    assert!(err.contains("110%"), "the error must name the rule: {err}");
+}
+
 /// Build the standard fixture and boot a server against it. Used by
 /// every test except `server_boot_under_5_seconds` itself (which needs
 /// to measure the boot of THIS call).
@@ -841,10 +913,10 @@ fn small_repo_index_under_10_seconds() {
 #[ignore]
 fn real_checkout_static_ready_under_configured_budget() {
     let repo = PathBuf::from(std::env::var("LAIN_STARTUP_REPO_ROOT").unwrap());
-    let budget = std::env::var("LAIN_STARTUP_BUDGET_MS")
-        .unwrap_or_else(|_| "60000".into())
-        .parse::<u128>()
-        .unwrap();
+    // The same parser the budget test validates: a configured budget of
+    // zero is rejected here too, instead of silently making every
+    // readiness assertion pass.
+    let budget = startup_budget_ms_from_env() as u128;
     let baseline_rss = std::env::var("LAIN_STARTUP_BASELINE_RSS_BYTES")
         .ok()
         .map(|v| v.parse::<u64>().unwrap());
@@ -861,12 +933,27 @@ fn real_checkout_static_ready_under_configured_budget() {
             "run {run}: full static readiness took {:?} on {host}",
             metrics.indexed,
         );
-        if let Some(baseline) = baseline_rss {
-            let peak = metrics.peak_rss_bytes.expect("Linux peak RSS");
-            assert!(
-                peak <= baseline * 110 / 100,
-                "run {run}: peak RSS {peak} exceeds 110% of baseline {baseline}",
-            );
+        // A readiness signal on an empty graph proves nothing: the
+        // server can report every repo `ready` with zero nodes if the
+        // index never ran. Assert the graph is populated.
+        let req = format!("GET /health HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+        let (status, body, _) = http_request(&host, &req);
+        assert_eq!(status, 200, "run {run}: /health HTTP {status}: {body}");
+        let parsed: serde_json::Value = serde_json::from_str(&body)
+            .unwrap_or_else(|e| panic!("run {run}: /health not JSON: {e}\n{body}"));
+        let graph_nodes = parsed["graph_nodes"].as_u64().unwrap_or(0);
+        assert!(
+            graph_nodes > 0,
+            "run {run}: expected graph_nodes > 0 after indexing, got {parsed}"
+        );
+        match check_peak_rss_budget(run, metrics.peak_rss_bytes, baseline_rss) {
+            Ok(PeakRssBudget::NotConfigured) => {}
+            Ok(PeakRssBudget::Unavailable) => eprintln!(
+                "run {run}: peak RSS unavailable on this platform; \
+                 skipping the peak-RSS budget"
+            ),
+            Ok(PeakRssBudget::Within(_)) => {}
+            Err(message) => panic!("{message}"),
         }
         eprintln!(
             "startup run={run} listening={:?} indexed={:?} peak_rss={:?}",
