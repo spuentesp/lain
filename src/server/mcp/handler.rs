@@ -741,10 +741,46 @@ const RAW_SNAPSHOT_TOOLS: &[&str] = &[
 fn scoped_snapshot_graph(
     graph: &crate::graph::GraphDatabase,
     repo: &str,
-) -> Result<crate::graph::GraphDatabase, String> {
+) -> crate::graph::GraphDatabase {
     let mut scoped = graph.clone();
     scoped.set_symbol_repo_scope(repo);
-    Ok(scoped)
+    scoped
+}
+
+struct RawSnapshotError {
+    code: &'static str,
+    message: String,
+    details: Option<serde_json::Value>,
+}
+
+impl RawSnapshotError {
+    fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            details: None,
+        }
+    }
+
+    fn with_details(mut self, details: serde_json::Value) -> Self {
+        self.details = Some(details);
+        self
+    }
+}
+
+fn raw_snapshot_error(
+    snapshot: &str,
+    error: RawSnapshotError,
+) -> (String, bool, Option<serde_json::Value>) {
+    let text = format!("Error: {}", error.message);
+    let structured = crate::server::mcp::contract_tools::envelope::error_envelope(
+        error.code,
+        error.message,
+        error.details,
+        snapshot,
+        std::time::Instant::now(),
+    );
+    (text, true, Some(structured))
 }
 
 async fn dispatch_raw_snapshot(
@@ -755,51 +791,80 @@ async fn dispatch_raw_snapshot(
 ) -> Option<(String, bool, Option<serde_json::Value>)> {
     let snapshot_value = args.get("snapshot")?;
     let Some(snapshot_id) = snapshot_value.as_str() else {
-        return Some((
-            "Error: snapshot must be a string snapshot id or 'live'".to_string(),
-            true,
-            None,
+        return Some(raw_snapshot_error(
+            "invalid",
+            RawSnapshotError::new(
+                "invalid_argument",
+                "snapshot must be a string snapshot id or 'live'",
+            ),
         ));
     };
     if snapshot_id == "live" {
         return None;
     }
     if !RAW_SNAPSHOT_TOOLS.contains(&name) {
-        return Some((
-            format!("Error: tool {name} does not support named snapshots"),
-            true,
-            None,
+        return Some(raw_snapshot_error(
+            snapshot_id,
+            RawSnapshotError::new(
+                "invalid_argument",
+                format!("tool {name} does not support named snapshots"),
+            ),
         ));
     }
     let result = async {
-        let manager = snapshots
-            .ok_or_else(|| "snapshot manager is not configured for this server".to_string())?;
-        let outcome = manager
-            .get(snapshot_id, 5_000)
-            .await
-            .map_err(|e| format!("snapshot {snapshot_id} is unavailable: {e:?}"))?;
+        let manager = snapshots.ok_or_else(|| {
+            RawSnapshotError::new(
+                "snapshot_unavailable",
+                "snapshot manager is not configured for this server",
+            )
+        })?;
+        let outcome = manager.get(snapshot_id, 5_000).await.map_err(|error| {
+            use crate::federation::contracts::snapshots::manager::PrepareError;
+            let code = match &error {
+                PrepareError::SnapshotNotFound { .. } => "snapshot_not_found",
+                PrepareError::RepoNotRegistered { .. } => "repo_not_registered",
+                PrepareError::Busy { .. } => "busy",
+                PrepareError::InvalidArgument { .. } => "invalid_argument",
+                _ => "snapshot_unavailable",
+            };
+            RawSnapshotError::new(
+                code,
+                format!("snapshot {snapshot_id} is unavailable: {error:?}"),
+            )
+        })?;
         if outcome.record.state != crate::federation::contracts::snapshots::SnapshotState::Ready {
-            return Err(format!(
-                "snapshot {snapshot_id} is not ready (state: {})",
-                outcome.record.state.as_str()
+            return Err(RawSnapshotError::new(
+                "snapshot_not_ready",
+                format!(
+                    "snapshot {snapshot_id} is not ready (state: {})",
+                    outcome.record.state.as_str()
+                ),
             ));
         }
         if let Some(repo) = args.get("repo_id").and_then(|v| v.as_str()) {
             if !outcome.record.repos.contains_key(repo) {
-                return Err(format!(
-                    "repo '{repo}' is not present in snapshot {snapshot_id}"
-                ));
+                return Err(RawSnapshotError::new(
+                    "repo_not_registered",
+                    format!("repo '{repo}' is not present in snapshot {snapshot_id}"),
+                )
+                .with_details(serde_json::json!({"repo": repo})));
             }
         }
         let record = outcome.record;
         let (snapshot_federation, _hold) = manager
             .from_snapshot_with_wait_ms(&record, 5_000)
-            .map_err(|e| format!("snapshot {snapshot_id} could not be loaded: {e}"))?;
+            .map_err(|error| {
+                RawSnapshotError::new(
+                    "snapshot_unavailable",
+                    format!("snapshot {snapshot_id} could not be loaded: {error}"),
+                )
+            })?;
         let graph = snapshot_federation.backend.db().clone();
         if record.repos.len() > 1 && args.get("repo_id").is_none() {
             if let Some(symbol) = args
                 .get("symbol")
                 .or_else(|| args.get("name"))
+                .or_else(|| args.get("node_id"))
                 .and_then(|value| value.as_str())
             {
                 let repos: std::collections::BTreeSet<String> = graph
@@ -814,15 +879,19 @@ async fn dispatch_raw_snapshot(
                     })
                     .collect();
                 if repos.len() > 1 {
-                    return Err(format!(
-                        "repo_id is required for ambiguous symbol '{symbol}' in snapshot {snapshot_id}"
-                    ));
+                    return Err(RawSnapshotError::new(
+                        "ambiguous_symbol",
+                        format!(
+                            "repo_id is required for ambiguous symbol '{symbol}' in snapshot {snapshot_id}"
+                        ),
+                    )
+                    .with_details(serde_json::json!({"symbol": symbol})));
                 }
             }
         }
         let mut bound = executor.clone();
         bound.ctx.graph = match args.get("repo_id").and_then(|value| value.as_str()) {
-            Some(repo) => scoped_snapshot_graph(&graph, repo)?,
+            Some(repo) => scoped_snapshot_graph(&graph, repo),
             None => graph,
         };
         bound.ctx.overlay = crate::overlay::VolatileOverlay::new();
@@ -832,15 +901,14 @@ async fn dispatch_raw_snapshot(
             record,
             data_dir: manager.data_dir().to_path_buf(),
         });
-        bound
-            .call_with_output(name, Some(args))
-            .await
-            .map_err(|e| e.to_string())
+        bound.call_with_output(name, Some(args)).await.map_err(|error| {
+            RawSnapshotError::new("tool_error", error.to_string())
+        })
     }
     .await;
     Some(match result {
         Ok(output) => (output.text, false, output.structured),
-        Err(error) => (format!("Error: {error}"), true, None),
+        Err(error) => raw_snapshot_error(snapshot_id, error),
     })
 }
 

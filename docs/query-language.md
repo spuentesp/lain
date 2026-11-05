@@ -162,7 +162,8 @@ Paginate.
 { "op": "limit", "count": 10, "offset": 0 }
 ```
 
-Without a `limit` op, the executor orders results by name and then id,
+Without a `limit` op, the executor preserves an explicit `sort` order
+(breaking ties by name and then id), or orders results by name and then id,
 caps the answer at `tuning.ingestion.default_query_limit` (default 100),
 and reports the trim in `meta.truncated` / `meta.matched_before_limit`.
 
@@ -288,9 +289,10 @@ arrays are omitted from the JSON).
 
 Set `limit` and optionally `cursor` beside `ops` to page the final result.
 These fields are distinct from the existing `{"op":"limit"}` pipeline
-operation, which keeps its original behavior. Paged results are ordered by
-name and then id. A page returns `meta.next_cursor` only when another page
-exists; pass that value unchanged as the next request's `cursor`.
+operation, which keeps its original behavior. Paged results preserve an explicit
+`sort` order, breaking ties by name and then id. Without an explicit sort,
+they are ordered by name and then id. A page returns `meta.next_cursor` only
+when another page exists; pass that value unchanged as the next request's `cursor`.
 
 ```json
 {
@@ -430,6 +432,13 @@ traversing one always returns nothing.
 | `ReadsFrom` | `FieldRef` → the `HttpClientCall` whose response it reads |
 | `Binds` | Federation-only: consumer → matched provider |
 | `ReadsTable` / `WritesTable` | Function/method/file → `Table` (SELECT / INSERT·UPDATE·DELETE) |
+| `MapsTo` | ORM model → mapped `Table` |
+| `HasColumn` | `Table` → contained `Column` |
+| `ReadsColumn` / `WritesColumn` | Function/method/file → `Column` — **not emitted** (`indexed: false`) |
+| `Renders` | Frontend function/method → `FieldRef` rendered by a component |
+| `Stores` | Frontend function/method → `FieldRef` stored by a component |
+| `Forwards` | Frontend function/method → `FieldRef` forwarded through function/props flow |
+| `Discards` | Frontend function/method → `FieldRef` selected but not used |
 
 ## Node Types
 
@@ -440,7 +449,7 @@ with `indexed: false` — no indexer emits it yet.
 `File`, `Namespace`, `Module`, `Package`, `Class`, `Interface`, `Struct`,
 `Enum`, `Trait`, `Function`, `Method`, `Property`, `Variable`, `Constant`,
 `HttpRoute`, `Topic`, `Resource`, `Schema`, `HttpClientCall`, `Field`,
-`FieldRef`, `Synthetic`, `Table`
+`FieldRef`, `Synthetic`, `Table`, `Column`
 
 `Function` and `Method` are distinct. In Rust and other impl-heavy
 languages most code is a `Method`, so a query filtered to `Function`

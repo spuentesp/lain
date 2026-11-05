@@ -199,6 +199,11 @@ async fn unknown_raw_snapshot_is_an_error_not_a_live_fallback() {
         text(&result).contains("snapshot"),
         "error should name the snapshot: {result}"
     );
+    assert_eq!(
+        result.pointer("/result/structuredContent/error/code"),
+        Some(&Value::String("snapshot_not_found".into())),
+        "unknown snapshot must have a stable structured error: {result}"
+    );
 }
 
 #[tokio::test]
@@ -212,6 +217,11 @@ async fn excluded_snapshot_repo_is_an_error_not_a_live_fallback() {
         result.pointer("/result/isError").and_then(Value::as_bool),
         Some(true),
         "unregistered snapshot repo silently answered live: {result}"
+    );
+    assert_eq!(
+        result.pointer("/result/structuredContent/error/code"),
+        Some(&Value::String("repo_not_registered".into())),
+        "excluded repo must have a stable structured error: {result}"
     );
 }
 
@@ -229,6 +239,11 @@ async fn non_string_snapshot_is_an_error_not_a_live_fallback() {
         "non-string snapshot silently answered from live data: {result}"
     );
     assert!(text(&result).contains("snapshot"), "{result}");
+    assert_eq!(
+        result.pointer("/result/structuredContent/error/code"),
+        Some(&Value::String("invalid_argument".into())),
+        "invalid snapshot argument must have a stable structured error: {result}"
+    );
 }
 
 #[tokio::test]

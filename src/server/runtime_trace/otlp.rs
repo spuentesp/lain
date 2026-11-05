@@ -138,8 +138,8 @@ fn hex_len(s: &str) -> Option<usize> {
 /// Parse one OTLP HTTP/JSON payload into a flat `Vec<SpanRecord>`.
 ///
 /// Flattening `resourceSpans → scopeSpans → spans` is the caller's
-/// choice — the store doesn't care about the nesting. Resource and scope
-/// metadata is inherited by each span; span-local attributes take precedence.
+/// choice — the store doesn't care about the nesting. Span-local attributes
+/// override resource attributes; scope name/version metadata is authoritative.
 pub fn parse_otlp_json(payload: &[u8]) -> Result<Vec<SpanRecord>, OtlpParseError> {
     let req: OtlpRequest = serde_json::from_slice(payload)?;
 
@@ -194,6 +194,13 @@ fn translate_span(
             }
         }
     }
+    for kv in &span.attributes {
+        if let Some(v) = &kv.value {
+            if let Some(attr) = any_value_to_attr(v) {
+                attributes.insert(kv.key.clone(), attr);
+            }
+        }
+    }
     if let Some(scope) = scope {
         attributes.insert(
             "otel.scope.name".to_string(),
@@ -203,13 +210,6 @@ fn translate_span(
             "otel.scope.version".to_string(),
             AttributeValue::Str(scope.version.clone()),
         );
-    }
-    for kv in &span.attributes {
-        if let Some(v) = &kv.value {
-            if let Some(attr) = any_value_to_attr(v) {
-                attributes.insert(kv.key.clone(), attr);
-            }
-        }
     }
 
     Ok(SpanRecord {
@@ -446,7 +446,7 @@ mod tests {
     }
 
     #[test]
-    fn resource_and_scope_attributes_are_preserved_with_span_precedence() {
+    fn span_attributes_override_resource_but_not_authoritative_scope_metadata() {
         let payload = r#"{
             "resourceSpans": [
                 {
@@ -462,7 +462,9 @@ mod tests {
                             "endTimeUnixNano": "1700000000000000000",
                             "attributes": [
                                 {"key": "service.name", "value": {"stringValue": "span-b"}},
-                                {"key": "http.route", "value": {"stringValue": "/orders/:id"}}
+                                {"key": "http.route", "value": {"stringValue": "/orders/:id"}},
+                                {"key": "otel.scope.name", "value": {"stringValue": "span-scope"}},
+                                {"key": "otel.scope.version", "value": {"stringValue": "span-version"}}
                             ]
                         }]
                     }]

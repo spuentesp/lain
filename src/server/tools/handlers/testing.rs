@@ -278,8 +278,11 @@ pub fn get_coverage_summary(
 ///
 /// Returns a set of node IDs: the entry points themselves (trivially reached
 /// from themselves) plus every function reachable from them via `Calls`.
-/// Used by `get_coverage_summary` to compute `structural_reach`.
-fn reachable_via_calls(graph: &GraphDatabase, entry_points: &[GraphNode]) -> HashSet<String> {
+/// Used by coverage summaries and change assessments to compute structural reach.
+pub(super) fn reachable_via_calls(
+    graph: &GraphDatabase,
+    entry_points: &[GraphNode],
+) -> HashSet<String> {
     let mut visited: HashSet<String> = HashSet::new();
     let mut queue: VecDeque<String> = VecDeque::new();
 

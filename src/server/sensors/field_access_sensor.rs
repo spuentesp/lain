@@ -56,6 +56,7 @@ use crate::server::sensors::patterns::Patterns;
 use crate::server::sensors::util::{
     is_deny_method, lang_for_path as lang_for_path_shared, parse_for_lang, Lang,
 };
+use crate::server::sensors::SensorEntry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use tree_sitter::{Node, Tree};
@@ -115,8 +116,8 @@ pub struct FieldAccessEmission {
     pub reads: Vec<FieldRead>,
     pub escapes: BTreeSet<Escape>,
     /// `true` when the response can be fully traced (no escape
-    /// flipped it). PR 9's contract: a `false` here means the call's
-    /// `ConsumerFact.reads_complete` is also `false`.
+    /// flipped it). HTTP calls patch `ConsumerFact.reads_complete`;
+    /// topic and GraphQL operations report the incompleteness as unresolved.
     pub reads_complete: bool,
     pub origin: FieldReadOrigin,
     pub operation: Option<crate::federation::contracts::model::ContractKey>,
@@ -145,17 +146,42 @@ pub struct FieldAccessSensor;
 
 // §6.5: phase 2, after the joiner has produced the `Binds` set that scope
 // rules 5 / 6 walk.
-crate::server::sensors::register_sensor!(
-    FieldAccessSensor,
-    "field_access",
-    FieldReads,
-    2,
-    |graph, root, namespace| {
+impl crate::server::sensors::Sensor for FieldAccessSensor {
+    fn name(&self) -> &'static str {
+        "field_access"
+    }
+
+    fn count_field(&self) -> crate::server::sensors::SensorCountField {
+        crate::server::sensors::SensorCountField::FieldReads
+    }
+
+    fn phase(&self) -> u8 {
+        2
+    }
+
+    fn scan(
+        &self,
+        graph: &GraphDatabase,
+        root: &Path,
+        namespace: &RepoNamespace,
+    ) -> Result<usize, LainError> {
         let repo_id = RepoId::new(root.to_string_lossy().as_ref())
             .unwrap_or_else(|_| crate::server::sensors::util::fallback_repo_id());
         scan_workspace_field_access(graph, root, namespace, &repo_id)
     }
-);
+
+    fn scan_with_report(
+        &self,
+        graph: &GraphDatabase,
+        root: &Path,
+        namespace: &RepoNamespace,
+    ) -> Result<crate::server::sensors::ScanReport, LainError> {
+        let repo_id = RepoId::new(root.to_string_lossy().as_ref())
+            .unwrap_or_else(|_| crate::server::sensors::util::fallback_repo_id());
+        scan_workspace_field_access_with_report(graph, root, namespace, &repo_id)
+    }
+}
+inventory::submit!(SensorEntry(&FieldAccessSensor));
 
 // ─── Workspace scan ───────────────────────────────────────────────
 
@@ -163,10 +189,20 @@ pub fn scan_workspace_field_access(
     graph: &GraphDatabase,
     root: &Path,
     namespace: &RepoNamespace,
-    _repo_id: &RepoId,
+    repo_id: &RepoId,
 ) -> Result<usize, LainError> {
+    scan_workspace_field_access_with_report(graph, root, namespace, repo_id)
+        .map(|report| report.emitted)
+}
+
+fn scan_workspace_field_access_with_report(
+    graph: &GraphDatabase,
+    root: &Path,
+    namespace: &RepoNamespace,
+    _repo_id: &RepoId,
+) -> Result<crate::server::sensors::ScanReport, LainError> {
     if graph.is_read_only() {
-        return Ok(0);
+        return Ok(crate::server::sensors::ScanReport::default());
     }
     let patterns = Patterns::with_overrides(root)?;
     let patterns: &Patterns = &patterns;
@@ -240,7 +276,32 @@ pub fn scan_workspace_field_access(
     if removed > 0 {
         tracing::debug!("field_access_sensor: replaced {removed} stale FieldRef(s) for {root:?}");
     }
-    Ok(all_nodes.len())
+    let incomplete_operations: BTreeSet<String> = emissions
+        .iter()
+        .filter(|emission| {
+            !emission.reads_complete && emission.origin != FieldReadOrigin::FieldAccess
+        })
+        .filter_map(|emission| {
+            emission
+                .operation
+                .as_ref()
+                .map(|operation| operation.wire_form())
+        })
+        .collect();
+    let unresolved = if incomplete_operations.is_empty() {
+        Vec::new()
+    } else {
+        vec![crate::federation::contracts::coverage::UnresolvedRecord {
+            reason: crate::federation::contracts::model::UnresolvedReason::Unnormalized,
+            count: incomplete_operations.len(),
+            sample_ids: incomplete_operations.iter().take(5).cloned().collect(),
+        }]
+    };
+    Ok(crate::server::sensors::ScanReport {
+        emitted: all_nodes.len(),
+        error: None,
+        unresolved,
+    })
 }
 
 // ─── Per-language detection ─────────────────────────────────────
@@ -4364,6 +4425,11 @@ fn extend_emissions_with_scope(
         let mut bound: BTreeMap<String, JsonPath> = BTreeMap::new();
         bound.insert("__response__".to_string(), JsonPath(Vec::new()));
         bound.insert(sender_name.clone(), JsonPath(Vec::new()));
+        if emission.origin != FieldReadOrigin::FieldAccess {
+            if let Some(payload) = payload_parameter(sender_node, s_content.as_bytes()) {
+                bound.insert(payload, JsonPath(Vec::new()));
+            }
+        }
         let mut reads: Vec<FieldRead> = Vec::new();
         let mut escapes: BTreeSet<Escape> = BTreeSet::new();
 

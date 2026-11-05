@@ -747,3 +747,114 @@ fn migration_requires_model_name_and_real_column_constructor() {
         .iter()
         .all(|column| column.migration.is_none()));
 }
+
+#[test]
+fn sqlalchemy_only_type_calls_default_to_the_attribute_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    write(
+        tmp.path(),
+        "models.py",
+        "from sqlalchemy import Column, String\nclass Price(Base):\n    __tablename__ = 'prices'\n    amount = Column(String(50))\nclass DynamicPrice(Base):\n    __tablename__ = 'dynamic_prices'\n    amount = Column(make_column_name(), String)\n",
+    );
+    let analysis = analyze_orm_models(tmp.path());
+    assert!(relation(&analysis, EdgeType::HasColumn, "prices", "amount"));
+    assert!(!analysis
+        .columns
+        .iter()
+        .any(|column| column.table == "dynamic_prices"));
+    assert!(analysis
+        .unresolved
+        .iter()
+        .any(|item| item.contains("DynamicPrice")));
+}
+
+#[test]
+fn typeorm_string_column_type_does_not_become_the_column_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    write(
+        tmp.path(),
+        "src/Order.ts",
+        "@Entity('orders')\nexport class Order {\n  @Column('varchar')\n  name: string;\n}\n",
+    );
+    let analysis = analyze_orm_models(tmp.path());
+    assert!(relation(&analysis, EdgeType::MapsTo, "Order", "orders"));
+    assert!(relation(&analysis, EdgeType::HasColumn, "orders", "name"));
+    assert!(!relation(
+        &analysis,
+        EdgeType::HasColumn,
+        "orders",
+        "varchar"
+    ));
+}
+
+#[test]
+fn sequelize_init_requires_a_local_class_with_a_model_base() {
+    let tmp = tempfile::tempdir().unwrap();
+    write(
+        tmp.path(),
+        "src/models.js",
+        "class Cache extends Store {}\nCache.init({ key: { type: DataTypes.STRING } }, { tableName: 'cache_entries' });\nclass Product extends Model {}\nProduct.init({ name: { type: DataTypes.STRING } }, { tableName: 'products' });\n",
+    );
+    let analysis = analyze_orm_models(tmp.path());
+    assert!(!analysis.models.iter().any(|model| model.name == "Cache"));
+    assert!(!analysis
+        .columns
+        .iter()
+        .any(|column| column.table == "cache_entries"));
+    assert!(analysis
+        .unresolved
+        .iter()
+        .any(|item| item.contains("Cache")));
+    assert!(relation(&analysis, EdgeType::MapsTo, "Product", "products"));
+    assert!(relation(&analysis, EdgeType::HasColumn, "products", "name"));
+}
+
+#[test]
+fn js_ts_migration_comments_do_not_create_sql_evidence() {
+    let tmp = tempfile::tempdir().unwrap();
+    write(
+        tmp.path(),
+        "schema.prisma",
+        "model Product {\n  name String @map(\"display_name\")\n  @@map(\"products\")\n}\nmodel Order {\n  name String @map(\"shipping_name\")\n  @@map(\"orders\")\n}\nmodel Customer {\n  name String @map(\"billing_name\")\n  @@map(\"customers\")\n}\n",
+    );
+    write(
+        tmp.path(),
+        "migrations/0001.js",
+        "// ALTER TABLE products ADD COLUMN display_name varchar;\nawait queryInterface.query('ALTER TABLE orders ADD COLUMN shipping_name varchar');\n",
+    );
+    write(
+        tmp.path(),
+        "migrations/0002.ts",
+        "/*\nALTER TABLE products ADD COLUMN display_name varchar;\n*/\n",
+    );
+    write(
+        tmp.path(),
+        "migrations/0003.sql",
+        "ALTER TABLE customers ADD COLUMN billing_name varchar;\n",
+    );
+    let analysis = analyze_orm_models(tmp.path());
+    let product = analysis
+        .columns
+        .iter()
+        .find(|column| column.table == "products")
+        .unwrap();
+    assert_eq!(product.migration, None);
+    let order = analysis
+        .columns
+        .iter()
+        .find(|column| column.table == "orders")
+        .unwrap();
+    assert_eq!(
+        order.migration.as_ref().map(|site| site.path.as_str()),
+        Some("migrations/0001.js")
+    );
+    let customer = analysis
+        .columns
+        .iter()
+        .find(|column| column.table == "customers")
+        .unwrap();
+    assert_eq!(
+        customer.migration.as_ref().map(|site| site.path.as_str()),
+        Some("migrations/0003.sql")
+    );
+}

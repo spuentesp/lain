@@ -743,7 +743,13 @@ impl GraphDatabase {
         self.symbol_repo_scope = Some(repo.into());
     }
 
-    fn in_symbol_repo_scope(&self, node: &GraphNode) -> bool {
+    pub fn repo_scope_allows(&self, candidate: &str) -> bool {
+        self.symbol_repo_scope
+            .as_deref()
+            .is_none_or(|repo| repo == candidate)
+    }
+
+    pub fn in_symbol_repo_scope(&self, node: &GraphNode) -> bool {
         let Some(repo) = self.symbol_repo_scope.as_deref() else {
             return true;
         };
@@ -2070,7 +2076,8 @@ impl GraphDatabase {
         self.path_index.get(path).and_then(|indices| {
             indices
                 .iter()
-                .find_map(|idx| graph.node_weight(*idx).cloned())
+                .filter_map(|idx| graph.node_weight(*idx).cloned())
+                .find(|node| self.in_symbol_repo_scope(node))
         })
     }
 
@@ -2110,6 +2117,7 @@ impl GraphDatabase {
         let graph = self.graph.read();
         graph
             .node_weights()
+            .filter(|node| self.in_symbol_repo_scope(node))
             .filter(|n| {
                 // Type filter
                 if let Some(sel) = type_selector {

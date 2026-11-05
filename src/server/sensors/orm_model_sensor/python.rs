@@ -68,7 +68,18 @@ fn sqlalchemy_column_name(call: Node, attribute: &str, src: &[u8]) -> Option<Str
     }
     match first_positional {
         Some(node) if node.kind() == "string" => string_literal(node, src),
-        Some(node) if node.kind() == "call" => Some(attribute.to_string()),
+        Some(node) if node.kind() == "call" => node
+            .child_by_field_name("function")
+            .map(|function| text(function, src))
+            .and_then(|function| {
+                function
+                    .rsplit('.')
+                    .next()?
+                    .chars()
+                    .next()
+                    .filter(char::is_ascii_uppercase)
+                    .map(|_| attribute.to_string())
+            }),
         Some(_) => None,
         None => Some(attribute.to_string()),
     }

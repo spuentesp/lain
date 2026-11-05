@@ -34,8 +34,7 @@ fn object_name(arguments: Node, src: &[u8]) -> NameResolution {
     let mut cursor = arguments.walk();
     for argument in arguments.named_children(&mut cursor) {
         if argument.kind() == "string" {
-            return string_literal(argument, src)
-                .map_or(NameResolution::Dynamic, NameResolution::Literal);
+            continue;
         }
         if argument.kind() != "object" {
             return NameResolution::Dynamic;
@@ -59,6 +58,17 @@ fn object_name(arguments: Node, src: &[u8]) -> NameResolution {
         }
     }
     NameResolution::Absent
+}
+
+fn entity_name(arguments: Node, src: &[u8]) -> NameResolution {
+    let mut cursor = arguments.walk();
+    if let Some(first) = arguments.named_children(&mut cursor).next() {
+        if first.kind() == "string" {
+            return string_literal(first, src)
+                .map_or(NameResolution::Dynamic, NameResolution::Literal);
+        }
+    }
+    object_name(arguments, src)
 }
 
 fn class_declaration(decorator: Node) -> Option<Node> {
@@ -96,7 +106,7 @@ fn analyze_typeorm_class(
     let Some(arguments) = decorator_arguments(entity) else {
         return;
     };
-    let table = match object_name(arguments, src) {
+    let table = match entity_name(arguments, src) {
         NameResolution::Literal(table) => table,
         NameResolution::Absent => to_snake_case(&model),
         NameResolution::Dynamic => {

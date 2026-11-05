@@ -366,6 +366,38 @@ fn attach_sql_statement(analysis: &mut OrmAnalysis, path: &str, line: u32, state
     }
 }
 
+fn attach_script_migrations(analysis: &mut OrmAnalysis, path: &str, content: &str, lang: Lang) {
+    let Some(tree) = parse_for_lang(lang, content) else {
+        return;
+    };
+    let src = content.as_bytes();
+    let mut pending = vec![tree.root_node()];
+    while let Some(node) = pending.pop() {
+        if node.kind() == "call_expression" {
+            if let Some(arguments) = node.child_by_field_name("arguments") {
+                let mut cursor = arguments.walk();
+                for argument in arguments.named_children(&mut cursor) {
+                    if !matches!(argument.kind(), "string" | "template_string") {
+                        continue;
+                    }
+                    let raw = text(argument, src);
+                    let Some(statement) = raw.get(1..raw.len().saturating_sub(1)) else {
+                        continue;
+                    };
+                    attach_sql_statement(
+                        analysis,
+                        path,
+                        argument.start_position().row as u32 + 1,
+                        statement,
+                    );
+                }
+            }
+        }
+        let mut cursor = node.walk();
+        pending.extend(node.named_children(&mut cursor));
+    }
+}
+
 pub(super) fn attach_sql_migrations(root: &Path, analysis: &mut OrmAnalysis) {
     for (file, content, _) in crate::server::sensors::util::scan_files(root, |path| {
         let normalized = crate::graph::graph_path(root, path);
@@ -379,6 +411,17 @@ pub(super) fn attach_sql_migrations(root: &Path, analysis: &mut OrmAnalysis) {
             })
     }) {
         let path = crate::graph::graph_path(root, &file);
+        match file.extension().and_then(|extension| extension.to_str()) {
+            Some("js") => {
+                attach_script_migrations(analysis, &path, &content, Lang::TsJs);
+                continue;
+            }
+            Some("ts") => {
+                attach_script_migrations(analysis, &path, &content, Lang::Ts);
+                continue;
+            }
+            _ => {}
+        }
         for (offset, line) in content.lines().enumerate() {
             let line_number = offset as u32 + 1;
             attach_sql_statement(analysis, &path, line_number, line);

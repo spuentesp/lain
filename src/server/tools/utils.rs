@@ -146,6 +146,12 @@ pub fn resolve_node(
     //     must round-trip: anything a tool hands back has to work as a
     //     handle for the next tool.
     if let Ok(gid) = GlobalId::parse(handle) {
+        if !graph.repo_scope_allows(gid.repo_id()) {
+            return Err(LainError::NotFound(format!(
+                "Node {handle} belongs to repository '{}', outside the requested repository scope",
+                gid.repo_id()
+            )));
+        }
         if let (Some(gname), Some(gpath)) = (gid.name(), gid.path()) {
             let by_path: Vec<GraphNode> = graph
                 .find_all_nodes_by_name(&gname)
@@ -165,7 +171,12 @@ pub fn resolve_node(
     }
     // 2. Try Graph by ID
     if let Ok(Some(n)) = graph.get_node(handle) {
-        return Ok(n);
+        if graph.in_symbol_repo_scope(&n) {
+            return Ok(n);
+        }
+        return Err(LainError::NotFound(format!(
+            "Node {handle} is outside the requested repository scope"
+        )));
     }
     // 3. Try Overlay by Name
     let overlay_names = overlay.find_nodes_by_name(handle);

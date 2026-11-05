@@ -73,7 +73,8 @@ fn analyze_definition(
         let Some(options) = pair.child_by_field_name("value") else {
             continue;
         };
-        let column = object_option(options, "column", src).unwrap_or_else(|| Some(attribute.clone()));
+        let column =
+            object_option(options, "column", src).unwrap_or_else(|| Some(attribute.clone()));
         if let Some(column) = column {
             add_column(
                 analysis,
@@ -89,6 +90,39 @@ fn analyze_definition(
                 .push(format!("{path}: dynamic column on {model}"));
         }
     }
+}
+
+fn is_model_receiver(tree: Node, receiver: Node, src: &[u8], patterns: &Patterns) -> bool {
+    if receiver.kind() != "identifier" {
+        return false;
+    }
+    let model = text(receiver, src);
+    let mut pending = vec![tree];
+    while let Some(node) = pending.pop() {
+        if node.kind() == "class_declaration"
+            && node
+                .child_by_field_name("name")
+                .is_some_and(|name| text(name, src) == model)
+        {
+            let mut cursor = node.walk();
+            let Some(heritage) = node
+                .named_children(&mut cursor)
+                .find(|child| child.kind() == "class_heritage")
+            else {
+                return false;
+            };
+            let mut heritage_cursor = heritage.walk();
+            let Some(base) = heritage.named_children(&mut heritage_cursor).next() else {
+                return false;
+            };
+            let base = text(base, src);
+            let base = base.rsplit('.').next().unwrap_or(&base);
+            return patterns.django_orm_shapes().has_model_base(base);
+        }
+        let mut cursor = node.walk();
+        pending.extend(node.named_children(&mut cursor));
+    }
+    false
 }
 
 pub(super) fn analyze_sequelize(
@@ -166,13 +200,7 @@ pub(super) fn analyze_sequelize(
         let Some(receiver) = callee.node.child_by_field_name("object") else {
             continue;
         };
-        if receiver.kind() != "identifier"
-            || !receiver
-                .utf8_text(src)
-                .ok()
-                .and_then(|name| name.chars().next())
-                .is_some_and(|first| first.is_ascii_uppercase())
-        {
+        if !is_model_receiver(tree.root_node(), receiver, src, patterns) {
             analysis.unresolved.push(format!(
                 "{path}: non-model init receiver {}",
                 text(receiver, src)

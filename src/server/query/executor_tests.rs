@@ -11,6 +11,68 @@ use std::sync::Arc;
 
 type EmbeddingCache = Arc<Mutex<lru::LruCache<String, Vec<f32>>>>;
 
+#[test]
+fn pagination_and_default_caps_preserve_explicit_sort() {
+    let tmp = tempfile::tempdir().unwrap();
+    let graph = GraphDatabase::new(&tmp.path().join("graph.bin")).unwrap();
+    for (index, (name, kind, label)) in [
+        ("z", NodeType::Function, Some("test")),
+        ("a", NodeType::Class, None),
+        ("m", NodeType::Function, Some("deprecated")),
+        ("a", NodeType::Function, Some("test")),
+        ("b", NodeType::Class, None),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut node = GraphNode::new(kind, name.into(), format!("{index}.rs"));
+        node.label = label.map(str::to_string);
+        graph.upsert_node(node).unwrap();
+    }
+    let (embedder, cache) = make_test_executor_params();
+    for by in [SortField::Name, SortField::Type, SortField::Label] {
+        for direction in [SortDirection::Asc, SortDirection::Desc] {
+            let mut spec = QuerySpec::new(vec![
+                GraphOp::Find(FindOp::new()),
+                GraphOp::Sort(SortOp { by, direction }),
+            ]);
+            let ids = |result: QueryResult| {
+                result
+                    .nodes
+                    .into_iter()
+                    .map(|node| node.id)
+                    .collect::<Vec<_>>()
+            };
+            let expected =
+                ids(
+                    Executor::with_default_limit(&graph, &embedder, &cache, tmp.path(), 0)
+                        .execute(&spec)
+                        .unwrap(),
+                );
+            let capped =
+                ids(
+                    Executor::with_default_limit(&graph, &embedder, &cache, tmp.path(), 2)
+                        .execute(&spec)
+                        .unwrap(),
+                );
+            assert_eq!(capped, expected[..2], "{by:?} {direction:?}");
+            spec.limit = Some(2);
+            let mut actual = Vec::new();
+            loop {
+                let page = Executor::new(&graph, &embedder, &cache, tmp.path())
+                    .execute(&spec)
+                    .unwrap();
+                spec.cursor = page.meta.as_ref().and_then(|meta| meta.next_cursor.clone());
+                actual.extend(ids(page));
+                if spec.cursor.is_none() {
+                    break;
+                }
+            }
+            assert_eq!(actual, expected, "{by:?} {direction:?}");
+        }
+    }
+}
+
 fn make_test_graph() -> GraphDatabase {
     let tmp = std::env::temp_dir().join("test_executor_graph");
     let _ = std::fs::remove_dir_all(&tmp);

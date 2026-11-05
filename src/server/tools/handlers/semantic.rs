@@ -488,12 +488,19 @@ pub async fn assess_change_report_scoped(
         .filter(|node| node.is_heuristic)
         .collect();
     let untested_nodes: Vec<Value> = if include_tests {
+        let tests: Vec<_> = graph
+            .get_all_nodes()
+            .into_iter()
+            .filter(|node| node.label.as_deref() == Some("test"))
+            .collect();
+        let covered = super::testing::reachable_via_calls(graph, &tests);
         blast
             .nodes
             .iter()
             .filter(|node| !node.is_heuristic)
             .filter_map(|node| graph.get_node(&node.id).ok().flatten())
             .filter(|node| node.label.as_deref() != Some("test"))
+            .filter(|node| !covered.contains(&node.id))
             .map(|node| json!(node))
             .collect()
     } else {
@@ -1081,6 +1088,67 @@ fn lexical_search_detailed(
 mod m6_tests {
     use super::*;
     use crate::schema::{EdgeType, GraphEdge, GraphNode};
+
+    #[tokio::test]
+    async fn assess_change_excludes_test_reachable_dependents() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("lib.rs"), "fn target() {}\n").unwrap();
+        let graph = GraphDatabase::new(&tmp.path().join("graph.bin")).unwrap();
+        let mut nodes = ["target", "covered", "uncovered", "test_covered", "indirect"]
+            .map(|name| GraphNode::new(NodeType::Function, name.into(), "lib.rs".into()));
+        nodes[3].label = Some("test".into());
+        graph.insert_nodes_batch(&nodes).unwrap();
+        for (from, to, kind) in [
+            (1, 0, EdgeType::Calls),
+            (2, 0, EdgeType::Calls),
+            (3, 4, EdgeType::Calls),
+            (4, 1, EdgeType::Calls),
+            (1, 4, EdgeType::Calls), // A cycle must terminate.
+            (3, 2, EdgeType::Uses),  // Non-call edges do not establish coverage.
+        ] {
+            graph
+                .insert_edge(&GraphEdge::new(
+                    kind,
+                    nodes[from].id.clone(),
+                    nodes[to].id.clone(),
+                ))
+                .unwrap();
+        }
+        for include_tests in [true, false] {
+            let args = json!({"symbol":"target", "include_tests":include_tests});
+            let report = assess_change_report_scoped(
+                &graph,
+                &VolatileOverlay::new(),
+                tmp.path(),
+                args.as_object().unwrap(),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+            let untested: Vec<_> = report.structured["untested_dependents"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|node| node["name"].as_str().unwrap())
+                .collect();
+            assert_eq!(
+                untested,
+                if include_tests {
+                    vec!["uncovered"]
+                } else {
+                    vec![]
+                }
+            );
+            if include_tests {
+                assert!(
+                    report.text.contains("1 test(s) reach it"),
+                    "{}",
+                    report.text
+                );
+            }
+        }
+    }
 
     #[test]
     fn tests_reaching_walks_callers_to_tests() {

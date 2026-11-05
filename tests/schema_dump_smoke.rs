@@ -167,6 +167,122 @@ fn lain_schema_dump_writes_tools_list_shape() {
     }
 }
 
+#[test]
+fn query_graph_output_schema_declares_the_wire_contract() {
+    let schema: serde_json::Value = serde_json::from_str(include_str!(
+        "../src/server/tools/schemas/query_graph.out.json"
+    ))
+    .expect("parse query_graph output schema");
+
+    let property_sets = [
+        (
+            "/definitions/graph_node",
+            &[
+                "id",
+                "type",
+                "name",
+                "label",
+                "path",
+                "line_start",
+                "line_end",
+                "commit",
+                "repo_id",
+            ][..],
+        ),
+        (
+            "/definitions/graph_edge",
+            &[
+                "id",
+                "type",
+                "from",
+                "to",
+                "provenance",
+                "confidence",
+                "site",
+                "detail",
+            ][..],
+        ),
+        ("/properties/paths/items", &["nodes", "edges"][..]),
+        ("/properties/groups/items", &["key", "nodes", "count"][..]),
+        (
+            "/properties/meta",
+            &[
+                "exec_us",
+                "nodes_visited",
+                "truncated",
+                "matched_before_limit",
+                "next_cursor",
+            ][..],
+        ),
+        ("/definitions/source_site", &["path", "line"][..]),
+        (
+            "/definitions/edge_detail",
+            &["route_match", "stripped_prefix"][..],
+        ),
+    ];
+    for (pointer, expected) in property_sets {
+        let object = schema
+            .pointer(pointer)
+            .unwrap_or_else(|| panic!("missing schema object {pointer}"));
+        let properties = object
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .unwrap_or_else(|| panic!("{pointer} must declare properties"));
+        for field in expected {
+            assert!(
+                properties.contains_key(*field),
+                "{pointer} is missing property {field}"
+            );
+        }
+    }
+
+    for (pointer, required) in [
+        ("/definitions/graph_node", &["id", "type", "name"][..]),
+        ("/definitions/graph_edge", &["id", "type", "from", "to"][..]),
+        ("/properties/paths/items", &["nodes", "edges"][..]),
+        ("/properties/groups/items", &["key", "nodes", "count"][..]),
+        ("/properties/meta", &["exec_us", "nodes_visited"][..]),
+    ] {
+        let required_fields = schema
+            .pointer(pointer)
+            .and_then(|object| object.get("required"))
+            .and_then(serde_json::Value::as_array)
+            .unwrap_or_else(|| panic!("{pointer} must declare required fields"));
+        for field in required {
+            assert!(
+                required_fields.iter().any(|value| value == field),
+                "{pointer} must require {field}"
+            );
+        }
+    }
+
+    let provenance_variants = schema
+        .pointer("/definitions/edge_provenance/oneOf")
+        .and_then(serde_json::Value::as_array)
+        .expect("edge provenance variants");
+    for (variant, evidence_fields) in [
+        ("Static", &["source"][..]),
+        ("Heuristic", &["detector", "confidence"][..]),
+        ("Runtime", &["trace_id", "last_seen_unix"][..]),
+        ("Confirmed", &["source"][..]),
+    ] {
+        let evidence = provenance_variants
+            .iter()
+            .find_map(|candidate| candidate.get("properties")?.get(variant))
+            .unwrap_or_else(|| panic!("missing {variant} provenance"));
+        let properties = evidence
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .expect("provenance evidence properties");
+        for field in evidence_fields {
+            assert!(
+                properties.contains_key(*field),
+                "{variant} provenance is missing {field}"
+            );
+        }
+    }
+}
+
 /// Boot a real `lain server --transport http`, send a JSON-RPC
 /// `tools/list`, and byte-compare the returned `result.tools` to the
 /// on-disk `docs/tool-schema.json`. This is the property D-L2

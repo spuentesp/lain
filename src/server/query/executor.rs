@@ -158,11 +158,13 @@ impl<'a> Executor<'a> {
         // reported nodes — filters, `limit`, and the default cap included.
         let mut current_paths: HashMap<String, GraphPath> = HashMap::new();
         let mut groups: Option<Vec<QueryGroup>> = None;
+        let mut explicitly_sorted = false;
 
         for op in &spec.ops {
             match op {
                 crate::query::spec::GraphOp::Find(find) => {
                     current_nodes = self.execute_find(find)?;
+                    explicitly_sorted = false;
                     // A find replaces the working set, so no reported node
                     // came from a walk and there is nothing left to report.
                     current_paths.clear();
@@ -172,6 +174,7 @@ impl<'a> Executor<'a> {
                         self.execute_connect(&current_nodes, &current_paths, connect)?;
                     current_nodes = nodes;
                     current_paths = paths;
+                    explicitly_sorted = false;
                 }
                 crate::query::spec::GraphOp::Filter(filter) => {
                     self.apply_filter(&mut current_nodes, filter);
@@ -184,6 +187,7 @@ impl<'a> Executor<'a> {
                 }
                 crate::query::spec::GraphOp::Sort(sort) => {
                     self.apply_sort(&mut current_nodes, sort);
+                    explicitly_sorted = true;
                 }
                 crate::query::spec::GraphOp::Limit(limit) => {
                     self.apply_limit(&mut current_nodes, limit);
@@ -198,8 +202,13 @@ impl<'a> Executor<'a> {
         let matched = current_nodes.len();
         let mut next_cursor = None;
         let mut truncated = false;
-        if spec.limit.is_some() || spec.cursor.is_some() {
+        let paginated = spec.limit.is_some() || spec.cursor.is_some();
+        let default_capped =
+            !asked_for_a_limit && self.default_limit > 0 && matched > self.default_limit;
+        if !explicitly_sorted && (paginated || default_capped) {
             current_nodes.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
+        }
+        if paginated {
             let start = match &spec.cursor {
                 Some(raw) => {
                     let after = decode_cursor(spec, raw)?;
@@ -228,8 +237,7 @@ impl<'a> Executor<'a> {
                 truncated = true;
             }
             current_nodes = current_nodes[start..end].to_vec();
-        } else if !asked_for_a_limit && self.default_limit > 0 && matched > self.default_limit {
-            current_nodes.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
+        } else if default_capped {
             current_nodes.truncate(self.default_limit);
             truncated = true;
         }
@@ -696,7 +704,11 @@ impl<'a> Executor<'a> {
                 |a: &GraphNodeRef, b: &GraphNodeRef| b.label.cmp(&a.label)
             }
         };
-        nodes.sort_by(cmp);
+        nodes.sort_by(|a, b| {
+            cmp(a, b)
+                .then_with(|| a.name.cmp(&b.name))
+                .then_with(|| a.id.cmp(&b.id))
+        });
     }
 
     fn apply_limit(&self, nodes: &mut Vec<GraphNodeRef>, limit: &LimitOp) {

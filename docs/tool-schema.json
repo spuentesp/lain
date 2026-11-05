@@ -951,6 +951,220 @@
     "name": "query_graph",
     "outputSchema": {
       "$schema": "http://json-schema.org/draft-07/schema#",
+      "definitions": {
+        "edge_detail": {
+          "properties": {
+            "route_match": {
+              "enum": [
+                "Exact",
+                "Pattern",
+                "PrefixStripped",
+                null
+              ],
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "stripped_prefix": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "route_match",
+            "stripped_prefix"
+          ],
+          "type": "object"
+        },
+        "edge_provenance": {
+          "oneOf": [
+            {
+              "properties": {
+                "Static": {
+                  "properties": {
+                    "source": {
+                      "enum": [
+                        "TreeSitter",
+                        "Lsp",
+                        "Regex"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "source"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "Static"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "Heuristic": {
+                  "properties": {
+                    "confidence": {
+                      "maximum": 1,
+                      "minimum": 0,
+                      "type": "number"
+                    },
+                    "detector": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "detector",
+                    "confidence"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "Heuristic"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "Runtime": {
+                  "properties": {
+                    "last_seen_unix": {
+                      "type": "integer"
+                    },
+                    "trace_id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "trace_id",
+                    "last_seen_unix"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "Runtime"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "Confirmed": {
+                  "properties": {
+                    "source": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "source"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "Confirmed"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "graph_edge": {
+          "properties": {
+            "confidence": {
+              "type": "number"
+            },
+            "detail": {
+              "$ref": "#/definitions/edge_detail"
+            },
+            "from": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "provenance": {
+              "$ref": "#/definitions/edge_provenance"
+            },
+            "site": {
+              "$ref": "#/definitions/source_site"
+            },
+            "to": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "type",
+            "from",
+            "to"
+          ],
+          "type": "object"
+        },
+        "graph_node": {
+          "properties": {
+            "commit": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "label": {
+              "type": "string"
+            },
+            "line_end": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "line_start": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "name": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            },
+            "repo_id": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "type",
+            "name"
+          ],
+          "type": "object"
+        },
+        "source_site": {
+          "properties": {
+            "line": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "path",
+            "line"
+          ],
+          "type": "object"
+        }
+      },
       "properties": {
         "count": {
           "minimum": 0,
@@ -958,12 +1172,32 @@
         },
         "edges": {
           "items": {
-            "type": "object"
+            "$ref": "#/definitions/graph_edge"
           },
           "type": "array"
         },
         "groups": {
           "items": {
+            "properties": {
+              "count": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "key": {
+                "type": "string"
+              },
+              "nodes": {
+                "items": {
+                  "$ref": "#/definitions/graph_node"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "key",
+              "nodes",
+              "count"
+            ],
             "type": "object"
           },
           "type": "array"
@@ -972,11 +1206,35 @@
           "type": "boolean"
         },
         "meta": {
+          "properties": {
+            "exec_us": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "matched_before_limit": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "next_cursor": {
+              "type": "string"
+            },
+            "nodes_visited": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "truncated": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "exec_us",
+            "nodes_visited"
+          ],
           "type": "object"
         },
         "nodes": {
           "items": {
-            "type": "object"
+            "$ref": "#/definitions/graph_node"
           },
           "type": "array"
         },
@@ -996,6 +1254,24 @@
         },
         "paths": {
           "items": {
+            "properties": {
+              "edges": {
+                "items": {
+                  "$ref": "#/definitions/graph_edge"
+                },
+                "type": "array"
+              },
+              "nodes": {
+                "items": {
+                  "$ref": "#/definitions/graph_node"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "nodes",
+              "edges"
+            ],
             "type": "object"
           },
           "type": "array"

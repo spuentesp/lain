@@ -159,8 +159,7 @@ fn parse_field(statement: Node, src: &[u8], suffixes: &[String]) -> Option<Djang
         return None;
     }
     let attribute = text(left, src);
-    let column =
-        dynamic_column(right, src).unwrap_or_else(|| Some(attribute.clone()));
+    let column = dynamic_column(right, src).unwrap_or_else(|| Some(attribute.clone()));
     Some(DjangoField {
         attribute,
         column,
