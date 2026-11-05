@@ -5,6 +5,7 @@ All notable changes to LAIN are documented here. Versions follow
 
 ## Unreleased
 
+- Index Rust gRPC declarations and lexical context once per file, and reuse compiled detection queries across workspace scans, avoiding repeated whole-tree scope searches on large Rust files while preserving identity evidence and ambiguity checks.
 - Bind raw graph and code reads to named snapshots, with errors instead of live fallback when a snapshot or repo is unavailable.
 - Add schema-valid structured output to raw analysis tools and `search_code`, preserve their text output, and expose `get_contract` provider handlers as `{repo, file, symbol}`.
 - Include source locations and provenance in raw graph results, compose chained traversal paths, and add deterministic cursor pagination.
