@@ -57,12 +57,19 @@ struct Hermetic {
 
 impl Hermetic {
     fn new() -> Self {
-        Self {
-            run: tempfile::Builder::new()
-                .prefix("ls")
-                .tempdir_in("/tmp")
-                .expect("tempdir"),
-        }
+        // The platform's own temp dir, NOT a hard-coded `/tmp`: that
+        // path does not exist on Windows, where this fixture still
+        // has to run. On Unix the daemon's socket lives at
+        // `<run>/lain/lain-mcp-<16hex>.sock` and `sun_path` is ~104
+        // bytes, so the run dir has to stay short — the platform temp
+        // dir (`/tmp` on Unix) is short enough, and if it ever is
+        // not, the client falls back to a private server and the
+        // verification still succeeds.
+        let run = tempfile::Builder::new()
+            .prefix("ls")
+            .tempdir_in(std::env::temp_dir())
+            .expect("tempdir");
+        Self { run }
     }
 
     /// A `lain setup` command pinned to the isolated runtime dir.

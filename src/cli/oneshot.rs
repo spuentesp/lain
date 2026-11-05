@@ -35,7 +35,7 @@ use crate::cli::mcp_stdio::{initialize_request, StdioSession};
 use crate::cli::workspace::find_git_workspace_root;
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::Duration;
@@ -100,6 +100,38 @@ fn connect_shared(
     }
 }
 
+/// How a detached daemon is obtained: the workspace set it must serve,
+/// the socket it must own, and how long to wait for it. Production
+/// always uses [`crate::cli::shared_daemon::start_detached_daemon`];
+/// the unit test injects a fake that hands back a connection to a
+/// daemon that already won the bind race.
+#[cfg(unix)]
+type DetachedStarter = fn(&[PathBuf], &Path, Duration) -> Option<std::os::unix::net::UnixStream>;
+
+/// [`start_shared_daemon`] with the starter injected, so the start-race
+/// branch can be exercised without spawning a daemon.
+#[cfg(unix)]
+fn start_shared_daemon_with(
+    starter: DetachedStarter,
+    workspace: &Path,
+    socket_path: &Path,
+    wait: Duration,
+) -> Result<Option<crate::cli::socket_session::SocketSession>> {
+    // Generalized over workspace sets in `cli::shared_daemon` (the
+    // zero-config multi-agent path spawns the same daemon shape).
+    let Some(stream) = starter(
+        std::slice::from_ref(&workspace.to_path_buf()),
+        socket_path,
+        wait,
+    ) else {
+        return Ok(None);
+    };
+    if !shared_daemon_is_usable(socket_path)? {
+        return Ok(None);
+    }
+    Ok(crate::cli::socket_session::from_stream(stream).ok())
+}
+
 /// Start a detached daemon-mode `lain mcp` for `workspace` and wait until its
 /// socket accepts connections. The daemon outlives this process (own process
 /// group, no stdio) and exits by itself after an idle window, so the NEXT
@@ -113,25 +145,24 @@ fn connect_shared(
 #[cfg(unix)]
 fn start_shared_daemon(
     workspace: &Path,
-    socket_path: &std::path::Path,
+    socket_path: &Path,
     wait: Duration,
 ) -> Result<Option<crate::cli::socket_session::SocketSession>> {
-    // Generalized over workspace sets in `cli::shared_daemon` (the
-    // zero-config multi-agent path spawns the same daemon shape).
-    let Some(stream) = crate::cli::shared_daemon::start_detached_daemon(
-        std::slice::from_ref(&workspace.to_path_buf()),
+    start_shared_daemon_with(
+        |workspaces, socket_path, wait| {
+            crate::cli::shared_daemon::start_detached_daemon(
+                workspaces,
+                socket_path,
+                wait,
+                None,
+                None,
+                false,
+            )
+        },
+        workspace,
         socket_path,
         wait,
-        None,
-        None,
-        false,
-    ) else {
-        return Ok(None);
-    };
-    if !shared_daemon_is_usable(socket_path)? {
-        return Ok(None);
-    }
-    Ok(crate::cli::socket_session::from_stream(stream).ok())
+    )
 }
 
 /// Shut the session down and build an error carrying whatever it
@@ -671,5 +702,168 @@ mod positional_tests {
         let v = positional_args("get_blast_radius", &["helper".into()]).unwrap();
         assert_eq!(v, json!({"symbol": "helper"}));
         assert!(positional_args("find_symbol", &["a".into(), "b".into()]).is_err());
+    }
+}
+
+/// The start-race branch: the detached start can hand back a
+/// connection to a daemon that ALREADY owns the socket — an older
+/// build. It must be refused exactly like the existing-socket path.
+#[cfg(all(test, unix))]
+mod start_race_tests {
+    use super::*;
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    /// A fake daemon that owns `socket`, answers `lain/daemon_info`
+    /// with a STALE build identity, and records every method it was
+    /// asked for. One thread per connection: the identity probe and
+    /// the (silent) start-race connection arrive independently.
+    struct StaleDaemon {
+        stop: Arc<AtomicBool>,
+        methods: Arc<Mutex<Vec<String>>>,
+        handle: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl StaleDaemon {
+        fn start(socket: &Path) -> Self {
+            let listener = UnixListener::bind(socket).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let stop = Arc::new(AtomicBool::new(false));
+            let methods = Arc::new(Mutex::new(Vec::new()));
+            let handle = {
+                let stop = Arc::clone(&stop);
+                let methods = Arc::clone(&methods);
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::SeqCst) {
+                        match listener.accept() {
+                            Ok((stream, _)) => {
+                                let methods = Arc::clone(&methods);
+                                std::thread::spawn(move || {
+                                    let mut writer = stream.try_clone().unwrap();
+                                    let mut reader = BufReader::new(stream);
+                                    loop {
+                                        let mut line = String::new();
+                                        match reader.read_line(&mut line) {
+                                            Ok(0) | Err(_) => break,
+                                            Ok(_) => {}
+                                        }
+                                        let Ok(request) =
+                                            serde_json::from_str::<Value>(line.trim())
+                                        else {
+                                            continue;
+                                        };
+                                        let method = request
+                                            .get("method")
+                                            .and_then(|m| m.as_str())
+                                            .unwrap_or("")
+                                            .to_string();
+                                        methods.lock().unwrap().push(method.clone());
+                                        let id = request.get("id").cloned().unwrap_or(Value::Null);
+                                        let result = match method.as_str() {
+                                            "lain/daemon_info" => json!({
+                                                "pid": 999,
+                                                "version": crate::server::build_info::VERSION,
+                                                "build_commit": "stale",
+                                                "index_build_id": "stale",
+                                                "workspaces": [],
+                                                "open_connections": 0,
+                                                "shared": true,
+                                            }),
+                                            _ => json!({}),
+                                        };
+                                        let response = json!({
+                                            "jsonrpc": "2.0", "id": id, "result": result
+                                        });
+                                        if writeln!(writer, "{response}").is_err() {
+                                            break;
+                                        }
+                                        let _ = writer.flush();
+                                    }
+                                });
+                            }
+                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                std::thread::sleep(Duration::from_millis(10));
+                            }
+                            Err(e) => panic!("fake daemon accept failed: {e}"),
+                        }
+                    }
+                })
+            };
+            StaleDaemon {
+                stop,
+                methods,
+                handle: Some(handle),
+            }
+        }
+
+        /// Every method the daemon was asked for, in order.
+        fn methods(&self) -> Vec<String> {
+            self.methods.lock().unwrap().clone()
+        }
+    }
+
+    impl Drop for StaleDaemon {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::SeqCst);
+            if let Some(handle) = self.handle.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+
+    /// A stale daemon that won the bind race must be refused:
+    ///
+    /// * **identity-only communication** — the daemon is probed for its
+    ///   identity and never called;
+    /// * **refusal with expected/actual values** — the error names
+    ///   both identities and the socket;
+    /// * **no private fallback** — the result is an ERROR, not
+    ///   `Ok(None)` (which is what would make the caller serve the
+    ///   call from a private indexer).
+    ///
+    /// The starter is injected, so no daemon is spawned and the test
+    /// does not depend on timing.
+    #[test]
+    fn a_stale_start_race_winner_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("lain-mcp-race.sock");
+        let daemon = StaleDaemon::start(&socket);
+
+        // The socket is already owned, so the "detached start" hands
+        // back a connection to the stale winner instead of spawning
+        // a daemon of its own.
+        let starter: DetachedStarter =
+            |_workspaces, socket_path, _wait| UnixStream::connect(socket_path).ok();
+
+        let error =
+            match start_shared_daemon_with(starter, dir.path(), &socket, Duration::from_secs(1)) {
+                Ok(_) => panic!("a stale race winner must be refused, not used"),
+                Err(e) => e,
+            };
+
+        let message = error.to_string();
+        assert!(
+            message.contains("incompatible shared daemon"),
+            "the refusal must name the incompatibility: {message}"
+        );
+        assert!(
+            message.contains("stale"),
+            "the refusal must name the ACTUAL identity: {message}"
+        );
+        assert!(
+            message.contains(crate::server::build_info::VERSION),
+            "the refusal must name the EXPECTED identity: {message}"
+        );
+        assert!(
+            message.contains(&socket.display().to_string()),
+            "the refusal must name the socket: {message}"
+        );
+        assert_eq!(
+            daemon.methods(),
+            vec!["lain/daemon_info".to_string()],
+            "the stale daemon must only be probed for its identity, never called"
+        );
     }
 }
