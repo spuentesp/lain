@@ -60,6 +60,30 @@ pub fn query_graph(
     arguments: Option<&Map<String, Value>>,
     default_limit: usize,
 ) -> Result<String, LainError> {
+    query_graph_scoped(
+        workspace,
+        graph,
+        embedder,
+        embedding_cache,
+        presence,
+        occupancy,
+        arguments,
+        default_limit,
+        false,
+    )
+}
+
+pub fn query_graph_scoped(
+    workspace: &std::path::Path,
+    graph: &GraphDatabase,
+    embedder: &NlpEmbedder,
+    embedding_cache: &Arc<Mutex<lru::LruCache<String, Vec<f32>>>>,
+    presence: &PresenceRegistry,
+    occupancy: &CoordinationProxy,
+    arguments: Option<&Map<String, Value>>,
+    default_limit: usize,
+    historical: bool,
+) -> Result<String, LainError> {
     let mut executor =
         Executor::with_default_limit(graph, embedder, embedding_cache, workspace, default_limit);
 
@@ -76,6 +100,16 @@ pub fn query_graph(
     } else {
         QuerySpec::default()
     };
+    if historical
+        && spec
+            .ops
+            .iter()
+            .any(|op| matches!(op, crate::query::spec::GraphOp::SemanticFilter(_)))
+    {
+        return Err(LainError::InvalidArgument(
+            "semantic_filter is not supported for named snapshots".to_string(),
+        ));
+    }
 
     let result = executor
         .execute(&spec)

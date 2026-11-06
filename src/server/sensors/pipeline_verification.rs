@@ -28,6 +28,8 @@ const FILES: &[&str] = &[
     ".env",
     "docker-compose.yml",
     "events.js",
+    "schema.prisma",
+    "Orders.tsx",
 ];
 
 fn fragment() -> impl Strategy<Value = String> {
@@ -41,6 +43,8 @@ fn fragment() -> impl Strategy<Value = String> {
         Just("message A { string s = 1; }\n".to_string()),
         Just("openapi: 3.0.0\npaths:\n  /a:\n    get:\n".to_string()),
         Just("SELECT * FROM users WHERE id = ?;\n".to_string()),
+        Just("model Product {\n  id Int @id\n  name String @map(\"display_name\")\n  @@map(\"products\")\n}\n".to_string()),
+        Just("const rendered = data.customer.name;\nreturn <span>{rendered}</span>;\n".to_string()),
         Just("process.env.SECRET_KEY\n".to_string()),
         Just("os.environ[\"X\"]\n".to_string()),
         Just("* @team\n/src/ @core\n".to_string()),
@@ -95,15 +99,18 @@ proptest! {
 
         let g1 = GraphDatabase::empty_writable();
         let _ = run_all(&g1, ws.path(), &ns, "svc");
+        g1.assert_well_formed();
         let first = node_ids(&g1);
 
         // Deterministic across a fresh graph.
         let g2 = GraphDatabase::empty_writable();
         let _ = run_all(&g2, ws.path(), &ns, "svc");
+        g2.assert_well_formed();
         prop_assert_eq!(node_ids(&g2), first.clone(), "same workspace, different nodes");
 
         // Idempotent on the same graph.
         let _ = run_all(&g1, ws.path(), &ns, "svc");
+        g1.assert_well_formed();
         prop_assert_eq!(node_ids(&g1), first, "a second pass changed the node set");
     }
 }

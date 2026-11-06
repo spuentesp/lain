@@ -53,6 +53,7 @@ pub enum NodeType {
     // stays at 3 — so existing graphs continue to load (per spec §2
     // "v3 is unreleased: new node/edge types fold into v3").
     Table,
+    Column,
 }
 
 impl NodeType {
@@ -89,6 +90,7 @@ impl NodeType {
             NodeType::FieldRef,
             NodeType::Synthetic,
             NodeType::Table,
+            NodeType::Column,
         ]
     }
 
@@ -147,7 +149,8 @@ impl NodeType {
             | NodeType::FieldRef
             | NodeType::Topic
             | NodeType::Schema
-            | NodeType::Table => true,
+            | NodeType::Table
+            | NodeType::Column => true,
             // Known-but-unindexed: `Resource` has no producer in this
             // codebase (there is no IaC resource sensor), so
             // `describe_schema` reports it as unavailable rather than
@@ -211,6 +214,10 @@ impl NodeType {
                  `Table` contract payload; the joiner fills `service` from \
                  `repos.yaml`. Reach handler → function → table through \
                  `ReadsTable` / `WritesTable` edges."
+            }
+            NodeType::Column => {
+                "A database column declared by an ORM model or migration. Linked \
+                 model → table → column through MapsTo and HasColumn."
             }
         }
     }
@@ -315,6 +322,14 @@ pub enum EdgeType {
     // Append-only: bincode encodes `EdgeType` by declaration index, so new
     // variants must be added at the end to preserve existing discriminants.
     CallsGraphql, // GraphQL root-field provider (SDL) -> resolver function
+    MapsTo,
+    HasColumn,
+    ReadsColumn,
+    WritesColumn,
+    Renders,
+    Stores,
+    Forwards,
+    Discards,
 }
 
 impl EdgeType {
@@ -357,6 +372,14 @@ impl EdgeType {
             EdgeType::ReadsTable,
             EdgeType::WritesTable,
             EdgeType::CallsGraphql,
+            EdgeType::MapsTo,
+            EdgeType::HasColumn,
+            EdgeType::ReadsColumn,
+            EdgeType::WritesColumn,
+            EdgeType::Renders,
+            EdgeType::Stores,
+            EdgeType::Forwards,
+            EdgeType::Discards,
         ]
     }
 
@@ -411,14 +434,22 @@ impl EdgeType {
             | EdgeType::WritesTable
             | EdgeType::Produces
             | EdgeType::Consumes
-            | EdgeType::PayloadSchema => true,
+            | EdgeType::PayloadSchema
+            | EdgeType::MapsTo
+            | EdgeType::HasColumn
+            | EdgeType::Renders
+            | EdgeType::Stores
+            | EdgeType::Forwards
+            | EdgeType::Discards => true,
             // Known-but-unindexed: no producer in this codebase.
             // `Imports` reads like a core relationship and has never
             // been emitted by any indexer; `DeployedTo` awaits an
             // IaC resource sensor. Advertising either would make
             // `describe_schema` lie to clients.
             EdgeType::Imports
-            | EdgeType::DeployedTo => false,
+            | EdgeType::DeployedTo
+            | EdgeType::ReadsColumn
+            | EdgeType::WritesColumn => false,
         }
     }
 
@@ -505,6 +536,14 @@ impl EdgeType {
                  `sql_sensor` for INSERT / UPDATE / DELETE / MERGE. \
                  Spec §7."
             }
+            EdgeType::MapsTo => "An ORM model maps to a database table",
+            EdgeType::HasColumn => "A database table contains a column",
+            EdgeType::ReadsColumn => "Code reads a database column",
+            EdgeType::WritesColumn => "Code writes a database column",
+            EdgeType::Renders => "A frontend component renders a selected field",
+            EdgeType::Stores => "A frontend component stores a selected field",
+            EdgeType::Forwards => "A frontend component forwards a selected field",
+            EdgeType::Discards => "A frontend component selects but does not use a field",
         }
     }
 
@@ -553,7 +592,11 @@ impl EdgeType {
             }
             EdgeType::PayloadSchema => &[NodeType::Topic],
             EdgeType::HasField => &[NodeType::Schema],
-            EdgeType::ReadsField => &[NodeType::Function, NodeType::Method],
+            EdgeType::ReadsField
+            | EdgeType::Renders
+            | EdgeType::Stores
+            | EdgeType::Forwards
+            | EdgeType::Discards => &[NodeType::Function, NodeType::Method],
             // `ReadsFrom` runs from the `FieldRef` back to the
             // `HttpClientCall` whose response the field came from.
             EdgeType::ReadsFrom => &[NodeType::FieldRef],
@@ -572,6 +615,14 @@ impl EdgeType {
             // module. Module-level SQL is rare but possible (an init
             // script).
             EdgeType::ReadsTable | EdgeType::WritesTable => &[
+                NodeType::Function,
+                NodeType::Method,
+                NodeType::File,
+                NodeType::Module,
+            ],
+            EdgeType::MapsTo => &[NodeType::Class],
+            EdgeType::HasColumn => &[NodeType::Table],
+            EdgeType::ReadsColumn | EdgeType::WritesColumn => &[
                 NodeType::Function,
                 NodeType::Method,
                 NodeType::File,
@@ -619,7 +670,11 @@ impl EdgeType {
             EdgeType::RequestSchema | EdgeType::ResponseSchema => &[NodeType::Schema],
             EdgeType::PayloadSchema => &[NodeType::Schema],
             EdgeType::HasField => &[NodeType::Field],
-            EdgeType::ReadsField => &[NodeType::FieldRef],
+            EdgeType::ReadsField
+            | EdgeType::Renders
+            | EdgeType::Stores
+            | EdgeType::Forwards
+            | EdgeType::Discards => &[NodeType::FieldRef],
             EdgeType::ReadsFrom => &[
                 NodeType::HttpClientCall,
                 NodeType::Function,
@@ -632,6 +687,10 @@ impl EdgeType {
             // Phase D (spec §7): the SQL edges always target a
             // `Table` node (the destination of a read or a write).
             EdgeType::ReadsTable | EdgeType::WritesTable => &[NodeType::Table],
+            EdgeType::MapsTo => &[NodeType::Table],
+            EdgeType::HasColumn | EdgeType::ReadsColumn | EdgeType::WritesColumn => {
+                &[NodeType::Column]
+            }
         }
     }
 }

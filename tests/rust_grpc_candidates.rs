@@ -77,6 +77,51 @@ fn typed_parameters_and_same_named_methods_keep_receivers_separate() {
     assert_eq!(calls[1].receiver, "b");
 }
 
+#[test]
+fn large_files_keep_repeated_names_scoped_and_preserve_evidence() {
+    let mut src = String::from("use api::orders_client::OrdersClient as Orders;\n");
+    let mut expected = Vec::new();
+    for index in 0..256 {
+        src.push_str(&format!(
+            "fn f{index}(client: Orders<Channel>) {{\n\
+             client.get(req);\n\
+             {{ let client = HttpClient::new(); client.get(req); }}\n\
+             client.list(req);\n\
+             }}\n\
+             fn local{index}() {{\n\
+             type C = Orders<Channel>;\n\
+             let client: C = todo!();\n\
+             client.get(req);\n\
+             }}\n"
+        ));
+        expected.extend([
+            (format!("f{index}"), "get"),
+            (format!("f{index}"), "list"),
+            (format!("local{index}"), "get"),
+        ]);
+    }
+    let calls = candidates(&src);
+    assert_eq!(calls.len(), expected.len());
+    for (call, (function, method)) in calls.iter().zip(expected) {
+        assert_eq!(call.enclosing_name.as_deref(), Some(function.as_str()));
+        assert_eq!(call.method, method);
+        assert_eq!(call.generated_type, "api::orders_client::OrdersClient");
+        assert_eq!(&src[call.site.start_byte..call.site.end_byte], method);
+        assert_eq!(
+            call.site.line,
+            src[..call.site.start_byte]
+                .bytes()
+                .filter(|&b| b == b'\n')
+                .count()
+                + 1
+        );
+        assert!(call
+            .evidence
+            .iter()
+            .any(|e| e.description.contains("explicit type")));
+    }
+}
+
 #[path = "use_cases/rust_grpc_candidates.rs"]
 mod discovery_use_case;
 

@@ -13,6 +13,12 @@ use parking_lot::Mutex;
 use std::collections::HashSet;
 use std::sync::Arc;
 
+pub struct SearchHit {
+    pub node: GraphNode,
+    pub score: f32,
+    pub score_kind: String,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn semantic_search(
     workspace: &std::path::Path,
@@ -25,6 +31,32 @@ pub fn semantic_search(
     query: &str,
     limit: usize,
 ) -> Result<String, LainError> {
+    semantic_search_detailed(
+        workspace,
+        graph,
+        overlay,
+        embedder,
+        cross_encoder,
+        embedding_cache,
+        tuning,
+        query,
+        limit,
+    )
+    .map(|(text, _)| text)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn semantic_search_detailed(
+    workspace: &std::path::Path,
+    graph: &GraphDatabase,
+    overlay: &VolatileOverlay,
+    embedder: &NlpEmbedder,
+    cross_encoder: &CrossEncoder,
+    embedding_cache: &Arc<Mutex<lru::LruCache<String, Vec<f32>>>>,
+    tuning: &TuningConfig,
+    query: &str,
+    limit: usize,
+) -> Result<(String, Vec<SearchHit>), LainError> {
     // 1. Gather all nodes using Shadow Masking (Priority Filter)
     let mut all_nodes = Vec::new();
     let mut masked_ids = HashSet::new();
@@ -68,10 +100,11 @@ pub fn semantic_search(
     }
 
     if all_nodes.is_empty() {
-        return Ok(
+        return Ok((
             "No nodes found for semantic search in Merged Brain. Run 'run_enrichment' first."
                 .to_string(),
-        );
+            Vec::new(),
+        ));
     }
 
     // 2. Compute query embedding once. `embed_query` applies the
@@ -241,7 +274,21 @@ pub fn semantic_search(
             .collect()
     };
 
-    Ok(format!(
+    let hits = results
+        .iter()
+        .map(|scored| {
+            let (score_kind, score) = match scored.kind {
+                ScoreKind::BiHybrid => ("sim", scored.hybrid),
+                ScoreKind::CrossLogit => ("rerank", scored.score),
+            };
+            SearchHit {
+                node: scored.node.clone(),
+                score,
+                score_kind: score_kind.to_string(),
+            }
+        })
+        .collect();
+    let text = format!(
         "Found {} semantic results in Merged Brain for '{}' (using Shadow Masking):\n{}",
         results.len(),
         query,
@@ -287,5 +334,6 @@ pub fn semantic_search(
             })
             .collect::<Vec<_>>()
             .join("\n")
-    ))
+    );
+    Ok((text, hits))
 }

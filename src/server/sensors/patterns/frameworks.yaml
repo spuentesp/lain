@@ -747,3 +747,12 @@ django_orm:
     - get_or_create
     - update_or_create
 
+orm_models:
+  django_field_suffixes: [Field]
+  sqlalchemy_column_calls: [Column]
+
+
+frontend_values:
+  storage_calls:
+    - localStorage.setItem
+    - sessionStorage.setItem

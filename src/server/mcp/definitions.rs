@@ -584,11 +584,15 @@ pub fn dump_tools_schema(inert: &[&str]) -> Vec<serde_json::Value> {
             .iter()
             .filter(|def| not_inert(def.name))
             .map(|def| {
-                serde_json::json!({
+                let mut tool = serde_json::json!({
                     "name": def.name,
                     "description": def.description,
                     "inputSchema": def.input_schema,
-                })
+                });
+                if let Some(output_schema) = def.output_schema.clone() {
+                    tool["outputSchema"] = output_schema;
+                }
+                tool
             })
             .collect();
     for def in crate::server::mcp::handler::special_tool_definitions() {

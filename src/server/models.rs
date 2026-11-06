@@ -226,6 +226,26 @@ pub fn installed_default_in(root: &Path) -> Option<(PathBuf, PathBuf, Pooling)> 
     Some((dir.join("model.onnx"), dir.join("tokenizer.json"), pooling))
 }
 
+#[cfg(not(test))]
+pub(crate) fn default_model_candidate() -> Option<(PathBuf, PathBuf, Pooling)> {
+    default_model_candidate_in(&install_root()?)
+}
+
+fn default_model_candidate_in(root: &Path) -> Option<(PathBuf, PathBuf, Pooling)> {
+    let catalog = Catalog::load().ok()?;
+    let spec = catalog.default_model()?;
+    let dir = model_dir_in(root, spec);
+    if !spec
+        .files
+        .iter()
+        .all(|file| dir.join(&file.local).is_file())
+    {
+        return None;
+    }
+    let pooling = Pooling::parse(&spec.pooling).unwrap_or(Pooling::Mean);
+    Some((dir.join("model.onnx"), dir.join("tokenizer.json"), pooling))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -314,6 +334,19 @@ files = []
             c.get("granite-embedding-small-english-r2").unwrap().repo,
             "example/other"
         );
+    }
+
+    #[test]
+    fn default_candidate_checks_file_presence_without_hashing() {
+        let d = tempfile::tempdir().unwrap();
+        let spec = builtin_spec();
+        let dir = model_dir_in(d.path(), &spec);
+        fs::create_dir_all(&dir).unwrap();
+        for file in &spec.files {
+            fs::write(dir.join(&file.local), b"not the pinned content").unwrap();
+        }
+        assert!(default_model_candidate_in(d.path()).is_some());
+        assert!(installed_default_in(d.path()).is_none());
     }
 
     #[test]

@@ -58,6 +58,7 @@ fn field_read_fact_roundtrips_through_bincode() {
         ]),
         exact: true,
         origin: FieldReadOrigin::GraphqlConsumer,
+        operation: None,
     });
     let bytes =
         bincode::serde::encode_to_vec(&original, bincode::config::legacy()).expect("encode");

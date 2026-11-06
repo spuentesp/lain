@@ -18,6 +18,7 @@ pub mod env_sensor;
 pub mod event_sensor;
 pub mod event_wrappers;
 pub mod field_access_sensor;
+pub mod frontend_value_sensor;
 pub mod graphql_consumer_sensor;
 pub mod graphql_provider_sensor;
 pub mod graphql_resolver_link_sensor;
@@ -30,6 +31,7 @@ pub mod http_sensor;
 pub mod openapi_line_index;
 pub mod openapi_schema;
 pub mod openapi_sensor;
+pub mod orm_model_sensor;
 pub mod patterns;
 pub mod payload_schema;
 pub mod proto_sensor;
@@ -70,6 +72,7 @@ pub struct SensorCounts {
     // `entry_points` because both are "consumers of contract
     // surfaces" that ride the same per-repo scan.
     pub sql_tables: usize,
+    pub frontend_values: usize,
 }
 
 impl SensorCounts {
@@ -85,6 +88,7 @@ impl SensorCounts {
             + self.field_reads
             + self.entry_points
             + self.sql_tables
+            + self.frontend_values
     }
 
     pub(crate) fn add(&mut self, field: SensorCountField, n: usize) {
@@ -100,6 +104,7 @@ impl SensorCounts {
             SensorCountField::FieldReads => self.field_reads += n,
             SensorCountField::EntryPoints => self.entry_points += n,
             SensorCountField::SqlTables => self.sql_tables += n,
+            SensorCountField::FrontendValues => self.frontend_values += n,
         }
     }
 
@@ -138,6 +143,9 @@ impl SensorCounts {
         if self.sql_tables > 0 {
             map.insert("sql_tables".to_string(), self.sql_tables as u64);
         }
+        if self.frontend_values > 0 {
+            map.insert("frontend_values".to_string(), self.frontend_values as u64);
+        }
         map
     }
 }
@@ -162,6 +170,7 @@ pub enum SensorCountField {
     EntryPoints,
     // Phase D (spec §7): the SQL-tables sensor bucket.
     SqlTables,
+    FrontendValues,
 }
 
 /// Default-delegating per-sensor report returned by

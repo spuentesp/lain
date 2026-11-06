@@ -609,6 +609,7 @@ async fn field_ref_to_field_binds_edge_is_persisted() {
         chain: "customer_id".parse().unwrap(),
         exact: true,
         origin: lain::server::federation::contracts::model::FieldReadOrigin::FieldAccess,
+        operation: None,
     })];
 
     // Edges (per-repo local ids; `project_edges` rewrites both

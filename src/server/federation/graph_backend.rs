@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 /// layout change. Old v2 files are refused at load — recovery is
 /// `lain reindex`.
 pub const FEDERATION_GRAPH_MAGIC: &[u8] = b"LNF2";
-pub const FEDERATION_GRAPH_VERSION: u32 = 4;
+pub const FEDERATION_GRAPH_VERSION: u32 = 5;
 pub const FEDERATION_GRAPH_HEADER_LEN: usize = FEDERATION_GRAPH_MAGIC.len() + 4;
 
 /// Sibling file holding the validated payload (everything after the
@@ -345,19 +345,11 @@ impl PetgraphBackend {
         self.save()
     }
 
-    /// Direct access to the underlying `GraphDatabase` for bulk operations.
-    /// Used by the planned-but-not-yet-implemented
-    /// `federation_index_for_test` test fixture to seed a synthetic
-    /// federation with `insert_nodes_batch` / `insert_edges_batch`
-    /// without paying the per-write `save_to_disk_sync` cost of
-    /// `upsert_node_global` / `upsert_edge` — the latter would serialize
-    /// 50K writes to disk for a small-fixture perf test.
-    ///
-    /// The `&GraphDatabase` view is enough for batch inserts: callers cannot
-    /// mutate petgraph state outside of the documented batch methods, and
-    /// any internal `save_to_disk_sync` they trigger is an explicit choice.
-    #[cfg(test)]
-    pub fn db(&self) -> &crate::graph::GraphDatabase {
+    /// Direct access to the underlying `GraphDatabase` for bulk operations and
+    /// read-only snapshot tool execution. Callers cannot mutate petgraph state
+    /// outside of the documented batch methods, and any internal
+    /// `save_to_disk_sync` they trigger is an explicit choice.
+    pub(crate) fn db(&self) -> &crate::graph::GraphDatabase {
         &self.db
     }
 }
@@ -781,6 +773,14 @@ pub fn impact_propagation(e: &EdgeType) -> Propagation {
         // and follow forward (a separate traversal pass).
         | EdgeType::ReadsTable
         | EdgeType::WritesTable
+        | EdgeType::MapsTo
+        | EdgeType::HasColumn
+        | EdgeType::ReadsColumn
+        | EdgeType::WritesColumn
+        | EdgeType::Renders
+        | EdgeType::Stores
+        | EdgeType::Forwards
+        | EdgeType::Discards
         // Anchor-miner stage: heuristic `BusTopic` / `RouteMatches`
         // edges (minted by `federation::anchor_miner`, and by the
         // dynamic-dispatch sensor on per-repo graphs) are couplings

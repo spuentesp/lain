@@ -42,9 +42,81 @@ pub struct ToolContextDeps {
     pub job_webhooks: Arc<AsyncMutex<Vec<String>>>,
 }
 
+#[derive(Clone)]
+pub struct SnapshotToolContext {
+    pub id: String,
+    pub record: crate::federation::contracts::snapshots::SnapshotRecord,
+    pub data_dir: std::path::PathBuf,
+}
+
+impl SnapshotToolContext {
+    pub fn repo_for_node(&self, node: &crate::schema::GraphNode) -> Result<String, LainError> {
+        if let Some(repo) = &node.repo_id {
+            return Ok(repo.clone());
+        }
+        if let Ok(id) = crate::federation::repo_id::GlobalId::parse(&node.id) {
+            return Ok(id.repo_id().to_string());
+        }
+        if self.record.repos.len() == 1 {
+            return Ok(self.record.repos.keys().next().unwrap().clone());
+        }
+        Err(LainError::InvalidArgument(format!(
+            "repo_id is required for {} in snapshot {}",
+            node.name, self.id
+        )))
+    }
+
+    pub fn read_source(&self, repo: &str, path: &str) -> Result<String, LainError> {
+        let relative = std::path::Path::new(path);
+        if relative.is_absolute()
+            || relative.components().any(|c| {
+                matches!(
+                    c,
+                    std::path::Component::ParentDir
+                        | std::path::Component::RootDir
+                        | std::path::Component::Prefix(_)
+                )
+            })
+        {
+            return Err(LainError::InvalidArgument(format!(
+                "snapshot path '{path}' is outside the repository"
+            )));
+        }
+        let basename = relative
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        if crate::server::mcp::contract_tools::evidence::is_secret_basename(&basename) {
+            return Err(LainError::InvalidArgument(format!(
+                "snapshot path '{path}' matches the secret denylist"
+            )));
+        }
+        let commit = self.record.repos.get(repo).ok_or_else(|| {
+            LainError::NotFound(format!("repo '{repo}' is not in snapshot {}", self.id))
+        })?;
+        let mirror = self.data_dir.join("mirrors").join(format!("{repo}.git"));
+        let git = git2::Repository::open_bare(&mirror)?;
+        let commit = git.find_commit(git2::Oid::from_str(commit)?)?;
+        let entry = commit
+            .tree()?
+            .get_path(std::path::Path::new(&path.replace('\\', "/")))?;
+        let blob = git.find_blob(entry.id())?;
+        if blob.content().iter().take(8192).any(|b| *b == 0) {
+            return Err(LainError::InvalidArgument(format!(
+                "snapshot path '{path}' is binary"
+            )));
+        }
+        String::from_utf8(blob.content().to_vec())
+            .map_err(|e| LainError::Serialization(format!("snapshot blob is not UTF-8: {e}")))
+    }
+}
+
 /// All dependencies a tool handler needs to do its work.
 #[derive(Clone)]
 pub struct ToolContext {
+    pub snapshot: Option<SnapshotToolContext>,
+    pub snapshots: Option<Arc<crate::federation::contracts::snapshots::SnapshotManager>>,
     pub graph: GraphDatabase,
     pub overlay: VolatileOverlay,
     pub embedder: NlpEmbedder,
@@ -167,6 +239,8 @@ impl ToolContext {
             job_webhooks,
         } = deps;
         Self {
+            snapshot: None,
+            snapshots: None,
             graph,
             overlay,
             embedder,
@@ -274,11 +348,28 @@ impl ToolContext {
     /// context they already have, which is correct for single-workspace
     /// mode and for the single-repo federation that is already bound to
     /// the right graph.
+    pub fn snapshot_scope<'a>(
+        &'a self,
+        args: &'a Map<String, Value>,
+    ) -> Option<(&'a SnapshotToolContext, &'a str)> {
+        let snapshot = self.snapshot.as_ref()?;
+        let repo = args
+            .get("repo_id")
+            .and_then(|v| v.as_str())
+            .or_else(|| {
+                (snapshot.record.repos.len() == 1)
+                    .then(|| snapshot.record.repos.keys().next().unwrap().as_str())
+            })
+            .unwrap_or("");
+        Some((snapshot, repo))
+    }
+
     pub fn for_repo(&self, repo_id: &str) -> Option<Self> {
         let fed = self.federation.as_ref()?;
         let rid = crate::server::federation::repo_id::RepoId::new(repo_id).ok()?;
         let repo = fed.get_repo(&rid)?;
         let mut bound = self.clone();
+        bound.snapshot = None;
         bound.graph = repo.db().clone();
         // Cold-boot race closure: the active repo's indexed signal is
         // what the dispatcher awaits when this repo's per-repo graph
@@ -324,6 +415,11 @@ pub enum ToolCapability {
     Mutating,
 }
 
+pub struct ToolOutput {
+    pub text: String,
+    pub structured: Option<Value>,
+}
+
 /// A handler trait — implement this for each tool.
 /// `inventory` collects all implementors via `ToolHandlerEntry`.
 #[async_trait]
@@ -343,6 +439,31 @@ pub trait ToolHandler: Send + Sync {
     /// Execute the tool. Returns a JSON-encoded string on success.
     async fn call(&self, ctx: &ToolContext, args: &Map<String, Value>)
         -> Result<String, LainError>;
+
+    fn output_schema(&self) -> Option<&'static str> {
+        None
+    }
+
+    fn structured(
+        &self,
+        _ctx: &ToolContext,
+        _args: &Map<String, Value>,
+    ) -> Option<Result<Value, LainError>> {
+        None
+    }
+
+    async fn call_with_output(
+        &self,
+        ctx: &ToolContext,
+        args: &Map<String, Value>,
+    ) -> Result<ToolOutput, LainError> {
+        let text = self.call(ctx, args).await?;
+        let structured = match self.structured(ctx, args) {
+            Some(result) => Some(result?),
+            None => serde_json::from_str(&text).ok(),
+        };
+        Ok(ToolOutput { text, structured })
+    }
 }
 
 // ─── Inventory registry ───────────────────────────────────────────────────────
@@ -380,6 +501,16 @@ impl ToolRegistry {
         name: &str,
         args: &Map<String, Value>,
     ) -> Result<String, LainError> {
+        Self::dispatch_with_output(ctx, name, args)
+            .await
+            .map(|output| output.text)
+    }
+
+    pub async fn dispatch_with_output(
+        ctx: &ToolContext,
+        name: &str,
+        args: &Map<String, Value>,
+    ) -> Result<ToolOutput, LainError> {
         // Bind to the repo the caller resolved, when there is one. The
         // MCP dispatcher injects `repo_id` after resolving the symbol or
         // an explicit argument; without this the id was injected and
@@ -423,7 +554,7 @@ impl ToolRegistry {
         }
         for entry in iter::<ToolHandlerEntry>() {
             if entry.0.name() == name {
-                return entry.0.call(ctx, args).await;
+                return entry.0.call_with_output(ctx, args).await;
             }
         }
         Err(LainError::InvalidArgument(format!(
@@ -446,12 +577,33 @@ impl ToolRegistry {
             ToolHandlerEntry,
         >()
         .map(|entry| {
-            let schema: Value = serde_json::from_str(entry.0.input_schema())
+            let mut schema: Value = serde_json::from_str(entry.0.input_schema())
                 .unwrap_or_else(|_| serde_json::json!({}));
+            if matches!(
+                entry.0.name(),
+                "query_graph"
+                    | "find_symbol"
+                    | "get_context"
+                    | "get_call_sites"
+                    | "get_cross_runtime_callers"
+                    | "explain_symbol"
+                    | "assess_change"
+                    | "explain_dispatch"
+            ) {
+                schema["properties"]["snapshot"] = serde_json::json!({
+                    "type": "string",
+                    "description": "Named snapshot id, or 'live' for the current graph"
+                });
+            }
             crate::server::tools::definitions::ToolDefinition {
                 name: entry.0.name(),
                 description: entry.0.description(),
                 input_schema: schema,
+                output_schema: entry.0.output_schema().map(|raw| {
+                    serde_json::from_str(raw).unwrap_or_else(|e| {
+                        panic!("invalid output schema for {}: {e}", entry.0.name())
+                    })
+                }),
                 readiness: crate::server::tools::definitions::readiness_requirement(entry.0.name())
                     .expect("every registered tool must declare a readiness requirement"),
             }

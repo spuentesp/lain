@@ -38,7 +38,9 @@ pub enum ContractFact {
     /// / etc.
     Consumer(ConsumerFact),
     /// One request, response, or payload body of a route.
-    Schema { direction: Direction },
+    Schema {
+        direction: Direction,
+    },
     /// One flattened field of a `Schema`.
     Field(FieldMeta),
     /// One field read from a call's response.
@@ -129,6 +131,9 @@ pub enum ContractFact {
     /// unchanged — graphs written before this variant decode
     /// unchanged (fold into unreleased v3, spec §2).
     TableConsumer(TableConsumerFact),
+    OrmModel(OrmModelFact),
+    OrmTable(OrmTableFact),
+    OrmColumn(OrmColumnFact),
 }
 
 impl ContractFact {
@@ -486,6 +491,8 @@ pub enum FieldReadOrigin {
     /// `graphql_consumer_sensor` — a field selected in a GraphQL
     /// operation.
     GraphqlConsumer,
+    /// `event_sensor` — a field read from a topic payload.
+    TopicConsumer,
 }
 
 /// One field read from a call's response. Emitted by
@@ -500,6 +507,8 @@ pub struct FieldReadFact {
     /// deserialising as `FieldAccess`.
     #[serde(default)]
     pub origin: FieldReadOrigin,
+    #[serde(default)]
+    pub operation: Option<ContractKey>,
 }
 
 // ─── SQL tables (Phase D, spec §7) ────────────────────────────────────
@@ -537,6 +546,28 @@ pub struct Table {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TableConsumerFact {
     pub tables: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OrmModelFact {
+    pub orm: String,
+    pub model: String,
+    pub table: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OrmTableFact {
+    pub orm: String,
+    pub model: String,
+    pub table: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OrmColumnFact {
+    pub orm: String,
+    pub table: String,
+    pub column: String,
+    pub migration: Option<SourceSite>,
 }
 
 // ─── Schema fields ────────────────────────────────────────────────────
@@ -1128,6 +1159,9 @@ pub enum UnresolvedReason {
     /// Phase D (Gap 23): ORM or query-builder call where the table reference
     /// is dynamic or unresolved statically.
     OrmDynamicQuery,
+    /// A frontend value was used, but its disposition was not established by
+    /// structural evidence. It must not be reported as discarded or guessed.
+    FrontendValueUnclassified,
 }
 
 /// A JSON pointer (or, here, JSON path) into a payload. Segments are

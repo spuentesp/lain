@@ -3,6 +3,7 @@ use crate::error::LainError;
 use crate::server::sensors::util::{language_for, parse_for_lang, scan_files, Lang};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::Path;
 use tree_sitter::{Node, Query, QueryCursor, StreamingIterator};
 
@@ -80,6 +81,11 @@ pub struct Accessor {
     pub provenance: String,
 }
 
+struct CompiledConfig {
+    generated: Regex,
+    query: Query,
+}
+
 impl RustGrpcConfig {
     /// Invalid overrides fail explicitly; they never silently broaden detection.
     pub fn load(root: &Path) -> Result<Self, LainError> {
@@ -102,12 +108,12 @@ impl RustGrpcConfig {
         config.query = query
             .unwrap_or(include_str!("../patterns/rust/grpc-candidate.scm"))
             .into();
-        config.validate()?;
+        config.compile()?;
         Ok(config)
     }
 
-    fn validate(&self) -> Result<(), LainError> {
-        Regex::new(&self.generated_type_pattern)
+    fn compile(&self) -> Result<CompiledConfig, LainError> {
+        let generated = Regex::new(&self.generated_type_pattern)
             .map_err(|e| LainError::Other(format!("Rust gRPC type pattern: {e}")))?;
         let query = Query::new(&language_for(Lang::Rust), &self.query)
             .map_err(|e| LainError::Other(format!("Rust gRPC query: {e}")))?;
@@ -138,7 +144,7 @@ impl RustGrpcConfig {
                 "Rust gRPC accessor requires provenance".into(),
             ));
         }
-        Ok(())
+        Ok(CompiledConfig { generated, query })
     }
 }
 
@@ -154,14 +160,16 @@ fn read_override(path: &Path, bundled: &str) -> Result<String, LainError> {
 /// passed into the existing `detect_stub_calls` / fact emission pipeline.
 pub fn discover_rust_grpc_candidates(root: &Path) -> Result<Vec<RustGrpcCandidate>, LainError> {
     let config = RustGrpcConfig::load(root)?;
+    let compiled = config.compile()?;
     let mut out = Vec::new();
     for (path, content, _) in scan_files(root, |p| {
         (p.extension()?.to_str()? == "rs").then(|| "rs".to_string())
     }) {
-        out.extend(detect_rust_grpc_candidates(
+        out.extend(detect_with_compiled_config(
             &content,
             &crate::graph::graph_path(root, &path),
             &config,
+            &compiled,
         )?);
     }
     out.sort_by(|a, b| (&a.site.path, a.site.start_byte).cmp(&(&b.site.path, b.site.start_byte)));
@@ -173,7 +181,15 @@ pub fn detect_rust_grpc_candidates(
     path: &str,
     config: &RustGrpcConfig,
 ) -> Result<Vec<RustGrpcCandidate>, LainError> {
-    config.validate()?;
+    detect_with_compiled_config(src, path, config, &config.compile()?)
+}
+
+fn detect_with_compiled_config(
+    src: &str,
+    path: &str,
+    config: &RustGrpcConfig,
+    compiled: &CompiledConfig,
+) -> Result<Vec<RustGrpcCandidate>, LainError> {
     let Some(tree) = parse_for_lang(Lang::Rust, src) else {
         return Ok(Vec::new());
     };
@@ -181,18 +197,24 @@ pub fn detect_rust_grpc_candidates(
     if tree.root_node().has_error() {
         return Ok(Vec::new());
     }
-    let mut nodes = Vec::new();
-    collect(tree.root_node(), &mut nodes);
-    let ctx = Context {
+    let mut ctx = Context {
         src,
         path,
-        nodes,
         config,
-        generated: Regex::new(&config.generated_type_pattern).expect("validated"),
+        generated: &compiled.generated,
+        syntax: HashMap::new(),
+        types: HashMap::new(),
+        bindings: HashMap::new(),
+        patterns: HashMap::new(),
+        assignments: HashMap::new(),
+        structs: HashMap::new(),
+        fields: HashMap::new(),
+        methods: HashMap::new(),
     };
-    let query = Query::new(&language_for(Lang::Rust), &config.query).expect("validated");
+    ctx.index(tree.root_node(), SyntaxContext::default());
+    let query = &compiled.query;
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&query, tree.root_node(), src.as_bytes());
+    let mut matches = cursor.matches(query, tree.root_node(), src.as_bytes());
     let mut out = Vec::new();
     while let Some(m) = matches.next() {
         let capture = |name| {
@@ -217,10 +239,12 @@ pub fn detect_rust_grpc_candidates(
                     generated_type: ty,
                     site: ctx.site(method),
                     evidence,
-                    enclosing_name: enclosing_function(call)
+                    enclosing_name: ctx
+                        .enclosing_function(call)
                         .and_then(|f| f.child_by_field_name("name"))
                         .map(|n| ctx.text(n).to_string()),
-                    enclosing_start_line: enclosing_function(call)
+                    enclosing_start_line: ctx
+                        .enclosing_function(call)
                         .map(|f| f.start_position().row + 1),
                 });
             }
@@ -231,24 +255,150 @@ pub fn detect_rust_grpc_candidates(
     Ok(out)
 }
 
-fn collect<'a>(node: Node<'a>, out: &mut Vec<Node<'a>>) {
-    out.push(node);
-    let mut cursor = node.walk();
-    for child in node.named_children(&mut cursor) {
-        collect(child, out);
-    }
+#[derive(Clone, Copy, Default)]
+// Strict ancestors of each node, matching the original parent-based scope rules.
+struct SyntaxContext<'a> {
+    parent: Option<Node<'a>>,
+    scope: Option<Node<'a>>,
+    function: Option<Node<'a>>,
+    implementation: Option<Node<'a>>,
+    in_closure: bool,
+}
+
+struct TypeBinding<'a> {
+    node: Node<'a>,
+    // Nominal declarations retain the caller's spelling. Aliases and imports
+    // carry their explicit expansion, resolved at the declaration's own site.
+    target: Option<String>,
 }
 
 struct Context<'a> {
     src: &'a str,
     path: &'a str,
-    nodes: Vec<Node<'a>>,
     config: &'a RustGrpcConfig,
-    generated: Regex,
+    generated: &'a Regex,
+    // Transient per-file indexes: receiver resolution must not repeatedly scan
+    // every AST node or walk tree-sitter parents in large, wide source files.
+    syntax: HashMap<usize, SyntaxContext<'a>>,
+    types: HashMap<String, Vec<TypeBinding<'a>>>,
+    bindings: HashMap<Option<usize>, HashMap<String, Vec<Node<'a>>>>,
+    patterns: HashMap<String, Vec<Node<'a>>>,
+    assignments: HashMap<String, Vec<Node<'a>>>,
+    structs: HashMap<String, Vec<Node<'a>>>,
+    fields: HashMap<String, Vec<Node<'a>>>,
+    methods: HashMap<String, Vec<Node<'a>>>,
 }
 type Resolved = (String, Vec<RustGrpcEvidence>);
 
 impl<'a> Context<'a> {
+    fn index(&mut self, node: Node<'a>, context: SyntaxContext<'a>) {
+        self.syntax.insert(node.id(), context);
+        match node.kind() {
+            "struct_item" | "enum_item" | "union_item" | "type_item" => {
+                if let Some(name) = self.field(node, "name") {
+                    let target = (node.kind() == "type_item")
+                        .then(|| self.field(node, "type").map(|ty| self.text(ty).to_string()))
+                        .flatten();
+                    self.types
+                        .entry(self.text(name).to_string())
+                        .or_default()
+                        .push(TypeBinding { node, target });
+                    if node.kind() == "struct_item" {
+                        self.structs
+                            .entry(self.text(name).to_string())
+                            .or_default()
+                            .push(node);
+                    }
+                }
+            }
+            "use_declaration" => {
+                if let Some(argument) = self.field(node, "argument") {
+                    let mut imports = Vec::new();
+                    self.imports(argument, "", &mut imports);
+                    for (name, target) in imports {
+                        self.types.entry(name).or_default().push(TypeBinding {
+                            node,
+                            target: Some(target),
+                        });
+                    }
+                }
+            }
+            "let_declaration" | "parameter" | "for_expression" | "match_arm" | "let_condition" => {
+                if let Some(pattern) = self.field(node, "pattern") {
+                    let mut names = Vec::new();
+                    self.pattern_names(pattern, &mut names);
+                    names.sort_unstable();
+                    names.dedup();
+                    for name in names {
+                        if matches!(node.kind(), "let_declaration" | "parameter") {
+                            self.bindings
+                                .entry(context.function.map(|f| f.id()))
+                                .or_default()
+                                .entry(name.to_string())
+                                .or_default()
+                                .push(node);
+                        } else {
+                            self.patterns
+                                .entry(name.to_string())
+                                .or_default()
+                                .push(node);
+                        }
+                    }
+                }
+            }
+            "assignment_expression" => {
+                if let Some(left) = self.field(node, "left") {
+                    self.assignments
+                        .entry(self.text(left).to_string())
+                        .or_default()
+                        .push(node);
+                }
+            }
+            "field_declaration" | "function_item" => {
+                if let Some(name) = self.field(node, "name") {
+                    let name = self.text(name).to_string();
+                    if node.kind() == "field_declaration" {
+                        self.fields.entry(name).or_default().push(node);
+                    } else {
+                        self.methods.entry(name).or_default().push(node);
+                    }
+                }
+            }
+            _ => {}
+        }
+        let mut children = context;
+        children.parent = Some(node);
+        match node.kind() {
+            "block" | "source_file" | "declaration_list" => children.scope = Some(node),
+            "function_item" => children.function = Some(node),
+            "impl_item" => children.implementation = Some(node),
+            "closure_expression" => children.in_closure = true,
+            _ => {}
+        }
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            self.index(child, children);
+        }
+    }
+
+    fn pattern_names(&self, pattern: Node<'a>, names: &mut Vec<&'a str>) {
+        if matches!(pattern.kind(), "identifier" | "shorthand_field_identifier") {
+            names.push(self.text(pattern));
+        }
+        let mut cursor = pattern.walk();
+        for child in pattern.named_children(&mut cursor) {
+            self.pattern_names(child, names);
+        }
+    }
+
+    fn parent(&self, node: Node<'a>) -> Option<Node<'a>> {
+        self.syntax.get(&node.id())?.parent
+    }
+
+    fn enclosing_function(&self, node: Node<'a>) -> Option<Node<'a>> {
+        self.syntax.get(&node.id())?.function
+    }
+
     fn text(&self, n: Node<'_>) -> &'a str {
         &self.src[n.byte_range()]
     }
@@ -270,44 +420,25 @@ impl<'a> Context<'a> {
     fn field(&self, n: Node<'a>, field: &str) -> Option<Node<'a>> {
         n.child_by_field_name(field)
     }
-    fn scope(n: Node<'_>) -> Option<Node<'_>> {
-        let mut p = n.parent();
-        while let Some(node) = p {
-            if matches!(node.kind(), "block" | "source_file" | "declaration_list") {
-                return Some(node);
-            }
-            p = node.parent();
-        }
-        None
-    }
-    fn visible(decl: Node<'_>, at: Node<'_>) -> bool {
+    fn visible(&self, decl: Node<'a>, at: Node<'a>) -> bool {
         if matches!(decl.kind(), "parameter" | "let_declaration") {
-            let function = |mut n: Node<'_>| loop {
-                if n.kind() == "function_item" {
-                    return Some(n.id());
-                }
-                n = n.parent()?;
-            };
-            if function(decl) != function(at) {
+            if self.enclosing_function(decl).map(|n| n.id())
+                != self.enclosing_function(at).map(|n| n.id())
+            {
                 return false;
             }
         }
-        Self::scope(decl)
+        self.syntax
+            .get(&decl.id())
+            .and_then(|context| context.scope)
             .is_some_and(|s| s.start_byte() <= at.start_byte() && s.end_byte() >= at.end_byte())
     }
-    fn enclosing_impl(at: Node<'a>) -> Option<Node<'a>> {
-        let mut p = at.parent();
-        while let Some(n) = p {
-            if n.kind() == "impl_item" {
-                return Some(n);
-            }
-            p = n.parent();
-        }
-        None
+    fn enclosing_impl(&self, at: Node<'a>) -> Option<Node<'a>> {
+        self.syntax.get(&at.id())?.implementation
     }
     fn impl_type(&self, at: Node<'a>) -> Option<String> {
         Some(
-            self.text(self.field(Self::enclosing_impl(at)?, "type")?)
+            self.text(self.field(self.enclosing_impl(at)?, "type")?)
                 .into(),
         )
     }
@@ -339,36 +470,15 @@ impl<'a> Context<'a> {
                     return None;
                 }
             }
-            scope = node.parent();
+            scope = self.parent(node);
         }
         let mut bindings = Vec::new();
-        for &n in &self.nodes {
-            if !Self::visible(n, at) {
-                continue;
-            }
-            // Local nominal types occupy the same namespace as imported
-            // clients. Preserve their spelling for wrapper/field inspection,
-            // but never expand an outer import through such a declaration.
-            // Items are visible throughout their scope, even before the item.
-            if matches!(n.kind(), "struct_item" | "enum_item" | "union_item")
-                && self.field(n, "name").is_some_and(|x| self.text(x) == first)
-            {
-                bindings.push((raw.to_string(), n));
-            }
-            if n.kind() == "type_item"
-                && self.field(n, "name").is_some_and(|x| self.text(x) == first)
-            {
-                bindings.push((self.text(self.field(n, "type")?).to_string(), n));
-            }
-            if n.kind() == "use_declaration" {
-                let arg = self.field(n, "argument")?;
-                let mut imports = Vec::new();
-                self.imports(arg, "", &mut imports);
-                for (local, full) in imports {
-                    if local == first {
-                        bindings.push((full, n));
-                    }
-                }
+        for binding in self.types.get(first).into_iter().flatten() {
+            if self.visible(binding.node, at) {
+                bindings.push((
+                    binding.target.as_deref().unwrap_or(raw).to_string(),
+                    binding.node,
+                ));
             }
         }
         if bindings.len() > 1 {
@@ -437,7 +547,7 @@ impl<'a> Context<'a> {
             "for_expression" => self.field(binding, "body").is_some_and(contains),
             "match_arm" => contains(binding),
             "let_condition" => {
-                let mut parent = binding.parent();
+                let mut parent = self.parent(binding);
                 while let Some(n) = parent {
                     match n.kind() {
                         "if_expression" => {
@@ -448,25 +558,13 @@ impl<'a> Context<'a> {
                             return self.field(n, "body").is_some_and(contains)
                                 || self.field(n, "condition").is_some_and(contains);
                         }
-                        _ => parent = n.parent(),
+                        _ => parent = self.parent(n),
                     }
                 }
                 false
             }
             _ => false,
         }
-    }
-    fn pattern_mentions(&self, pattern: Node<'a>, name: &str) -> bool {
-        if matches!(pattern.kind(), "identifier" | "shorthand_field_identifier")
-            && self.text(pattern) == name
-        {
-            return true;
-        }
-        let mut cursor = pattern.walk();
-        let found = pattern
-            .named_children(&mut cursor)
-            .any(|child| self.pattern_mentions(child, name));
-        found
     }
     fn constructor_type(&self, expr: Node<'a>, at: Node<'a>, depth: usize) -> Option<Resolved> {
         let mut call = expr;
@@ -509,39 +607,34 @@ impl<'a> Context<'a> {
         }
         // Closure capture/argument tracing is a later phase. In particular, a
         // closure parameter must not inherit an outer binding's identity.
-        let mut ancestor = expr.parent();
-        while let Some(n) = ancestor {
-            if n.kind() == "closure_expression" {
-                return None;
-            }
-            ancestor = n.parent();
+        if self
+            .syntax
+            .get(&expr.id())
+            .is_some_and(|context| context.in_closure)
+        {
+            return None;
         }
         match expr.kind() {
             "try_expression" | "await_expression" => self.constructor_type(expr, at, depth),
             "identifier" => {
                 let name = self.text(expr);
-                let mut bindings = Vec::new();
-                for &n in &self.nodes {
-                    if n.start_byte() >= at.start_byte() || !Self::visible(n, at) {
-                        continue;
-                    }
-                    if self.pattern_binding_visible(n, at)
-                        && self
-                            .field(n, "pattern")
-                            .is_some_and(|p| self.pattern_mentions(p, name))
-                    {
-                        // These binding forms need their own scope inference;
-                        // never inherit an outer binding through them.
-                        return None;
-                    }
-                    if matches!(n.kind(), "let_declaration" | "parameter")
-                        && self
-                            .field(n, "pattern")
-                            .is_some_and(|p| self.pattern_mentions(p, name))
-                    {
-                        bindings.push(n);
-                    }
+                if self.patterns.get(name).into_iter().flatten().any(|&n| {
+                    n.start_byte() < at.start_byte()
+                        && self.visible(n, at)
+                        && self.pattern_binding_visible(n, at)
+                }) {
+                    return None;
                 }
+                let function = self.enclosing_function(at).map(|n| n.id());
+                let bindings: Vec<_> = self
+                    .bindings
+                    .get(&function)
+                    .and_then(|bindings| bindings.get(name))
+                    .into_iter()
+                    .flatten()
+                    .copied()
+                    .filter(|&n| n.start_byte() < at.start_byte() && self.visible(n, at))
+                    .collect();
                 // Multiple bindings (including shadowing) remain unproven.
                 if bindings.len() != 1 {
                     return None;
@@ -553,14 +646,12 @@ impl<'a> Context<'a> {
                 // Inferred locals lose their evidence after reassignment. Even
                 // a conditional assignment makes the identity uncertain here.
                 if self.field(n, "type").is_none()
-                    && self.nodes.iter().any(|a| {
-                        a.kind() == "assignment_expression"
-                            && a.start_byte() > n.end_byte()
-                            && a.start_byte() < at.start_byte()
-                            && self
-                                .field(*a, "left")
-                                .is_some_and(|left| self.text(left) == name)
-                    })
+                    && self
+                        .assignments
+                        .get(name)
+                        .into_iter()
+                        .flatten()
+                        .any(|a| a.start_byte() > n.end_byte() && a.start_byte() < at.start_byte())
                 {
                     return None;
                 }
@@ -576,29 +667,25 @@ impl<'a> Context<'a> {
                 let (owner_type, mut evidence) = self.expression_type(owner, at, depth + 1)?;
                 let name = self.text(self.field(expr, "field")?);
                 let structs: Vec<_> = self
-                    .nodes
-                    .iter()
+                    .structs
+                    .get(&owner_type)
+                    .into_iter()
+                    .flatten()
                     .copied()
-                    .filter(|n| {
-                        n.kind() == "struct_item"
-                            && self
-                                .field(*n, "name")
-                                .is_some_and(|x| self.text(x) == owner_type)
-                            && Self::visible(*n, at)
-                    })
+                    .filter(|n| self.visible(*n, at))
                     .collect();
                 if structs.len() != 1 {
                     return None;
                 }
                 let fields: Vec<_> = self
-                    .nodes
-                    .iter()
+                    .fields
+                    .get(name)
+                    .into_iter()
+                    .flatten()
                     .copied()
                     .filter(|n| {
-                        n.kind() == "field_declaration"
-                            && n.start_byte() > structs[0].start_byte()
+                        n.start_byte() > structs[0].start_byte()
                             && n.end_byte() < structs[0].end_byte()
-                            && self.field(*n, "name").is_some_and(|x| self.text(x) == name)
                     })
                     .collect();
                 if fields.len() != 1 {
@@ -626,16 +713,14 @@ impl<'a> Context<'a> {
                     .filter(|a| a.receiver_type == owner && a.method == method)
                     .collect();
                 let methods: Vec<_> = self
-                    .nodes
-                    .iter()
+                    .methods
+                    .get(method)
+                    .into_iter()
+                    .flatten()
                     .copied()
                     .filter(|n| {
-                        n.kind() == "function_item"
-                            && self
-                                .field(*n, "name")
-                                .is_some_and(|x| self.text(x) == method)
-                            && self.impl_type(*n).as_deref() == Some(owner.as_str())
-                            && Self::enclosing_impl(*n).is_some_and(|i| Self::visible(i, at))
+                        self.impl_type(*n).as_deref() == Some(owner.as_str())
+                            && self.enclosing_impl(*n).is_some_and(|i| self.visible(i, at))
                     })
                     .collect();
                 if accessors.len() + methods.len() != 1 {
@@ -660,14 +745,4 @@ impl<'a> Context<'a> {
             _ => None,
         }
     }
-}
-
-fn enclosing_function(mut node: Node<'_>) -> Option<Node<'_>> {
-    while let Some(parent) = node.parent() {
-        if parent.kind() == "function_item" {
-            return Some(parent);
-        }
-        node = parent;
-    }
-    None
 }

@@ -377,17 +377,7 @@ async fn run_get_contract(
             }
         }
         let consumers = collect_consumers_for_endpoint(&view, endpoint_id);
-        let providers: Vec<Value> = endpoint
-            .providers
-            .iter()
-            .map(|p| {
-                evidence_ref(
-                    &p.node_id,
-                    &p.node_id.path().unwrap_or_default(),
-                    p.node_id.line_start().unwrap_or(0),
-                )
-            })
-            .collect();
+        let providers: Vec<Value> = endpoint.providers.iter().map(provider_evidence).collect();
         items.push(json!({
             "endpoint": {"service": endpoint_id.0 .0, "key": endpoint_id.1.to_string()},
             "providers": providers,
@@ -1064,6 +1054,22 @@ fn evidence_ref(id: &GlobalId, path: &str, line: u32) -> Value {
     })
 }
 
+fn provider_evidence(provider: &crate::federation::contracts::index::EndpointProvider) -> Value {
+    let mut value = evidence_ref(
+        &provider.node_id,
+        &provider.node_id.path().unwrap_or_default(),
+        provider.node_id.line_start().unwrap_or(0),
+    );
+    if let Some(handler) = provider.handler.as_ref() {
+        value["handlers"] = json!([{
+            "repo": provider.node_id.repo_id(),
+            "file": handler.path,
+            "symbol": handler.name,
+        }]);
+    }
+    value
+}
+
 fn evidence_ref_from_call(call_id: &GlobalId) -> Value {
     json!({
         "id": call_id.as_str(),
@@ -1132,6 +1138,7 @@ pub(crate) fn unresolved_reason_label(r: UnresolvedReason) -> &'static str {
         DynamicSql => "dynamic_sql",
         OrmDynamicQuery => "orm_dynamic_query",
         ExternalSchemaRef => "external_schema_ref",
+        FrontendValueUnclassified => "frontend_value_unclassified",
     }
 }
 
@@ -1497,6 +1504,33 @@ mod tests {
     use crate::federation::contracts::index::EndpointId;
     use crate::federation::contracts::model::{GraphqlOp, HttpMethod, MethodSpec};
     use crate::federation::repo_id::RepoId;
+
+    #[test]
+    fn get_contract_provider_includes_its_handler_identity() {
+        let provider = crate::federation::contracts::index::EndpointProvider {
+            node_id: GlobalId::new(
+                &RepoId::new("orders").unwrap(),
+                crate::schema::NodeType::HttpRoute,
+                "src/orders/label.rs",
+                "GET /api/orders/{}/label",
+                Some(3),
+            ),
+            origin: crate::federation::contracts::model::ProviderOrigin::Code,
+            handler: Some(crate::federation::contracts::model::SymbolKey {
+                repo: RepoId::new("http-sensor").unwrap(),
+                path: "src/orders/label.rs".into(),
+                container: None,
+                name: "get_order_label".into(),
+            }),
+            operation_id: None,
+        };
+        let value = provider_evidence(&provider);
+        assert_eq!(value["repo"], "orders");
+        assert_eq!(value["handlers"].as_array().map(Vec::len), Some(1));
+        assert_eq!(value["handlers"][0]["repo"], "orders");
+        assert_eq!(value["handlers"][0]["file"], "src/orders/label.rs");
+        assert_eq!(value["handlers"][0]["symbol"], "get_order_label");
+    }
 
     #[test]
     fn parse_consumer_call_shape_extracts_method_and_template() {

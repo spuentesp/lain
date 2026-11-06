@@ -4,11 +4,74 @@ use crate::graph::GraphDatabase;
 use crate::nlp::NlpEmbedder;
 use crate::query::executor::Executor;
 use crate::query::spec::*;
-use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
+use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace};
 use parking_lot::Mutex;
+use proptest::prelude::*;
 use std::sync::Arc;
 
 type EmbeddingCache = Arc<Mutex<lru::LruCache<String, Vec<f32>>>>;
+
+#[test]
+fn pagination_and_default_caps_preserve_explicit_sort() {
+    let tmp = tempfile::tempdir().unwrap();
+    let graph = GraphDatabase::new(&tmp.path().join("graph.bin")).unwrap();
+    for (index, (name, kind, label)) in [
+        ("z", NodeType::Function, Some("test")),
+        ("a", NodeType::Class, None),
+        ("m", NodeType::Function, Some("deprecated")),
+        ("a", NodeType::Function, Some("test")),
+        ("b", NodeType::Class, None),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut node = GraphNode::new(kind, name.into(), format!("{index}.rs"));
+        node.label = label.map(str::to_string);
+        graph.upsert_node(node).unwrap();
+    }
+    let (embedder, cache) = make_test_executor_params();
+    for by in [SortField::Name, SortField::Type, SortField::Label] {
+        for direction in [SortDirection::Asc, SortDirection::Desc] {
+            let mut spec = QuerySpec::new(vec![
+                GraphOp::Find(FindOp::new()),
+                GraphOp::Sort(SortOp { by, direction }),
+            ]);
+            let ids = |result: QueryResult| {
+                result
+                    .nodes
+                    .into_iter()
+                    .map(|node| node.id)
+                    .collect::<Vec<_>>()
+            };
+            let expected =
+                ids(
+                    Executor::with_default_limit(&graph, &embedder, &cache, tmp.path(), 0)
+                        .execute(&spec)
+                        .unwrap(),
+                );
+            let capped =
+                ids(
+                    Executor::with_default_limit(&graph, &embedder, &cache, tmp.path(), 2)
+                        .execute(&spec)
+                        .unwrap(),
+                );
+            assert_eq!(capped, expected[..2], "{by:?} {direction:?}");
+            spec.limit = Some(2);
+            let mut actual = Vec::new();
+            loop {
+                let page = Executor::new(&graph, &embedder, &cache, tmp.path())
+                    .execute(&spec)
+                    .unwrap();
+                spec.cursor = page.meta.as_ref().and_then(|meta| meta.next_cursor.clone());
+                actual.extend(ids(page));
+                if spec.cursor.is_none() {
+                    break;
+                }
+            }
+            assert_eq!(actual, expected, "{by:?} {direction:?}");
+        }
+    }
+}
 
 fn make_test_graph() -> GraphDatabase {
     let tmp = std::env::temp_dir().join("test_executor_graph");
@@ -1168,6 +1231,48 @@ fn mode_auto_is_the_default_and_still_dispatches_both_ways() {
     assert!(exec.execute(&named).unwrap().legacy);
 }
 
+fn capped_names_in_insertion_order(order: &[&str]) -> Vec<String> {
+    let tmp = tempfile::tempdir().unwrap();
+    let graph = GraphDatabase::new(&tmp.path().join("graph.bin")).unwrap();
+    let namespace = RepoNamespace::for_test();
+    let nodes: Vec<GraphNode> = order
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            GraphNode::new_in(
+                NodeType::Function,
+                (*name).into(),
+                format!("src/file{index}.rs"),
+                &namespace,
+            )
+        })
+        .collect();
+    graph.insert_nodes_batch(&nodes).unwrap();
+    let (embedder, cache) = make_test_executor_params();
+    let mut executor =
+        Executor::with_default_limit(&graph, &embedder, &cache, std::path::Path::new(""), 2);
+    let spec = QuerySpec::new(vec![GraphOp::Find(FindOp::new().r#type("Function"))]);
+    executor
+        .execute(&spec)
+        .unwrap()
+        .nodes
+        .into_iter()
+        .map(|node| node.name)
+        .collect()
+}
+
+#[test]
+fn default_cap_sorts_before_truncating_regardless_of_insertion_order() {
+    let forward = capped_names_in_insertion_order(&["zulu", "alpha", "mike"]);
+    let reverse = capped_names_in_insertion_order(&["mike", "zulu", "alpha"]);
+    assert_eq!(forward, vec!["alpha", "mike"]);
+    assert_eq!(reverse, forward);
+    assert_eq!(
+        capped_names_in_insertion_order(&["zulu", "alpha", "alpha"]),
+        vec!["alpha", "alpha"]
+    );
+}
+
 /// `ingestion.default_query_limit` is documented as "Default query result
 /// limit when not specified" and was never read, so an unbounded
 /// `{"op":"find","type":"Function"}` returned every match — on this repo
@@ -1378,4 +1483,234 @@ fn test_connect_depth_is_up_to_and_target_filters() {
         ..Default::default()
     })]));
     assert!(bogus.is_err());
+}
+
+#[test]
+fn raw_refs_preserve_node_locations_and_edge_provenance() {
+    let graph = make_test_graph();
+    let (embedder, cache) = make_test_executor_params();
+    let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
+    let seed = GraphNode::new(NodeType::Function, "seed".into(), "src/seed.rs".into());
+    let mut target = GraphNode::new(NodeType::Function, "target".into(), "src/orders.rs".into());
+    target.line_start = Some(4);
+    target.line_end = Some(8);
+    target.commit_hash = Some("deadbeef".into());
+    target.repo_id = Some("orders".into());
+    graph
+        .insert_nodes_batch(&[seed.clone(), target.clone()])
+        .unwrap();
+    let mut heuristic = GraphEdge::new(
+        EdgeType::DynamicDispatch,
+        seed.id.clone(),
+        target.id.clone(),
+    );
+    heuristic.provenance = Some(crate::schema::EdgeProvenance::Heuristic {
+        detector: "resolver".into(),
+        confidence: 0.9,
+    });
+    heuristic.weight = Some(0.9);
+    heuristic.site = Some(crate::federation::contracts::model::SourceSite {
+        path: "src/seed.rs".into(),
+        line: 42,
+    });
+    let confirmed = GraphEdge {
+        provenance: Some(crate::schema::EdgeProvenance::Confirmed {
+            source: "repos.yaml#bindings[0]".into(),
+        }),
+        ..GraphEdge::new(EdgeType::Binds, seed.id.clone(), target.id.clone())
+    };
+    let runtime = GraphEdge {
+        provenance: Some(crate::schema::EdgeProvenance::Runtime {
+            trace_id: "trace-1".into(),
+            last_seen_unix: 123,
+        }),
+        ..GraphEdge::new(EdgeType::RuntimeCall, seed.id.clone(), target.id.clone())
+    };
+    let legacy = GraphEdge {
+        provenance: None,
+        ..GraphEdge::new(EdgeType::Uses, seed.id.clone(), target.id.clone())
+    };
+    graph
+        .insert_edges_batch(&[heuristic, confirmed, runtime, legacy])
+        .unwrap();
+
+    let mut execute = |kind: &str| {
+        let result = exec
+            .execute(&QuerySpec::new(vec![
+                GraphOp::Find(FindOp::new().name("seed")),
+                GraphOp::Connect(ConnectOp {
+                    edge: EdgeSelector::Single(kind.into()),
+                    direction: Direction::Outgoing,
+                    depth: DepthSpec::Single(1),
+                    target: None,
+                }),
+            ]))
+            .unwrap();
+        serde_json::to_value(&result).unwrap()
+    };
+    let json = execute("Binds");
+    assert_eq!(json["nodes"][0]["path"], "src/orders.rs");
+    assert_eq!(json["nodes"][0]["line_start"], 4);
+    assert_eq!(json["nodes"][0]["line_end"], 8);
+    assert_eq!(json["nodes"][0]["commit"], "deadbeef");
+    assert_eq!(json["nodes"][0]["repo_id"], "orders");
+    let mut edge = |kind: &str| execute(kind)["edges"][0].clone();
+    assert_eq!(
+        edge("DynamicDispatch")["provenance"]["Heuristic"]["detector"],
+        "resolver"
+    );
+    assert!((edge("DynamicDispatch")["confidence"].as_f64().unwrap() - 0.9).abs() < 1e-6);
+    assert_eq!(edge("DynamicDispatch")["site"]["line"], 42);
+    assert_eq!(
+        edge("Binds")["provenance"]["Confirmed"]["source"],
+        "repos.yaml#bindings[0]"
+    );
+    assert_eq!(
+        edge("RuntimeCall")["provenance"]["Runtime"]["trace_id"],
+        "trace-1"
+    );
+    assert!(edge("Uses").get("provenance").is_none());
+}
+
+#[test]
+fn chained_connects_compose_the_full_path() {
+    let graph = make_test_graph();
+    let (embedder, cache) = make_test_executor_params();
+    let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
+    let connect = || {
+        GraphOp::Connect(ConnectOp {
+            edge: EdgeSelector::Single("Calls".into()),
+            direction: Direction::Outgoing,
+            depth: DepthSpec::Single(1),
+            target: None,
+        })
+    };
+    let result = exec
+        .execute(&QuerySpec::new(vec![
+            GraphOp::Find(FindOp::new().r#type("Function").name("main")),
+            connect(),
+            connect(),
+        ]))
+        .unwrap();
+    let path = result
+        .paths
+        .iter()
+        .find(|path| path.nodes.last().is_some_and(|node| node.name == "b"))
+        .expect("composed path to b");
+    let names: Vec<&str> = path.nodes.iter().map(|node| node.name.as_str()).collect();
+    assert_eq!(names, vec!["main", "a", "b"]);
+    assert_eq!(path.edges.len(), 2);
+}
+
+#[test]
+fn cursor_pages_are_deterministic_complete_and_query_bound() {
+    let graph = make_test_graph();
+    let (embedder, cache) = make_test_executor_params();
+    let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
+    let mut first = exec
+        .execute(&QuerySpec {
+            ops: vec![GraphOp::Find(FindOp::new().r#type("Function"))],
+            limit: Some(2),
+            ..QuerySpec::default()
+        })
+        .unwrap();
+    assert_eq!(first.count, 2);
+    let names = |result: &QueryResult| {
+        result
+            .nodes
+            .iter()
+            .map(|node| node.name.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(names(&first), vec!["a", "b"]);
+    let cursor = first
+        .meta
+        .as_ref()
+        .unwrap()
+        .next_cursor
+        .clone()
+        .expect("next page");
+    let mut second = exec
+        .execute(&QuerySpec {
+            ops: vec![GraphOp::Find(FindOp::new().r#type("Function"))],
+            cursor: Some(cursor),
+            limit: Some(2),
+            ..QuerySpec::default()
+        })
+        .unwrap();
+    assert_eq!(names(&second), vec!["c", "main"]);
+    let cursor = second
+        .meta
+        .as_ref()
+        .unwrap()
+        .next_cursor
+        .clone()
+        .expect("third page");
+    let third = exec
+        .execute(&QuerySpec {
+            ops: vec![GraphOp::Find(FindOp::new().r#type("Function"))],
+            cursor: Some(cursor.clone()),
+            limit: Some(2),
+            ..QuerySpec::default()
+        })
+        .unwrap();
+    assert_eq!(names(&third), vec!["x", "y"]);
+    assert!(third.meta.as_ref().unwrap().next_cursor.is_none());
+    first.nodes.append(&mut second.nodes);
+    assert_eq!(first.nodes.len() + third.nodes.len(), 6);
+
+    let malformed = exec.execute(&QuerySpec {
+        ops: vec![GraphOp::Find(FindOp::new().r#type("Function"))],
+        cursor: Some("not-a-cursor".into()),
+        ..QuerySpec::default()
+    });
+    assert!(malformed.is_err());
+    let other_query = exec.execute(&QuerySpec {
+        ops: vec![GraphOp::Find(FindOp::new().r#type("Function").name("main"))],
+        cursor: Some(cursor),
+        ..QuerySpec::default()
+    });
+    assert!(other_query.is_err());
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 16, ..ProptestConfig::default() })]
+
+    #[test]
+    fn every_cursor_page_partition_is_complete_unique_and_ordered(page_size in 1usize..8) {
+        let graph = make_test_graph();
+        let (embedder, cache) = make_test_executor_params();
+        let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
+        let mut expected = exec
+            .execute(&QuerySpec {
+                ops: vec![GraphOp::Find(FindOp::new().r#type("Function"))],
+                limit: Some(0),
+                ..QuerySpec::default()
+            })
+            .unwrap()
+            .nodes
+            .into_iter()
+            .map(|node| (node.name.clone(), node.id.clone()))
+            .collect::<Vec<_>>();
+        expected.sort();
+
+        let mut actual = Vec::new();
+        let mut cursor = None;
+        loop {
+            let result = exec
+                .execute(&QuerySpec {
+                    ops: vec![GraphOp::Find(FindOp::new().r#type("Function"))],
+                    cursor,
+                    limit: Some(page_size),
+                    ..QuerySpec::default()
+                })
+                .unwrap();
+            actual.extend(result.nodes.into_iter().map(|node| (node.name, node.id)));
+            cursor = result.meta.and_then(|meta| meta.next_cursor);
+            if cursor.is_none() {
+                break;
+            }
+        }
+        prop_assert_eq!(actual, expected);
+    }
 }

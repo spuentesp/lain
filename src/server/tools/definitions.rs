@@ -16,6 +16,7 @@ pub struct ToolDefinition {
     pub name: &'static str,
     pub description: &'static str,
     pub input_schema: Value,
+    pub output_schema: Option<Value>,
     pub readiness: ReadinessRequirement,
 }
 

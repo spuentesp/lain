@@ -1,0 +1,23 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["target", "risk", "direct_dependents", "transitive_dependents", "untested_dependents", "co_change_partners", "counts"],
+  "properties": {
+    "target": {"type": "object"},
+    "risk": {"type": "string", "enum": ["low", "low* — heuristic-only (see ~ N heuristic caller(s) below)", "medium", "high"]},
+    "direct_dependents": {"type": "array", "items": {"type": "object"}},
+    "transitive_dependents": {"type": "array", "items": {"type": "object"}},
+    "heuristic_dependents": {"type": "array", "items": {"type": "object"}},
+    "untested_dependents": {"type": "array", "items": {"type": "object"}},
+    "co_change_partners": {"type": "array", "items": {"type": "object"}},
+    "counts": {
+      "type": "object",
+      "required": ["direct", "transitive"],
+      "properties": {
+        "direct": {"type": "integer", "minimum": 0},
+        "transitive": {"type": "integer", "minimum": 0},
+        "heuristic": {"type": "integer", "minimum": 0}
+      }
+    }
+  }
+}

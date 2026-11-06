@@ -138,11 +138,8 @@ fn hex_len(s: &str) -> Option<usize> {
 /// Parse one OTLP HTTP/JSON payload into a flat `Vec<SpanRecord>`.
 ///
 /// Flattening `resourceSpans → scopeSpans → spans` is the caller's
-/// choice — the store doesn't care about the nesting. The
-/// translation discards resource + scope attributes for now
-/// (resource-level service-name tags would be useful, but pinning
-/// the basic ingest path is the priority); a follow-up can add
-/// a span attribute for `service.name` if needed.
+/// choice — the store doesn't care about the nesting. Span-local attributes
+/// override resource attributes; scope name/version metadata is authoritative.
 pub fn parse_otlp_json(payload: &[u8]) -> Result<Vec<SpanRecord>, OtlpParseError> {
     let req: OtlpRequest = serde_json::from_slice(payload)?;
 
@@ -150,14 +147,22 @@ pub fn parse_otlp_json(payload: &[u8]) -> Result<Vec<SpanRecord>, OtlpParseError
     for resource in &req.resource_spans {
         for scope in &resource.scope_spans {
             for span in &scope.spans {
-                out.push(translate_span(span)?);
+                out.push(translate_span(
+                    span,
+                    resource.resource.as_ref(),
+                    scope.scope.as_ref(),
+                )?);
             }
         }
     }
     Ok(out)
 }
 
-fn translate_span(span: &Span) -> Result<SpanRecord, OtlpParseError> {
+fn translate_span(
+    span: &Span,
+    resource: Option<&Resource>,
+    scope: Option<&Scope>,
+) -> Result<SpanRecord, OtlpParseError> {
     if hex_len(&span.trace_id) != Some(32) {
         return Err(OtlpParseError::TraceId(span.trace_id.clone()));
     }
@@ -180,12 +185,31 @@ fn translate_span(span: &Span) -> Result<SpanRecord, OtlpParseError> {
     let kind = SpanKind::from_otlp(span.kind).unwrap_or(SpanKind::Internal);
 
     let mut attributes = HashMap::with_capacity(span.attributes.len());
+    if let Some(resource) = resource {
+        for kv in &resource.attributes {
+            if let Some(v) = &kv.value {
+                if let Some(attr) = any_value_to_attr(v) {
+                    attributes.insert(kv.key.clone(), attr);
+                }
+            }
+        }
+    }
     for kv in &span.attributes {
         if let Some(v) = &kv.value {
             if let Some(attr) = any_value_to_attr(v) {
                 attributes.insert(kv.key.clone(), attr);
             }
         }
+    }
+    if let Some(scope) = scope {
+        attributes.insert(
+            "otel.scope.name".to_string(),
+            AttributeValue::Str(scope.name.clone()),
+        );
+        attributes.insert(
+            "otel.scope.version".to_string(),
+            AttributeValue::Str(scope.version.clone()),
+        );
     }
 
     Ok(SpanRecord {
@@ -419,5 +443,91 @@ mod tests {
         let records = parse_otlp_json(payload.as_bytes()).expect("parse");
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].kind, SpanKind::Internal);
+    }
+
+    #[test]
+    fn span_attributes_override_resource_but_not_authoritative_scope_metadata() {
+        let payload = r#"{
+            "resourceSpans": [
+                {
+                    "resource": {"attributes": [
+                        {"key": "service.name", "value": {"stringValue": "resource-a"}}
+                    ]},
+                    "scopeSpans": [{
+                        "scope": {"name": "orders-scope", "version": "1.2.3"},
+                        "spans": [{
+                            "traceId": "00000000000000000000000000000001",
+                            "spanId": "0000000000000001",
+                            "name": "GET /orders",
+                            "endTimeUnixNano": "1700000000000000000",
+                            "attributes": [
+                                {"key": "service.name", "value": {"stringValue": "span-b"}},
+                                {"key": "http.route", "value": {"stringValue": "/orders/:id"}},
+                                {"key": "otel.scope.name", "value": {"stringValue": "span-scope"}},
+                                {"key": "otel.scope.version", "value": {"stringValue": "span-version"}}
+                            ]
+                        }]
+                    }]
+                },
+                {
+                    "resource": {"attributes": [
+                        {"key": "service.name", "value": {"stringValue": "resource-b"}}
+                    ]},
+                    "scopeSpans": [{
+                        "scope": {"name": "billing-scope", "version": "2.0.0"},
+                        "spans": [{
+                            "traceId": "00000000000000000000000000000002",
+                            "spanId": "0000000000000002",
+                            "name": "GET /billing",
+                            "endTimeUnixNano": "1700000000000000000"
+                        }]
+                    }]
+                }
+            ]
+        }"#;
+        let records = parse_otlp_json(payload.as_bytes()).expect("parse");
+        assert_eq!(records.len(), 2);
+        assert_eq!(
+            records[0]
+                .attributes
+                .get("service.name")
+                .and_then(|v| v.as_str()),
+            Some("span-b")
+        );
+        assert_eq!(
+            records[0]
+                .attributes
+                .get("http.route")
+                .and_then(|v| v.as_str()),
+            Some("/orders/:id")
+        );
+        assert_eq!(
+            records[0]
+                .attributes
+                .get("otel.scope.name")
+                .and_then(|v| v.as_str()),
+            Some("orders-scope")
+        );
+        assert_eq!(
+            records[0]
+                .attributes
+                .get("otel.scope.version")
+                .and_then(|v| v.as_str()),
+            Some("1.2.3")
+        );
+        assert_eq!(
+            records[1]
+                .attributes
+                .get("service.name")
+                .and_then(|v| v.as_str()),
+            Some("resource-b")
+        );
+        assert_eq!(
+            records[1]
+                .attributes
+                .get("otel.scope.name")
+                .and_then(|v| v.as_str()),
+            Some("billing-scope")
+        );
     }
 }
