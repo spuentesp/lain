@@ -387,9 +387,17 @@ pub fn resolve_static_edges(
         };
         let Some(candidates) = name_index.get(sr.target_name.as_str()) else {
             if let (Some(resolver), Some(src)) = (resolver, source_repo) {
-                if let Some(gid) =
-                    resolver.resolve_cross_repo(src, Some(&sr.target_name), None, None)
-                {
+                let resolved = sr
+                    .qualifier
+                    .as_deref()
+                    .filter(|qualifier| qualifier.starts_with(|c: char| c.is_ascii_uppercase()))
+                    .map_or_else(
+                        || resolver.resolve_cross_repo(src, Some(&sr.target_name), None, None),
+                        |qualifier| {
+                            resolver.resolve_cross_repo_qualified(src, &sr.target_name, qualifier)
+                        },
+                    );
+                if let Some(gid) = resolved {
                     let gid_str = gid.as_str().to_string();
                     if gid_str != source_id {
                         let key = (source_id.to_string(), gid_str.clone());
@@ -463,15 +471,42 @@ pub fn resolve_static_edges(
                 .copied()
                 .filter(|(id, _, _)| container_of(id).as_deref() == Some(q.as_str()))
                 .collect();
-            if !own.is_empty() {
+            if q.starts_with(|c: char| c.is_ascii_uppercase()) {
+                // A type-qualified call with no local method on that type
+                // may target a declared dependency (`Bytes::from_static`).
+                // Prefer an exact dependency match over same-named local
+                // methods: a local crate can define a type with the same name
+                // as an imported dependency type. The federation resolver
+                // checks both dependency and exact container ownership.
+                let external = resolver
+                    .zip(source_repo)
+                    .and_then(|(resolver, source_repo)| {
+                        resolver.resolve_cross_repo_qualified(source_repo, &sr.target_name, q)
+                    });
+                if let Some(gid) = external {
+                    let target_id = gid.as_str().to_string();
+                    if target_id != source_id {
+                        let key = (source_id.to_string(), target_id.clone());
+                        if seen.insert(key) {
+                            edges.push(GraphEdge::new(
+                                sr.edge_type.clone(),
+                                source_id.to_string(),
+                                target_id,
+                            ));
+                        }
+                    }
+                    continue;
+                }
+                if !own.is_empty() {
+                    own
+                } else {
+                    // `String::new()` beside a local `Registry::new` is not a
+                    // call to Registry. If no exact qualified external target
+                    // exists, leave the reference unresolved.
+                    continue;
+                }
+            } else if !own.is_empty() {
                 own
-            } else if q.starts_with(|c: char| c.is_ascii_uppercase())
-                && candidates
-                    .iter()
-                    .any(|(id, _, _)| container_of(id).is_some())
-            {
-                // `String::new()` beside a repo `Registry::new`.
-                continue;
             } else {
                 candidates
             }
@@ -718,6 +753,7 @@ pub fn resolve_pattern_edges(
 #[cfg(test)]
 mod ambiguous_name_tests {
     use super::*;
+    use crate::federation::repo_id::GlobalId;
     use crate::graph::GraphDatabase;
     use crate::schema::{GraphNode, NodeType};
 
@@ -726,6 +762,71 @@ mod ambiguous_name_tests {
         n.line_start = Some(lines.0);
         n.line_end = Some(lines.1);
         n
+    }
+
+    struct QualifiedResolver;
+
+    impl CrossRepoResolver for QualifiedResolver {
+        fn resolve_cross_repo(
+            &self,
+            _source_repo: &RepoId,
+            _name: Option<&str>,
+            _hint_path: Option<&Path>,
+            _hint_line: Option<u32>,
+        ) -> Option<GlobalId> {
+            None
+        }
+
+        fn resolve_cross_repo_qualified(
+            &self,
+            _source_repo: &RepoId,
+            name: &str,
+            qualifier: &str,
+        ) -> Option<GlobalId> {
+            (name == "from_static" && qualifier == "Bytes")
+                .then(|| GlobalId::from_canonical("bytes:Method:src/bytes.rs:from_static:10"))
+        }
+    }
+
+    #[test]
+    fn a_qualified_external_call_beats_same_named_local_methods() {
+        let tmp = std::env::temp_dir().join("lain_resolve_qualified_external");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let db = GraphDatabase::new(&tmp).unwrap();
+
+        let caller = fn_node("caller", "src/client.rs", (1, 20));
+        let caller_id = caller.id.clone();
+        let mut unrelated = fn_node("from_static", "src/other.rs", (1, 5));
+        unrelated.container = Some("OtherType".into());
+        db.upsert_node(caller).unwrap();
+        db.upsert_node(unrelated).unwrap();
+        let mut local_bytes = fn_node("from_static", "src/bytes.rs", (1, 5));
+        local_bytes.container = Some("Bytes".into());
+        db.upsert_node(local_bytes).unwrap();
+
+        let reference = StaticFileRef {
+            file_path: "src/client.rs".into(),
+            source_line: 10,
+            target_name: "from_static".into(),
+            edge_type: EdgeType::Calls,
+            foreign_receiver: true,
+            self_receiver: false,
+            qualifier: Some("Bytes".into()),
+        };
+        let source_repo = RepoId::new("tokio").unwrap();
+
+        let edges = resolve_static_edges(
+            &db,
+            &[reference],
+            Some(&QualifiedResolver),
+            Some(&source_repo),
+        );
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].source_id, caller_id);
+        assert_eq!(
+            edges[0].target_id,
+            "bytes:Method:src/bytes.rs:from_static:10"
+        );
     }
 
     /// A reference to a name that several definitions share must not

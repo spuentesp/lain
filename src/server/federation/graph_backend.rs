@@ -212,6 +212,7 @@ pub struct PetgraphBackend {
 
 impl PetgraphBackend {
     pub fn new(data_dir: &Path) -> Result<Self, LainError> {
+        let _open_timing = super::startup_cache::StartupTiming::start("federation_graph_open");
         let bin_path = data_dir.join("federated_graph.bin");
         let payload_path = payload_path_for(&bin_path);
 
@@ -244,6 +245,8 @@ impl PetgraphBackend {
                     });
                 }
                 let payload = &bytes[FEDERATION_GRAPH_HEADER_LEN..];
+                let validate_timing =
+                    super::startup_cache::StartupTiming::start("federation_payload_validation");
                 GraphDatabase::validate_persisted_payload(payload).map_err(|error| {
                     tracing::warn!(
                         "Rejecting corrupt federation graph payload at {}: {error}. Run `lain reindex` to rebuild.",
@@ -253,17 +256,25 @@ impl PetgraphBackend {
                         reason: error.to_string(),
                     }
                 })?;
+                drop(validate_timing);
+                let write_timing =
+                    super::startup_cache::StartupTiming::start("federation_payload_write");
                 std::fs::write(&payload_path, payload)?;
+                drop(write_timing);
             }
         }
 
+        let decode_timing = super::startup_cache::StartupTiming::start("federation_database_load");
         let db = GraphDatabase::new(&payload_path)?;
+        drop(decode_timing);
+        let index_timing = super::startup_cache::StartupTiming::start("federation_global_id_index");
         let index = DashMap::new();
         for node in db.get_all_nodes() {
             if let Ok(global_id) = GlobalId::parse(&node.id) {
                 index.insert(node.id, global_id);
             }
         }
+        drop(index_timing);
         Ok(Self {
             db,
             index,

@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
 /// A raw call/type-usage reference from tree-sitter, not yet resolved to node IDs.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct StaticFileRef {
     pub file_path: String,
     pub source_line: u32,

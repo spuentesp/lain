@@ -1780,6 +1780,11 @@ impl GraphDatabase {
         }
     }
 
+    /// Check availability without cloning the reference list.
+    pub(crate) fn has_cached_static_refs(&self) -> bool {
+        self.cached_static_refs.lock().is_some()
+    }
+
     /// Return a snapshot of the cached `StaticFileRef`s if available.
     pub(crate) fn get_cached_static_refs(
         &self,

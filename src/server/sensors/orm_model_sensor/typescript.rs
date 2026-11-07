@@ -3,7 +3,7 @@ use super::{add_column, add_model, OrmAnalysis};
 use crate::schema::StaticSource;
 use crate::server::sensors::patterns::Patterns;
 use crate::server::sensors::util::{language_for, parse_for_lang, to_snake_case, Lang};
-use tree_sitter::{Node, Query, QueryCursor, StreamingIterator};
+use tree_sitter::{Node, Query, QueryCursor, StreamingIterator, Tree};
 
 pub(super) fn string_literal(node: Node, src: &[u8]) -> Option<String> {
     if node.kind() != "string" {
@@ -200,38 +200,17 @@ fn analyze_typeorm_file(
     analysis: &mut OrmAnalysis,
     path: &str,
     content: &str,
-    patterns: &Patterns,
-    lang: Lang,
+    query: &Query,
+    tree: &Tree,
 ) {
-    let bucket = match lang {
-        Lang::Ts => "ts",
-        Lang::Tsx => "tsx",
-        _ => return,
-    };
-    let key = format!("{bucket}/typeorm-orm-model.scm");
-    let Ok(queries) = patterns.compiled_queries() else {
+    let Some(decorator_index) = capture_index(query, "orm_decorator") else {
         return;
     };
-    let Some((_, _, _, body)) = queries
-        .iter()
-        .find(|(candidate, _, _, _)| *candidate == key)
-    else {
-        return;
-    };
-    let Ok(query) = Query::new(&language_for(lang), body) else {
-        return;
-    };
-    let Some(decorator_index) = capture_index(&query, "orm_decorator") else {
-        return;
-    };
-    let Some(name_index) = capture_index(&query, "decorator") else {
-        return;
-    };
-    let Some(tree) = parse_for_lang(lang, content) else {
+    let Some(name_index) = capture_index(query, "decorator") else {
         return;
     };
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&query, tree.root_node(), content.as_bytes());
+    let mut matches = cursor.matches(query, tree.root_node(), content.as_bytes());
     while let Some(matched) = matches.next() {
         let decorator = matched
             .captures
@@ -354,41 +333,20 @@ fn analyze_drizzle_file(
     analysis: &mut OrmAnalysis,
     path: &str,
     content: &str,
-    patterns: &Patterns,
-    lang: Lang,
+    query: &Query,
+    tree: &Tree,
 ) {
-    let bucket = match lang {
-        Lang::Ts => "ts",
-        Lang::Tsx => "tsx",
-        _ => return,
-    };
-    let key = format!("{bucket}/drizzle-orm-model.scm");
-    let Ok(queries) = patterns.compiled_queries() else {
+    let Some(table_index) = capture_index(query, "table") else {
         return;
     };
-    let Some((_, _, _, body)) = queries
-        .iter()
-        .find(|(candidate, _, _, _)| *candidate == key)
-    else {
+    let Some(name_index) = capture_index(query, "table_name") else {
         return;
     };
-    let Ok(query) = Query::new(&language_for(lang), body) else {
-        return;
-    };
-    let Some(table_index) = capture_index(&query, "table") else {
-        return;
-    };
-    let Some(name_index) = capture_index(&query, "table_name") else {
-        return;
-    };
-    let Some(columns_index) = capture_index(&query, "columns") else {
-        return;
-    };
-    let Some(tree) = parse_for_lang(lang, content) else {
+    let Some(columns_index) = capture_index(query, "columns") else {
         return;
     };
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&query, tree.root_node(), content.as_bytes());
+    let mut matches = cursor.matches(query, tree.root_node(), content.as_bytes());
     while let Some(matched) = matches.next() {
         let table = matched
             .captures
@@ -416,22 +374,58 @@ fn analyze_drizzle_file(
     record_dynamic_drizzle_tables(analysis, path, tree.root_node(), content.as_bytes());
 }
 
-pub(super) fn analyze_typeorm(
-    analysis: &mut OrmAnalysis,
-    path: &str,
-    content: &str,
-    patterns: &Patterns,
-    lang: Lang,
-) {
-    analyze_typeorm_file(analysis, path, content, patterns, lang);
+/// Queries live for one scan, so overrides are respected without compiling
+/// the same four queries thousands of times. Each file is parsed once.
+pub(super) struct Analyzer {
+    ts: (Option<Query>, Option<Query>),
+    tsx: (Option<Query>, Option<Query>),
 }
 
-pub(super) fn analyze_drizzle(
-    analysis: &mut OrmAnalysis,
-    path: &str,
-    content: &str,
-    patterns: &Patterns,
-    lang: Lang,
-) {
-    analyze_drizzle_file(analysis, path, content, patterns, lang);
+impl Analyzer {
+    pub(super) fn new(patterns: &Patterns) -> Self {
+        let compile = |lang, bucket: &str, name: &str| {
+            let queries = patterns.compiled_queries().ok()?;
+            let key = format!("{bucket}/{name}-orm-model.scm");
+            let (_, _, _, body) = queries
+                .iter()
+                .find(|(candidate, _, _, _)| *candidate == key)?;
+            Query::new(&language_for(lang), body).ok()
+        };
+        Self {
+            ts: (
+                compile(Lang::Ts, "ts", "drizzle"),
+                compile(Lang::Ts, "ts", "typeorm"),
+            ),
+            tsx: (
+                compile(Lang::Tsx, "tsx", "drizzle"),
+                compile(Lang::Tsx, "tsx", "typeorm"),
+            ),
+        }
+    }
+
+    pub(super) fn analyze(
+        &self,
+        analysis: &mut OrmAnalysis,
+        path: &str,
+        content: &str,
+        lang: Lang,
+    ) {
+        let (drizzle, typeorm) = match lang {
+            Lang::Ts => &self.ts,
+            Lang::Tsx => &self.tsx,
+            _ => return,
+        };
+        if drizzle.is_none() && typeorm.is_none() {
+            return;
+        }
+        let Some(tree) = parse_for_lang(lang, content) else {
+            return;
+        };
+        if let Some(query) = drizzle {
+            analyze_drizzle_file(analysis, path, content, query, &tree);
+        }
+        if let Some(query) = typeorm {
+            analyze_typeorm_file(analysis, path, content, query, &tree);
+        }
+    }
 }

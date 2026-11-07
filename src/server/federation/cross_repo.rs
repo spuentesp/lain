@@ -51,6 +51,21 @@ pub trait CrossRepoResolver: Send + Sync {
         hint_line: Option<u32>,
     ) -> Option<GlobalId>;
 
+    /// Resolve a type-qualified call such as `Bytes::from_static()`.
+    ///
+    /// The default preserves compatibility for lightweight resolver
+    /// implementations. Federation resolvers should use `qualifier` to
+    /// select a method on that type, so a same-named method on an unrelated
+    /// dependency cannot become a false edge.
+    fn resolve_cross_repo_qualified(
+        &self,
+        source_repo: &RepoId,
+        name: &str,
+        _qualifier: &str,
+    ) -> Option<GlobalId> {
+        self.resolve_cross_repo(source_repo, Some(name), None, None)
+    }
+
     /// Refresh any cached index the resolver holds so the just-indexed
     /// repo's symbols become visible to subsequent cross-repo lookups.
     /// Called by the ingest pipeline after nodes are inserted into the

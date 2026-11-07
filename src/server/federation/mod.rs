@@ -17,6 +17,7 @@ pub mod readiness;
 pub mod repo_id;
 pub mod repo_index;
 pub mod repo_source;
+pub(crate) mod startup_cache;
 pub mod workspace;
 
 #[cfg(test)]

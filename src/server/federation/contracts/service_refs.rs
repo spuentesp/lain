@@ -204,16 +204,21 @@ pub fn extract_service_refs(
 ) -> Vec<ServiceRef> {
     let usage = classify_usage(path);
     let mut refs = Vec::new();
+    let mut scanned = 0;
+    let mut line = 1;
     for caps in url_host_re().captures_iter(content) {
         let whole = caps.get(0).expect("group 0 always present");
         let host_match = caps.get(1).expect("group 1 always present");
         let raw_host = host_match.as_str();
         let host = raw_host.to_ascii_lowercase();
-        let line = content[..whole.start()]
+        // Matches arrive in source order. Count each prefix byte once rather
+        // than rescanning the entire file for every URL (large trace artifacts
+        // can contain thousands of references).
+        line += content[scanned..whole.start()]
             .bytes()
             .filter(|b| *b == b'\n')
-            .count() as u32
-            + 1;
+            .count() as u32;
+        scanned = whole.start();
         let literal = whole.as_str();
         let scheme = literal.split_once("://").map_or("http", |(s, _)| s);
         let after_host = &content[host_match.end()..whole.end()];
@@ -347,6 +352,22 @@ pub fn scan_workspace(
 #[cfg(test)]
 mod usage_tests {
     use super::*;
+
+    #[test]
+    fn reference_lines_match_source_with_unicode_and_repeated_urls() {
+        let content = "α\r\nhttps://one.test/a https://two.test/b\n\n".repeat(2_000);
+        let refs = extract_service_refs(
+            "trace.json",
+            &content,
+            &EnvScope::default(),
+            None,
+            &|_, _| false,
+        );
+        assert_eq!(refs.len(), 4_000);
+        for (index, reference) in refs.iter().enumerate() {
+            assert_eq!(reference.line, (index / 2 * 3 + 2) as u32);
+        }
+    }
 
     #[test]
     fn prose_is_documentation_not_production() {

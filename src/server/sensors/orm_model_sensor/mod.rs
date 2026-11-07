@@ -132,6 +132,7 @@ pub fn analyze_orm_models(root: &Path) -> OrmAnalysis {
     });
     let django_models = django::DjangoModelMap::load(root, patterns.django_orm_shapes());
     let mut analysis = OrmAnalysis::default();
+    let typescript_analyzer = typescript::Analyzer::new(&patterns);
     for (path, content, extension) in crate::server::sensors::util::scan_files(root, |path| {
         path.extension()
             .and_then(|e| e.to_str())
@@ -150,8 +151,7 @@ pub fn analyze_orm_models(root: &Path) -> OrmAnalysis {
                 } else {
                     crate::server::sensors::util::Lang::Ts
                 };
-                typescript::analyze_drizzle(&mut analysis, &path, &content, &patterns, lang);
-                typescript::analyze_typeorm(&mut analysis, &path, &content, &patterns, lang);
+                typescript_analyzer.analyze(&mut analysis, &path, &content, lang);
             }
             "js" | "jsx" => {
                 javascript::analyze_sequelize(&mut analysis, &path, &content, &patterns)

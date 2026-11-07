@@ -5,6 +5,8 @@ All notable changes to LAIN are documented here. Versions follow
 
 ## Unreleased
 
+- Reuse validated completed federation checkpoints on unchanged startup, retain live watchers after cache hits, and support `LAIN_REQUIRE_STARTUP_CACHE=1` for prepared-cache-only launches. Share checksum-validated static reference artifacts within a bounded disk cache, defer cross-repo projection until local indexing completes, retract obsolete derived references without repeating peer matching, prune unselected repo nodes, reuse identical signature matches, and compile TypeScript ORM queries once per scan. Count service-reference lines incrementally instead of rescanning the file per URL. Graph serialization is unchanged. See `docs/STARTUP_CACHE.md`.
+
 - Index Rust gRPC declarations and lexical context once per file, and reuse compiled detection queries across workspace scans, avoiding repeated whole-tree scope searches on large Rust files while preserving identity evidence and ambiguity checks.
 - Bind raw graph and code reads to named snapshots, with errors instead of live fallback when a snapshot or repo is unavailable.
 - Add schema-valid structured output to raw analysis tools and `search_code`, preserve their text output, and expose `get_contract` provider handlers as `{repo, file, symbol}`.

@@ -303,3 +303,40 @@ mod tests {
         assert!(err.contains("missing analyzer_rev"), "got {err}");
     }
 }
+
+/// Order-independent fingerprint of a serving federation. Hash each normalized
+/// node/edge separately and sort only the 33-byte tagged hashes, avoiding a
+/// second in-memory copy of the whole federation. Runtime sync timestamps,
+/// hydration and embeddings are excluded as in `canonical_digest`.
+pub fn federation_content_digest(
+    backend: &dyn crate::federation::graph_backend::GraphBackend,
+) -> Result<blake3::Hash, crate::error::LainError> {
+    let mut entries: Vec<[u8; 33]> = Vec::new();
+    backend.visit_nodes(&mut |node| {
+        let mut node = node.clone();
+        node.last_lsp_sync = None;
+        node.last_git_sync = None;
+        node.is_hydrated = false;
+        node.embedding = None;
+        let bytes = bincode::serde::encode_to_vec(&node, bincode::config::legacy())
+            .expect("GraphNode encode");
+        let mut entry = [0; 33];
+        entry[0] = b'n';
+        entry[1..].copy_from_slice(blake3::hash(&bytes).as_bytes());
+        entries.push(entry);
+    })?;
+    backend.visit_edges(&mut |edge| {
+        let bytes = bincode::serde::encode_to_vec(edge, bincode::config::legacy())
+            .expect("GraphEdge encode");
+        let mut entry = [0; 33];
+        entry[0] = b'e';
+        entry[1..].copy_from_slice(blake3::hash(&bytes).as_bytes());
+        entries.push(entry);
+    })?;
+    entries.sort_unstable();
+    let mut hash = blake3::Hasher::new();
+    for entry in entries {
+        hash.update(&entry);
+    }
+    Ok(hash.finalize())
+}
