@@ -226,16 +226,19 @@ def _single_repo_flow(args, env, repo, lain):
     record("first query: lain oneshot get_blast_radius", want <= got,
            f"direct+indirect callers include {sorted(want)}: {sorted(want & got)} (of {len(got)})")
 
-    out = subprocess.run([lain, "doctor"], cwd=repo, env=env, capture_output=True, text=True)
-    record("lain doctor: ready after indexing", out.returncode == 0 and "Agent-ready: YES" in out.stdout,
-           f"exit {out.returncode}; {out.stdout.strip().splitlines()[-1] if out.stdout.strip() else out.stderr[-200:]}")
-
     mcp = Mcp(lain, repo, env)
     mcp.wait_ready()
+    # `doctor` assesses the persisted `.lain/graph.bin` snapshot, not a
+    # live daemon's in-memory graph. Check it only after this isolated MCP
+    # server has completed indexing and persisted the snapshot.
+    out = subprocess.run([lain, "doctor"], cwd=repo, env=env, capture_output=True, text=True)
+    doctor_ready = out.returncode == 0 and "Agent-ready: YES" in out.stdout
+    record("lain doctor: ready after persisted indexing", doctor_ready,
+           f"exit {out.returncode}; {out.stdout.strip().splitlines()[-1] if out.stdout.strip() else out.stderr[-200:]}")
     c = mcp.call
     t = c("find_symbol", {"name": "prepare_request"})
     record("find_symbol finds a method", "src/requests/sessions.py" in t, t.splitlines()[2] if len(t.splitlines()) > 2 else t[:200])
-    t = c("search_code", {"query": "proxy bypass environment"})
+    t = c("search_code", {"query": "proxy bypass environment", "mode": "lexical", "limit": 10})
     names = re.findall(r"^\d+\. \*\*(\w+)\*\*", t, re.M)
     record("search_code: search by name/meaning without a model",
            "should_bypass_proxies" in names[:5], f"top results {names[:5]}")
@@ -255,9 +258,11 @@ def _single_repo_flow(args, env, repo, lain):
            (re.search(r"verdict: \S+", t) or re.search(r".*", t)).group(0))
     t = c("get_coupling_radar", {"symbol": "src/requests/sessions.py"})
     record("co-change radar from git history", "co-change with" in t, t.strip().splitlines()[0][:160])
-    t = c("understand_repository", {})
-    record("understand_repository reports semantic search honestly",
-           '"semantic_search"' in t and "unavailable_optional" in t.split('"semantic_search"')[1][:80], "no model loaded")
+    caps = json.loads(c("get_capabilities", {}))
+    semantic = caps.get("capabilities", {}).get("semantic_search", {})
+    record("get_capabilities reports optional semantic search honestly",
+           semantic.get("state") == "unavailable_optional" and semantic.get("optional") is True,
+           f"state={semantic.get('state')} optional={semantic.get('optional')} reason={semantic.get('reason')}")
 
     # Coordination: two agents, one file.
     a = json.loads(c("register_agent", {"name": "alpha", "kind": "claude-code", "mode": "interactive"}))
@@ -287,11 +292,27 @@ def _multi_repo_flow(args, env, d, lain, port):
     r1 = run("repos", "add", "bytes", "https://github.com/tokio-rs/bytes.git")
     r2 = run("repos", "add", "tokio", "https://github.com/tokio-rs/tokio.git")
     r3 = run("workspaces", "create", "tokio-stack", "--members", "bytes,tokio")
-    repos = open(os.path.join(d, "repos.yaml")).read()
+    # Pin the real-project example so upstream master changes cannot silently
+    # change what this acceptance claim means.
+    repos_path = os.path.join(d, "repos.yaml")
+    repos = open(repos_path).read()
+    repos = repos.replace(
+        "url: https://github.com/tokio-rs/bytes.git\n    ref: master",
+        "url: https://github.com/tokio-rs/bytes.git\n    ref: 62207901b65e4fc51459b2d558fad8aa882f5d33",
+    )
+    repos = repos.replace(
+        "url: https://github.com/tokio-rs/tokio.git\n    ref: master",
+        "url: https://github.com/tokio-rs/tokio.git\n    ref: c0c77a7a204be4ea60d4da45e1a346ce06ffa7d3",
+    )
+    with open(repos_path, "w") as f:
+        f.write(repos)
     record("repos add + workspaces create keep both repos", "id: bytes" in repos and "id: tokio" in repos
            and os.path.exists(os.path.join(d, "workspaces.yaml")), (r1.stdout + r2.stdout + r3.stdout).strip().replace("\n", " | "))
+    server_log_path = os.path.join(d, "server.log")
+    server_log = open(server_log_path, "w")
+    server_env = {**env, "RUST_LOG": "info"}
     srv = subprocess.Popen([lain, "server", "--config", "./repos.yaml", "--transport", "http", "--port", str(port)],
-                           cwd=d, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                           cwd=d, env=server_env, stdout=subprocess.DEVNULL, stderr=server_log)
     try:
         url = f"http://127.0.0.1:{port}"
         for _ in range(900):
@@ -313,17 +334,26 @@ def _multi_repo_flow(args, env, d, lain, port):
             time.sleep(2)
         code = urllib.request.urlopen(url + "/", timeout=10).status
         record("Command Center serves", code == 200, f"GET / -> {code}")
-        t = call("get_cross_repo_blast_radius_for_repo", {"repo_id": "bytes", "symbol": "put_slice", "depth": "1..2"})
+        # Tokio's put_slice calls target its own ReadBuf/BufMut APIs, not
+        # bytes::BufMut. The Tokio UDP example directly calls
+        # bytes::Bytes::copy_from_slice; the type qualifier disambiguates it
+        # from the same-named UninitSlice method in bytes.
+        t = call("get_cross_repo_blast_radius_for_repo", {"repo_id": "bytes", "symbol": "copy_from_slice", "depth": "1..2"})
         by = json.loads(t).get("by_repo", {}) if t.startswith("{") else {}
-        record("cross-repo blast radius: tokio callers of bytes' put_slice", len(by.get("tokio", [])) > 0,
+        record("cross-repo blast radius: tokio callers of bytes::Bytes::copy_from_slice", len(by.get("tokio", [])) > 0,
                f"by repo: { {k: len(v) for k, v in by.items()} }")
         t = call("search_org", {"query": "put_slice", "limit": 10})
-        record("search_org finds symbols across repos", "bytes" in t and "tokio" in t, t[:160])
+        record("search_org finds same-name symbols across repos", "bytes" in t and "tokio" in t, t[:160])
         t = call("get_health", {})
         record("get_health answers on a multi-repo server", "Repositories:** 2" in t, t.strip().splitlines()[0])
     finally:
         srv.terminate()
         srv.wait(timeout=30)
+        server_log.close()
+        with open(server_log_path) as log:
+            for line in log:
+                if "linked " in line or "cross-repo link" in line:
+                    print(f"SERVER  {line.strip()}", flush=True)
 
 
 # Plain-English questions about psf/requests whose answers do not share
@@ -404,9 +434,13 @@ def main():
     os.makedirs(home, exist_ok=True)
     # A clean user: no config, no installed language servers from the
     # caller's environment, no MCP client configs touched.
-    env = {**os.environ, "HOME": home, "XDG_CONFIG_HOME": os.path.join(home, ".config"),
+    env = {**os.environ, "HOME": home, "XDG_DATA_HOME": os.path.join(home, ".local", "share"),
+           "XDG_CONFIG_HOME": os.path.join(home, ".config"),
            "XDG_STATE_HOME": os.path.join(home, ".state"), "XDG_CACHE_HOME": os.path.join(home, ".cache"),
+           "XDG_RUNTIME_DIR": os.path.join(home, ".runtime"),
+           "LAIN_ONESHOT_NO_SHARE": "1", "LAIN_MCP_NO_SHARE": "1",
            "LAIN_TOOL_PROFILE": "full"}
+    os.makedirs(env["XDG_RUNTIME_DIR"], mode=0o700, exist_ok=True)
     print(f"lain: {subprocess.run([args.lain, '--version'], capture_output=True, text=True).stdout.strip()}\n")
     check_languages(args, env)
     check_single_repo_flow(args, env)
