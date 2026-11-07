@@ -58,6 +58,7 @@ use std::path::Path;
 use tree_sitter::{Node, Query, QueryCursor, StreamingIterator};
 
 type OutboundQueries = BTreeMap<String, Option<Query>>;
+mod js_resolution;
 
 #[cfg(test)]
 thread_local! {
@@ -160,7 +161,7 @@ pub fn scan_workspace_clients(
             .par_iter()
             .map(|(path, content, lang)| {
                 crate::server::sensors::util::with_current_patterns(patterns, || {
-                    detect_calls_with_queries(path, content, *lang, patterns, shared)
+                    detect_calls_with_queries(path, content, *lang, patterns, shared, Some(root))
                 })
             })
             .collect();
@@ -213,7 +214,7 @@ pub fn detect_calls(
 ) -> Vec<HttpClientCall> {
     let mut queries = OutboundQueries::new();
     ensure_outbound_queries(&mut queries, patterns, lang);
-    detect_calls_with_queries(path, content, lang, patterns, &queries)
+    detect_calls_with_queries(path, content, lang, patterns, &queries, None)
 }
 
 // A cache belongs to one scan's immutable Patterns, never to a process or
@@ -246,13 +247,18 @@ fn detect_calls_with_queries(
     lang: Lang,
     patterns: &Patterns,
     queries: &OutboundQueries,
+    workspace: Option<&Path>,
 ) -> Vec<HttpClientCall> {
     let Some(tree) = parse_for_lang(lang, content) else {
         return Vec::new();
     };
     let src = content.as_bytes();
     let path_str = path.to_string_lossy().to_string();
-    let ctx = FileContext::collect(tree.root_node(), src, lang);
+    let mut ctx = FileContext::collect(tree.root_node(), src, lang);
+    if matches!(lang, Lang::TsJs | Lang::Ts | Lang::Tsx) {
+        ctx.js = true;
+    }
+    let mut imports_loaded = !ctx.js || workspace.is_none();
 
     let mut calls: Vec<HttpClientCall> = Vec::new();
     let lang_yaml = lang_yaml_key(lang);
@@ -297,6 +303,12 @@ fn detect_calls_with_queries(
             let Some(call_node) = call_node else {
                 continue;
             };
+            if !imports_loaded {
+                if let Some(root) = workspace {
+                    ctx.imported = js_resolution::imports(root, path, tree.root_node(), src);
+                }
+                imports_loaded = true;
+            }
 
             if let Some(call) = process_outbound_match(
                 framework, call_node, lib_node, verb_node, url_node, src, &ctx, &path_str, lang,
@@ -654,11 +666,19 @@ fn build_call(
     let url_scope_chain = url.map(scope_chain).unwrap_or_default();
     let host = host_for(&raw_parts, Some((ctx, &url_scope_chain)));
     let normalized = normalize(&raw_parts);
-    let final_url = if matches!(host, HostPart::None) {
+    let mut final_url = if matches!(host, HostPart::None) {
         normalized
     } else {
         NormalizedUrl { host, ..normalized }
     };
+    // An opaque full URL is not evidence of a request to the root route.
+    if matches!(raw_parts.as_slice(), [UrlPart::Hole(_)])
+        || raw_parts
+            .iter()
+            .any(|p| matches!(p, UrlPart::Hole(s) if s.starts_with("conditional: ")))
+    {
+        final_url.template = None;
+    }
     let url_source = match url {
         Some(u) => text_of(u, src).unwrap_or_default(),
         None => String::new(),
@@ -861,39 +881,13 @@ fn method_from_request_shape(call: Node, src: &[u8]) -> MethodSpec {
 /// absent or has no `method` key.
 fn method_from_init_object(call: Node, src: &[u8]) -> MethodSpec {
     let args = args_of_tsjs(call);
-    let init = match args.get(1) {
-        Some(n) => n,
-        None => return MethodSpec::Known(HttpMethod::Get),
+    let Some(init) = args.get(1) else {
+        return MethodSpec::Known(HttpMethod::Get);
     };
     if init.kind() != "object" {
-        return MethodSpec::Known(HttpMethod::Get);
-    }
-    let mut cursor = init.walk();
-    for child in init.children(&mut cursor) {
-        if child.kind() != "pair" {
-            continue;
-        }
-        let key = match child.child_by_field_name("key") {
-            Some(k) => k,
-            None => continue,
-        };
-        let key_text = text_of(key, src).unwrap_or_default();
-        if key_text != "method" {
-            continue;
-        }
-        let value = match child.child_by_field_name("value") {
-            Some(v) => v,
-            None => return MethodSpec::Known(HttpMethod::Get),
-        };
-        if value.kind() == "string" {
-            if let Some(text) = text_of(value, src) {
-                let cleaned = strip_js_string_quotes(&text).to_ascii_lowercase();
-                return method_from_verb(&cleaned);
-            }
-        }
         return MethodSpec::Unknown;
     }
-    MethodSpec::Known(HttpMethod::Get)
+    method_from_object(init, src).unwrap_or(MethodSpec::Known(HttpMethod::Get))
 }
 
 /// Read the method from an `axios(url)` / `axios({method, url})` /
@@ -927,25 +921,48 @@ fn method_from_axios_shape(call: Node, url: Option<Node>, src: &[u8]) -> MethodS
 }
 
 fn method_from_object(obj: &Node, src: &[u8]) -> Option<MethodSpec> {
+    // JavaScript applies properties in order. A later spread/computed key can
+    // replace a method, while a later explicit method overrides that spread.
+    let mut method = None;
     let mut cursor = obj.walk();
-    for child in obj.children(&mut cursor) {
+    for child in obj.named_children(&mut cursor) {
+        if child.kind() == "spread_element" {
+            method = Some(MethodSpec::Unknown);
+            continue;
+        }
+        if child.kind() == "shorthand_property_identifier" {
+            if text_of(child, src).as_deref() == Some("method") {
+                method = Some(MethodSpec::Unknown);
+            }
+            continue;
+        }
         if child.kind() != "pair" {
+            if child.kind() != "comment" {
+                method = Some(MethodSpec::Unknown);
+            }
             continue;
         }
         let key = child.child_by_field_name("key");
+        if key.is_some_and(|k| k.kind() == "computed_property_name") {
+            method = Some(MethodSpec::Unknown);
+            continue;
+        }
         let key_text = key.and_then(|k| text_of(k, src)).unwrap_or_default();
-        if key_text == "method" {
-            let value = child.child_by_field_name("value")?;
+        if strip_js_string_quotes(&key_text) != "method" {
+            continue;
+        }
+        method = Some(MethodSpec::Unknown);
+        if let Some(value) = child.child_by_field_name("value") {
             if value.kind() == "string" {
                 if let Some(text) = text_of(value, src) {
-                    let cleaned = strip_js_string_quotes(&text).to_ascii_lowercase();
-                    return Some(method_from_verb(&cleaned));
+                    method = Some(method_from_verb(
+                        &strip_js_string_quotes(&text).to_ascii_lowercase(),
+                    ));
                 }
             }
-            return Some(MethodSpec::Unknown);
         }
     }
-    None
+    method
 }
 
 /// Read the method from `http.NewRequest(method, url, body)` /
@@ -979,8 +996,10 @@ fn method_from_newrequest_shape(call: Node, src: &[u8]) -> MethodSpec {
 
 // ─── File context: identifiers and client bindings ────────────────────
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 struct FileContext {
+    js: bool,
+    imported: BTreeMap<String, js_resolution::Value>,
     /// Module-level `name → assigned expression text`. Only the names
     /// with a single module-level assignment are used for resolution.
     module_assignments: BTreeMap<String, String>,
@@ -1213,6 +1232,33 @@ fn is_client_ctor(lib: &str, ctor: &str) -> bool {
 
 fn collect_tsjs_context(root: Node, src: &[u8], ctx: &mut FileContext) {
     walk(root, &mut |node| match node.kind() {
+        "function_declaration" | "function_expression" | "arrow_function" | "method_definition" => {
+            // Parameters shadow module constants and imports, including when
+            // they have no assignment expression of their own.
+            let params = node
+                .child_by_field_name("parameters")
+                .or_else(|| node.child_by_field_name("parameter"));
+            if let Some(params) = params {
+                walk(params, &mut |param| {
+                    if param.kind() == "identifier" {
+                        if let Some(name) = text_of(param, src) {
+                            ctx.fn_assign_counts
+                                .insert((node.start_byte() as u32, name), 2);
+                        }
+                    }
+                });
+            }
+            if node.kind() == "function_declaration" && is_module_level(node) {
+                if let Some(name) = node
+                    .child_by_field_name("name")
+                    .and_then(|n| text_of(n, src))
+                {
+                    if let Some(value) = text_of(node, src) {
+                        record_assignment(ctx, &AssignmentScope::Module, &name, &value);
+                    }
+                }
+            }
+        }
         "lexical_declaration" | "variable_declaration" => {
             // A declaration inside a function is in that function's
             // scope; one at the top level is module level. Before,
@@ -1236,6 +1282,15 @@ fn collect_tsjs_context(root: Node, src: &[u8], ctx: &mut FileContext) {
                 Some(l) => l,
                 None => return,
             };
+            if matches!(left.kind(), "member_expression" | "subscript_expression") {
+                if let Some(name) = leftmost_identifier_text(left, src) {
+                    record_assignment(ctx, &scope, &name, "<mutated>");
+                    if matches!(scope, AssignmentScope::Function(_)) {
+                        record_assignment(ctx, &AssignmentScope::Module, &name, "<mutated>");
+                    }
+                }
+                return;
+            }
             if left.kind() != "identifier" {
                 return;
             }
@@ -1245,6 +1300,14 @@ fn collect_tsjs_context(root: Node, src: &[u8], ctx: &mut FileContext) {
             };
             if let (Some(name), Some(value)) = (text_of(left, src), text_of(right, src)) {
                 record_assignment(ctx, &scope, &name, &value);
+            }
+        }
+        "augmented_assignment_expression" | "update_expression" => {
+            let target = node
+                .child_by_field_name("left")
+                .or_else(|| node.child_by_field_name("argument"));
+            if let Some(name) = target.and_then(|n| leftmost_identifier_text(n, src)) {
+                record_assignment(ctx, &assignment_scope(node), &name, "<mutated>");
             }
         }
         "assignment" => {
@@ -1367,6 +1430,9 @@ fn find_builder_url_arg<'a>(node: Node<'a>, src: &[u8]) -> Option<Node<'a>> {
 fn is_module_level(node: Node) -> bool {
     let mut cur = node.parent();
     while let Some(p) = cur {
+        if is_scope_kind(p.kind()) {
+            return false;
+        }
         match p.kind() {
             "function_definition"
             | "class_definition"
@@ -1610,7 +1676,11 @@ fn parts_from_node(
     enclosing_scope: Option<u32>,
     base_url: Option<&str>,
 ) -> Vec<UrlPart> {
-    let raw = parts_from_node_inner(node, src, ctx, enclosing_scope);
+    let raw = if ctx.js {
+        js_resolution::parts(node, src, ctx, &scope_chain(node))
+    } else {
+        parts_from_node_inner(node, src, ctx, enclosing_scope)
+    };
     apply_base_url(raw, base_url)
 }
 
@@ -1935,6 +2005,18 @@ fn parts_from_node_inner_string(
     ctx: &FileContext,
     scope_chain: &[u32],
 ) -> Vec<UrlPart> {
+    parts_from_assignment(text, ctx, scope_chain, 0)
+}
+
+fn parts_from_assignment(
+    text: &str,
+    ctx: &FileContext,
+    scope_chain: &[u32],
+    depth: usize,
+) -> Vec<UrlPart> {
+    if depth >= 16 {
+        return vec![UrlPart::Hole(text.to_string())];
+    }
     let bytes = text.as_bytes();
     if bytes.len() >= 2 {
         let first = bytes[0];
@@ -1956,7 +2038,7 @@ fn parts_from_node_inner_string(
     let trimmed = text.trim();
     if let Some(resolved) = ctx.resolve_identifier(trimmed, scope_chain) {
         if resolved != text {
-            return parts_from_node_inner_string(&resolved, ctx, scope_chain);
+            return parts_from_assignment(&resolved, ctx, scope_chain, depth + 1);
         }
     }
     vec![UrlPart::Hole(text.to_string())]
@@ -2600,8 +2682,8 @@ const res = await fetch(targetUrl);
         let calls = ts_calls(src);
         assert_eq!(calls.len(), 1, "{calls:?}");
         match &calls[0].url.host {
-            HostPart::Expr(text) => assert_eq!(text, "BASE"),
-            other => panic!("expected Expr, got {other:?}"),
+            HostPart::Literal(text) => assert_eq!(text, "api.example.com"),
+            other => panic!("expected literal origin, got {other:?}"),
         }
     }
 
@@ -3023,12 +3105,7 @@ const handler = async () => {
     }
 
     #[test]
-    fn ts_new_url_chained_records_dynamic_url() {
-        // `new URL(...).toString()` is a member_expression; §6.3 says
-        // we record what we can. Without further work the URL arg
-        // becomes a single Hole carrying the full expression text,
-        // host is `Expr(...)`. The §4.5 normalizer strips the host
-        // hole, leaving an empty path that renders as `/` (the root).
+    fn ts_new_url_chained_preserves_route() {
         let src = "fetch(new URL(\"/api\", BASE).toString());\n";
         let calls = ts_calls(src);
         assert_eq!(calls.len(), 1);
@@ -3039,8 +3116,8 @@ const handler = async () => {
         }
         assert_eq!(
             c.url.template.as_deref(),
-            Some("/"),
-            "an entirely-Hole member expression has its host consumed; the empty path renders as '/' (§4.5 step 4)"
+            Some("/api"),
+            "URL string conversion preserves the constructor's route"
         );
     }
 

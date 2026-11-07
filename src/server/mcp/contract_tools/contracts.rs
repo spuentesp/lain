@@ -447,7 +447,9 @@ async fn run_list_unresolved(
                 continue;
             }
         }
-        let candidates = candidate_endpoints_for(&view, call_id, resolution);
+        let backend = resolved.backend();
+        let fact_keys = consumer_fact_keys(backend.as_ref(), call_id);
+        let candidates = candidate_endpoints_for_keys(&view, call_id, resolution, &fact_keys);
         let mut item = json!({
             "consumer": evidence_ref_from_call(call_id),
             "url_expr": url_expr_for(call_id),
@@ -458,6 +460,22 @@ async fn run_list_unresolved(
             "target_service": target_service.as_ref().map(|s| s.0.clone()),
             "candidates": candidates,
         });
+        if let Ok(Some(node)) = backend.get_node(call_id.as_str()) {
+            for fact in &node.contract {
+                if let crate::federation::contracts::model::ContractFact::Consumer(call) = fact {
+                    item["url_expr"] = json!(call.url_expr);
+                    item["template"] = json!(call.url.template);
+                    item["host"] = json!(match &call.url.host {
+                        crate::federation::contracts::model::HostPart::Literal(host)
+                        | crate::federation::contracts::model::HostPart::Expr(host) =>
+                            Some(host.clone()),
+                        crate::federation::contracts::model::HostPart::Env(names) =>
+                            Some(format!("env:{}", names.join(","))),
+                        crate::federation::contracts::model::HostPart::None => None,
+                    });
+                }
+            }
+        }
         if let Some(detail) = view.rust_rpcs.get(call_id) {
             item["rpc"] = json!(detail);
             item["consumer"]["commit"] = json!(resolved
@@ -1199,10 +1217,20 @@ fn provenance_to_json(p: &EdgeProvenance) -> Value {
     out
 }
 
+#[cfg(test)]
 fn candidate_endpoints_for(
     view: &ContractIndex,
     call_id: &GlobalId,
     resolution: &ConsumerResolution,
+) -> Vec<Value> {
+    candidate_endpoints_for_keys(view, call_id, resolution, &[])
+}
+
+fn candidate_endpoints_for_keys(
+    view: &ContractIndex,
+    call_id: &GlobalId,
+    resolution: &ConsumerResolution,
+    fact_keys: &[ContractKey],
 ) -> Vec<Value> {
     // §9.7 gating: a `target_service` the resolver named (HTTP
     // `no_route_in_service`, GraphQL `route_owner`) means the
@@ -1217,6 +1245,25 @@ fn candidate_endpoints_for(
         Some(ts) => &ep_id.0 == ts,
         None => true,
     };
+    // Fact-keyed protocols must never fall through to the HTTP wildcard
+    // suggestions. Prefix fallback supports legacy WebSocket call-site IDs.
+    let websocket = call_id
+        .name()
+        .is_some_and(|n| n.starts_with(crate::server::sensors::util::WS_CLIENT_PREFIX));
+    if websocket
+        || fact_keys.iter().any(|k| {
+            matches!(
+                k,
+                ContractKey::WebSocket { .. }
+                    | ContractKey::Topic { .. }
+                    | ContractKey::Table { .. }
+            )
+        })
+    {
+        return view.endpoints.keys().filter(|id| in_target(id) && (
+            (websocket && matches!(id.1, ContractKey::WebSocket { .. })) || fact_keys.iter().any(|k| std::mem::discriminant(k) == std::mem::discriminant(&id.1))
+        )).map(|id| json!({"endpoint": {"service": id.0.0, "key": id.1.to_string()}, "reason": if fact_keys.contains(&id.1) {"same_key"} else {"pattern"}})).collect();
+    }
     if let Some(detail) = view.rust_rpcs.get(call_id) {
         return rust_rpc_candidates(view, detail);
     }
@@ -1774,6 +1821,49 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    #[test]
+    fn fact_keyed_protocol_candidates_never_suggest_http() {
+        let mut view = ContractIndex::default();
+        insert_ep(&mut view, "backend", http_key(HttpMethod::Get, "/chat"));
+        let protocols = [
+            ContractKey::WebSocket {
+                route: "/chat".into(),
+            },
+            ContractKey::Topic {
+                broker: "kafka".into(),
+                name: "events".into(),
+            },
+            ContractKey::Table {
+                name: "objects".into(),
+            },
+        ];
+        for key in &protocols {
+            insert_ep(&mut view, "backend", key.clone());
+        }
+        let id = call_id("ui", "opaque-consumer");
+        let resolution = ConsumerResolution {
+            call_id: id.clone(),
+            service: ServiceName("ui".into()),
+            target: Some(ConsumerTarget::Unresolved {
+                reason: UnresolvedReason::NoMatch,
+                target_service: None,
+            }),
+            bound_endpoints: vec![],
+            reads_complete: true,
+        };
+        for key in &protocols {
+            let got =
+                candidate_endpoints_for_keys(&view, &id, &resolution, std::slice::from_ref(key));
+            assert_eq!(got.len(), 1);
+            assert_eq!(got[0]["endpoint"]["key"], key.to_string());
+            assert_eq!(got[0]["reason"], "same_key");
+        }
+        let ws = call_id("ui", "ws:client:ws://localhost/chat");
+        let got = candidate_triples(&view, &ws);
+        assert_eq!(got.len(), 1);
+        assert!(got[0].1.starts_with("websocket:"));
     }
 
     /// A `graphql-call:{op}:{field}` consumer must see the GraphQL

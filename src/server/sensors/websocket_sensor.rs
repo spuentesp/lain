@@ -3,14 +3,15 @@
 //! Detects WebSocket endpoints and event handlers from code patterns.
 //! Scans for ws:// URLs, Upgrade headers, and onopen/onmessage/onclose handlers.
 //!
-//! Edges created: Uses (handler -> WebSocket endpoint)
+//! Client event callbacks (`ws.onmessage = fn`) are not provider endpoints
+//! and produce no facts.
 
 use crate::error::LainError;
 use crate::federation::contracts::model::{
-    ContractFact, HostPart, NormalizedUrl, SymbolKey, WebSocketConsumerFact, WebSocketProviderFact,
+    ContractFact, HostPart, NormalizedUrl, WebSocketConsumerFact, WebSocketProviderFact,
 };
 use crate::graph::{GraphDatabase, SensorOwner};
-use crate::schema::{EdgeType, GraphEdge, NodeType};
+use crate::schema::{GraphEdge, NodeType};
 use crate::server::sensors::patterns::Patterns;
 use crate::server::sensors::util;
 use std::path::Path;
@@ -104,7 +105,9 @@ fn extract_websocket_patterns(content: &str) -> Vec<(String, String, String, u32
         Vec<util::CompiledIdiom>,
     );
     static IDIOMS: OnceLock<WebsocketIdioms> = OnceLock::new();
-    let (clients, servers, handlers) =
+    // Handler idioms (`ws.onmessage = fn`) are client callbacks, not
+    // server routes, so they are deliberately not walked here.
+    let (clients, servers, _handlers) =
         IDIOMS.get_or_init(|| util::websocket_idioms_for(Patterns::patterns()));
 
     for (line_no, line) in content.lines().enumerate() {
@@ -119,22 +122,6 @@ fn extract_websocket_patterns(content: &str) -> Vec<(String, String, String, u32
         for m in util::walk_idioms(clients, line, line_num) {
             if let Some(url) = m.literal.as_deref() {
                 endpoints.push((url.to_string(), String::new(), String::new(), line_num));
-            }
-        }
-        // Event handlers. The walker populates `identifier`
-        // with the handler name (group 2 of the YAML's
-        // `ws-event-handler` regex); group 1 (the event name
-        // `on{open,…}`) is kept in `literal` so the alternation
-        // matches the four `on{…}` shapes in a single
-        // non-optional branch.
-        for m in util::walk_idioms(handlers, line, line_num) {
-            if let Some(handler_name) = m.identifier.as_deref() {
-                endpoints.push((
-                    String::new(),
-                    String::new(),
-                    handler_name.to_string(),
-                    line_num,
-                ));
             }
         }
     }
@@ -159,7 +146,7 @@ pub fn enrich_with_websocket(
     let mut count = 0;
     let mut seen_keys = std::collections::HashSet::new();
 
-    for (url, server_route, handler_name, line) in patterns {
+    for (url, server_route, _handler_name, line) in patterns {
         if !url.is_empty() {
             // Client dial -> ConsumerFact
             let (host, route) = parse_url_path_and_host(&url);
@@ -223,46 +210,6 @@ pub fn enrich_with_websocket(
                 handler: None,
             })];
             graph.upsert_node(node)?;
-            count += 1;
-        } else if !handler_name.is_empty() {
-            // Server handler -> ProviderFact + Uses edge
-            let route = format!("/{}", handler_name);
-            let key = format!("ws:handler:{}", handler_name);
-            if !seen_keys.insert(key.clone()) {
-                continue;
-            }
-
-            let mut node = crate::server::sensors::util::site_node(
-                NodeType::HttpRoute,
-                key,
-                &node_path,
-                None,
-                line,
-                namespace,
-            );
-            let node_id = node.id.clone();
-            node.signature = Some(handler_name.clone());
-            let repo_id = crate::federation::repo_id::RepoId::new(
-                root.file_name().and_then(|f| f.to_str()).unwrap_or("repo"),
-            )
-            .unwrap_or_else(|_| crate::server::sensors::util::fallback_repo_id());
-            node.contract = vec![ContractFact::WebSocketProvider(WebSocketProviderFact {
-                route,
-                handler: Some(SymbolKey {
-                    repo: repo_id,
-                    path: node_path.clone(),
-                    container: None,
-                    name: handler_name.clone(),
-                }),
-            })];
-            graph.upsert_node(node)?;
-
-            if let Some(handler) =
-                crate::server::sensors::util::find_handler_in_graph(graph, &handler_name)
-            {
-                let edge = GraphEdge::new(EdgeType::Uses, handler.id.clone(), node_id);
-                graph.insert_edge(&edge)?;
-            }
             count += 1;
         }
     }
@@ -385,5 +332,75 @@ mod tests {
 
         assert!(found_consumer, "must emit WebSocketConsumerFact");
         assert!(found_provider, "must emit WebSocketProviderFact");
+    }
+
+    #[test]
+    fn client_event_callbacks_are_not_websocket_providers() {
+        let tmp = tempdir().unwrap();
+        let db_dir = tmp.path().join("db");
+        let ws_dir = tmp.path().join("client_repo");
+        std::fs::create_dir_all(&ws_dir).unwrap();
+        let client_file = ws_dir.join("client.js");
+        std::fs::write(
+            &client_file,
+            "const ws = new WebSocket(\"ws://orders/events/stream\");\nws.onmessage = handleStream;\nws.onclose = onDone;\nws.onerror = async (event) => report(event);\n",
+        )
+        .unwrap();
+
+        let graph = GraphDatabase::new(&db_dir).unwrap();
+        let ns = RepoNamespace::for_test();
+        enrich_with_websocket(&graph, &client_file, &ws_dir, &ns).unwrap();
+
+        for node in graph.all_nodes() {
+            assert!(
+                !matches!(
+                    node.contract.first(),
+                    Some(ContractFact::WebSocketProvider(_))
+                ),
+                "client callback became a provider: {}",
+                node.id
+            );
+        }
+    }
+
+    #[test]
+    fn rescan_retracts_previously_invented_callback_providers() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().join("source");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(
+            root.join("client.ts"),
+            "ws.onclose = async (event) => reconnect(event);",
+        )
+        .unwrap();
+        std::fs::write(root.join("server.ts"), "app.ws(\"/events\", handleEvents);").unwrap();
+        let graph = GraphDatabase::new(&tmp.path().join("graph.bin")).unwrap();
+        let ns = RepoNamespace::for_test();
+        let mut stale = util::site_node(
+            NodeType::HttpRoute,
+            "ws:handler:async".into(),
+            "client.ts",
+            None,
+            1,
+            &ns,
+        );
+        stale.contract = vec![ContractFact::WebSocketProvider(WebSocketProviderFact {
+            route: "/async".into(),
+            handler: None,
+        })];
+        let stale_id = stale.id.clone();
+        graph.upsert_node(stale).unwrap();
+        scan_workspace(&graph, &root, &ns).unwrap();
+        assert!(graph.get_node(&stale_id).unwrap().is_none());
+        let providers: Vec<_> = graph
+            .all_nodes()
+            .into_iter()
+            .flat_map(|node| node.contract)
+            .filter_map(|fact| match fact {
+                ContractFact::WebSocketProvider(p) => Some(p.route),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(providers, vec!["/events"]);
     }
 }
