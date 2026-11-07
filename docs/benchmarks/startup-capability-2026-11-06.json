@@ -1,0 +1,1576 @@
+{
+  "passed": 171,
+  "failed": 0,
+  "skipped": 2,
+  "boot_and_index_ms": 3053,
+  "checks": [
+    {
+      "status": "PASS",
+      "name": "tools/list advertises the full surface",
+      "expected": "97",
+      "actual": "97"
+    },
+    {
+      "status": "PASS",
+      "name": "get_capabilities reports the current capability snapshot",
+      "expected": "contains:schema_version",
+      "actual": "contains:schema_version"
+    },
+    {
+      "status": "PASS",
+      "name": "list_packages renders the skill menu",
+      "expected": "contains:why_off_by_default",
+      "actual": "contains:why_off_by_default"
+    },
+    {
+      "status": "PASS",
+      "name": "list_packages names its packages",
+      "expected": "contains:verify",
+      "actual": "contains:verify"
+    },
+    {
+      "status": "PASS",
+      "name": "load_package signals a tools/list change",
+      "expected": "contains:tools_list_changed",
+      "actual": "contains:tools_list_changed"
+    },
+    {
+      "status": "PASS",
+      "name": "load_package returns the tools it brings",
+      "expected": "contains:add_annotation",
+      "actual": "contains:add_annotation"
+    },
+    {
+      "status": "PASS",
+      "name": "get_health reports Operational",
+      "expected": "contains:Operational",
+      "actual": "contains:Operational"
+    },
+    {
+      "status": "PASS",
+      "name": "graph indexed the subject (24 nodes)",
+      "expected": "indexed",
+      "actual": "indexed"
+    },
+    {
+      "status": "PASS",
+      "name": "GET / (Command Center) serves",
+      "expected": "200",
+      "actual": "200"
+    },
+    {
+      "status": "PASS",
+      "name": "GET /app.js serves",
+      "expected": "200",
+      "actual": "200"
+    },
+    {
+      "status": "PASS",
+      "name": "GET /styles.css serves",
+      "expected": "200",
+      "actual": "200"
+    },
+    {
+      "status": "PASS",
+      "name": "GET /assets/d3.v7.min.js serves",
+      "expected": "200",
+      "actual": "200"
+    },
+    {
+      "status": "PASS",
+      "name": "GET /events (SSE) serves",
+      "expected": "200",
+      "actual": "200"
+    },
+    {
+      "status": "PASS",
+      "name": "setup rejects unknown --agent",
+      "expected": "contains:supported values",
+      "actual": "contains:supported values"
+    },
+    {
+      "status": "PASS",
+      "name": "setup lists all 6 supported values",
+      "expected": "contains:codex",
+      "actual": "contains:codex"
+    },
+    {
+      "status": "PASS",
+      "name": "setup lists all 6 supported values",
+      "expected": "contains:cursor",
+      "actual": "contains:cursor"
+    },
+    {
+      "status": "PASS",
+      "name": "setup lists all 6 supported values",
+      "expected": "contains:vscode",
+      "actual": "contains:vscode"
+    },
+    {
+      "status": "PASS",
+      "name": "setup lists all 6 supported values",
+      "expected": "contains:continue",
+      "actual": "contains:continue"
+    },
+    {
+      "status": "PASS",
+      "name": "cursor adapter writes ~/.cursor/mcp.json",
+      "expected": "contains:\"mcpServers\"",
+      "actual": "contains:\"mcpServers\""
+    },
+    {
+      "status": "PASS",
+      "name": "cursor adapter names the server 'lain'",
+      "expected": "contains:\"lain\"",
+      "actual": "contains:\"lain\""
+    },
+    {
+      "status": "PASS",
+      "name": "vscode adapter emits  schema",
+      "expected": "contains:\"servers\"",
+      "actual": "contains:\"servers\""
+    },
+    {
+      "status": "PASS",
+      "name": "vscode adapter names the server 'lain'",
+      "expected": "contains:\"lain\"",
+      "actual": "contains:\"lain\""
+    },
+    {
+      "status": "PASS",
+      "name": "continue adapter emits a v1 block",
+      "expected": "contains:schema: v1",
+      "actual": "contains:schema: v1"
+    },
+    {
+      "status": "PASS",
+      "name": "continue adapter emits mcpServers",
+      "expected": "contains:mcpServers:",
+      "actual": "contains:mcpServers:"
+    },
+    {
+      "status": "PASS",
+      "name": "codex adapter delegates to codex mcp add",
+      "expected": "contains:codex mcp add",
+      "actual": "contains:codex mcp add"
+    },
+    {
+      "status": "PASS",
+      "name": "generic adapter is idempotent (one lain entry)",
+      "expected": "1",
+      "actual": "1"
+    },
+    {
+      "status": "PASS",
+      "name": "get_call_sites finds the one real caller",
+      "expected": "contains:entry",
+      "actual": "contains:entry"
+    },
+    {
+      "status": "PASS",
+      "name": "get_call_sites reports exactly 1 calling function",
+      "expected": "1",
+      "actual": "1"
+    },
+    {
+      "status": "PASS",
+      "name": "blast radius: direct dependent is orchestrate",
+      "expected": "contains:orchestrate",
+      "actual": "contains:orchestrate"
+    },
+    {
+      "status": "PASS",
+      "name": "blast radius: exactly 1 direct dependent",
+      "expected": "1",
+      "actual": "1"
+    },
+    {
+      "status": "PASS",
+      "name": "blast radius: entry() shows up as indirect",
+      "expected": "contains:entry",
+      "actual": "contains:entry"
+    },
+    {
+      "status": "PASS",
+      "name": "find_dead_code finds never_called",
+      "expected": "contains:never_called",
+      "actual": "contains:never_called"
+    },
+    {
+      "status": "PASS",
+      "name": "find_dead_code excludes the test fn",
+      "expected": "absent:test_entry",
+      "actual": "absent:test_entry"
+    },
+    {
+      "status": "PASS",
+      "name": "find_dead_code excludes live helper_a",
+      "expected": "absent:helper_a",
+      "actual": "absent:helper_a"
+    },
+    {
+      "status": "PASS",
+      "name": "find_dead_code excludes the hub",
+      "expected": "absent:orchestrate",
+      "actual": "absent:orchestrate"
+    },
+    {
+      "status": "PASS",
+      "name": "find_anchors ranks the hub first",
+      "expected": "orchestrate",
+      "actual": "orchestrate"
+    },
+    {
+      "status": "PASS",
+      "name": "explain_dispatch reports the static caller",
+      "expected": "contains:static_callers",
+      "actual": "contains:static_callers"
+    },
+    {
+      "status": "PASS",
+      "name": "explain_dispatch does not claim insufficient evidence",
+      "expected": "absent:insufficient_evidence",
+      "actual": "absent:insufficient_evidence"
+    },
+    {
+      "status": "PASS",
+      "name": "get_call_chain links entry to helper_a",
+      "expected": "contains:helper_a",
+      "actual": "contains:helper_a"
+    },
+    {
+      "status": "PASS",
+      "name": "trace_dependency sees a callee",
+      "expected": "contains:helper_",
+      "actual": "contains:helper_"
+    },
+    {
+      "status": "PASS",
+      "name": "explain_symbol names the file",
+      "expected": "contains:core.rs",
+      "actual": "contains:core.rs"
+    },
+    {
+      "status": "PASS",
+      "name": "get_code_snippet reads the subject's own file",
+      "expected": "contains:never_called",
+      "actual": "contains:never_called"
+    },
+    {
+      "status": "PASS",
+      "name": "explain_symbol warns 'parse' is ambiguous",
+      "expected": "contains:defined 2 times",
+      "actual": "contains:defined 2 times"
+    },
+    {
+      "status": "PASS",
+      "name": "the warning offers ids to disambiguate",
+      "expected": "contains:Pass a node id",
+      "actual": "contains:Pass a node id"
+    },
+    {
+      "status": "PASS",
+      "name": "a node id resolves without an ambiguity warning",
+      "expected": "absent:defined 2 times",
+      "actual": "absent:defined 2 times"
+    },
+    {
+      "status": "PASS",
+      "name": "ids round-trip from query_graph into explain_symbol",
+      "expected": "contains:Explanation",
+      "actual": "contains:Explanation"
+    },
+    {
+      "status": "PASS",
+      "name": "find by type+name",
+      "expected": "contains:orchestrate",
+      "actual": "contains:orchestrate"
+    },
+    {
+      "status": "PASS",
+      "name": "chained find \u2192 connect \u2192 limit",
+      "expected": "contains:count",
+      "actual": "contains:count"
+    },
+    {
+      "status": "PASS",
+      "name": "CoChangedWith traversal runs",
+      "expected": "contains:count",
+      "actual": "contains:count"
+    },
+    {
+      "status": "PASS",
+      "name": "describe_schema lists node types",
+      "expected": "contains:Function",
+      "actual": "contains:Function"
+    },
+    {
+      "status": "PASS",
+      "name": "coupling radar sees the co-change",
+      "expected": "contains:helpers.rs",
+      "actual": "contains:helpers.rs"
+    },
+    {
+      "status": "PASS",
+      "name": "commit history reaches the subject repo",
+      "expected": "contains:touch core",
+      "actual": "contains:touch core"
+    },
+    {
+      "status": "PASS",
+      "name": "branch status answers",
+      "expected": "contains:branch",
+      "actual": "contains:branch"
+    },
+    {
+      "status": "PASS",
+      "name": "recent activity is not an error",
+      "expected": "absent:__TOOL_ERROR__",
+      "actual": "absent:__TOOL_ERROR__"
+    },
+    {
+      "status": "PASS",
+      "name": "explore_architecture answers",
+      "expected": "a result",
+      "actual": "a result"
+    },
+    {
+      "status": "PASS",
+      "name": "get_master_map answers",
+      "expected": "a result",
+      "actual": "a result"
+    },
+    {
+      "status": "PASS",
+      "name": "get_layered_map answers",
+      "expected": "a result",
+      "actual": "a result"
+    },
+    {
+      "status": "PASS",
+      "name": "list_entry_points answers",
+      "expected": "a result",
+      "actual": "a result"
+    },
+    {
+      "status": "PASS",
+      "name": "architectural_observations answers",
+      "expected": "a result",
+      "actual": "a result"
+    },
+    {
+      "status": "PASS",
+      "name": "suggest_refactor_targets answers",
+      "expected": "a result",
+      "actual": "a result"
+    },
+    {
+      "status": "PASS",
+      "name": "find_untested_functions answers",
+      "expected": "a result",
+      "actual": "a result"
+    },
+    {
+      "status": "PASS",
+      "name": "get_coverage_summary answers",
+      "expected": "a result",
+      "actual": "a result"
+    },
+    {
+      "status": "PASS",
+      "name": "compare_modules answers",
+      "expected": "a result",
+      "actual": "a result"
+    },
+    {
+      "status": "PASS",
+      "name": "detect_overlap answers (refusal is a result)",
+      "expected": "a result",
+      "actual": "a result"
+    },
+    {
+      "status": "PASS",
+      "name": "get_context_for_prompt answers",
+      "expected": "a result",
+      "actual": "a result"
+    },
+    {
+      "status": "PASS",
+      "name": "get_world_state answers",
+      "expected": "a result",
+      "actual": "a result"
+    },
+    {
+      "status": "PASS",
+      "name": "get_server_status answers",
+      "expected": "a result",
+      "actual": "a result"
+    },
+    {
+      "status": "PASS",
+      "name": "get_reload_status answers",
+      "expected": "a result",
+      "actual": "a result"
+    },
+    {
+      "status": "PASS",
+      "name": "list_recent_projects answers",
+      "expected": "a result",
+      "actual": "a result"
+    },
+    {
+      "status": "PASS",
+      "name": "get_agent_strategy answers",
+      "expected": "a result",
+      "actual": "a result"
+    },
+    {
+      "status": "PASS",
+      "name": "get_test_template answers (refusal is a result)",
+      "expected": "a result",
+      "actual": "a result"
+    },
+    {
+      "status": "PASS",
+      "name": "navigate_to_anchor answers",
+      "expected": "a result",
+      "actual": "a result"
+    },
+    {
+      "status": "PASS",
+      "name": "get_context_depth answers",
+      "expected": "a result",
+      "actual": "a result"
+    },
+    {
+      "status": "PASS",
+      "name": "get_anchor_score answers",
+      "expected": "a result",
+      "actual": "a result"
+    },
+    {
+      "status": "PASS",
+      "name": "get_cross_runtime_callers answers (refusal is a result)",
+      "expected": "a result",
+      "actual": "a result"
+    },
+    {
+      "status": "PASS",
+      "name": "get_audit_log answers",
+      "expected": "a result",
+      "actual": "a result"
+    },
+    {
+      "status": "PASS",
+      "name": "sync_state answers",
+      "expected": "a result",
+      "actual": "a result"
+    },
+    {
+      "status": "PASS",
+      "name": "run_enrichment answers",
+      "expected": "a result",
+      "actual": "a result"
+    },
+    {
+      "status": "PASS",
+      "name": "get_file_diff answers",
+      "expected": "a result",
+      "actual": "a result"
+    },
+    {
+      "status": "PASS",
+      "name": "understand_repository answers",
+      "expected": "a result",
+      "actual": "a result"
+    },
+    {
+      "status": "PASS",
+      "name": "find_symbol answers",
+      "expected": "a result",
+      "actual": "a result"
+    },
+    {
+      "status": "PASS",
+      "name": "get_context answers",
+      "expected": "a result",
+      "actual": "a result"
+    },
+    {
+      "status": "PASS",
+      "name": "find_related answers",
+      "expected": "a result",
+      "actual": "a result"
+    },
+    {
+      "status": "PASS",
+      "name": "assess_change answers",
+      "expected": "a result",
+      "actual": "a result"
+    },
+    {
+      "status": "PASS",
+      "name": "search_code answers",
+      "expected": "a result",
+      "actual": "a result"
+    },
+    {
+      "status": "PASS",
+      "name": "two agents register",
+      "expected": "both",
+      "actual": "both"
+    },
+    {
+      "status": "PASS",
+      "name": "alpha's edit claim is granted",
+      "expected": "contains:granted",
+      "actual": "contains:granted"
+    },
+    {
+      "status": "PASS",
+      "name": "beta's edit on ./src/core.rs conflicts",
+      "expected": "contains:conflicts",
+      "actual": "contains:conflicts"
+    },
+    {
+      "status": "PASS",
+      "name": "the conflict names the holder",
+      "expected": "contains:alpha",
+      "actual": "contains:alpha"
+    },
+    {
+      "status": "PASS",
+      "name": "the conflict states the blocking intent",
+      "expected": "contains:edit",
+      "actual": "contains:edit"
+    },
+    {
+      "status": "PASS",
+      "name": "beta's read conflicts with alpha's edit",
+      "expected": "contains:\"name\"",
+      "actual": "contains:\"name\""
+    },
+    {
+      "status": "PASS",
+      "name": "and the refusal names the holder",
+      "expected": "contains:alpha",
+      "actual": "contains:alpha"
+    },
+    {
+      "status": "PASS",
+      "name": "occupancy shows holders",
+      "expected": "contains:holders",
+      "actual": "contains:holders"
+    },
+    {
+      "status": "PASS",
+      "name": "occupancy names alpha",
+      "expected": "contains:alpha",
+      "actual": "contains:alpha"
+    },
+    {
+      "status": "PASS",
+      "name": "occupancy carries intent",
+      "expected": "contains:intent",
+      "actual": "contains:intent"
+    },
+    {
+      "status": "PASS",
+      "name": "list_active_agents sees alpha",
+      "expected": "contains:alpha",
+      "actual": "contains:alpha"
+    },
+    {
+      "status": "PASS",
+      "name": "list_active_agents sees beta",
+      "expected": "contains:beta",
+      "actual": "contains:beta"
+    },
+    {
+      "status": "PASS",
+      "name": "who_am_i identifies the caller",
+      "expected": "contains:alpha",
+      "actual": "contains:alpha"
+    },
+    {
+      "status": "PASS",
+      "name": "my_claims lists alpha's claim",
+      "expected": "contains:core.rs",
+      "actual": "contains:core.rs"
+    },
+    {
+      "status": "PASS",
+      "name": "heartbeat refreshes the session",
+      "expected": "absent:__TOOL_ERROR__",
+      "actual": "absent:__TOOL_ERROR__"
+    },
+    {
+      "status": "PASS",
+      "name": "release accepts a bare path string",
+      "expected": "contains:released",
+      "actual": "contains:released"
+    },
+    {
+      "status": "PASS",
+      "name": "beta can claim once alpha releases",
+      "expected": "contains:granted",
+      "actual": "contains:granted"
+    },
+    {
+      "status": "PASS",
+      "name": "and sees no conflict this time",
+      "expected": "absent:\"name\"",
+      "actual": "absent:\"name\""
+    },
+    {
+      "status": "PASS",
+      "name": "list_subagents answers",
+      "expected": "absent:__RPC_ERROR__",
+      "actual": "absent:__RPC_ERROR__"
+    },
+    {
+      "status": "PASS",
+      "name": "lain_intent declares an intent",
+      "expected": "contains:intent_id",
+      "actual": "contains:intent_id"
+    },
+    {
+      "status": "PASS",
+      "name": "list_active_intents shows the goal",
+      "expected": "contains:demo: refactor core",
+      "actual": "contains:demo: refactor core"
+    },
+    {
+      "status": "PASS",
+      "name": "unregister_agent removes the session",
+      "expected": "contains:\"removed\":true",
+      "actual": "contains:\"removed\":true"
+    },
+    {
+      "status": "PASS",
+      "name": "and alpha is no longer listed",
+      "expected": "absent:\"alpha\"",
+      "actual": "absent:\"alpha\""
+    },
+    {
+      "status": "PASS",
+      "name": "run_build compiles the subject",
+      "expected": "success",
+      "actual": "success"
+    },
+    {
+      "status": "PASS",
+      "name": "run_tests runs the subject's test",
+      "expected": "absent:__RPC_ERROR__",
+      "actual": "absent:__RPC_ERROR__"
+    },
+    {
+      "status": "PASS",
+      "name": "blast radius emits a UI session link",
+      "expected": "yes",
+      "actual": "yes"
+    },
+    {
+      "status": "PASS",
+      "name": "GET /ui/blast-radius/<id> renders",
+      "expected": "200",
+      "actual": "200"
+    },
+    {
+      "status": "PASS",
+      "name": "the page carries the graph payload",
+      "expected": "contains:is_direct",
+      "actual": "contains:is_direct"
+    },
+    {
+      "status": "PASS",
+      "name": "GET /ui/coupling/<id> renders",
+      "expected": "200",
+      "actual": "200"
+    },
+    {
+      "status": "PASS",
+      "name": "lain --help lists the subcommands",
+      "expected": "contains:server",
+      "actual": "contains:server"
+    },
+    {
+      "status": "PASS",
+      "name": "lain doctor runs its checks",
+      "expected": "contains:lain doctor",
+      "actual": "contains:lain doctor"
+    },
+    {
+      "status": "PASS",
+      "name": "doctor catches an empty MCP surface",
+      "expected": "contains:MCP surface empty",
+      "actual": "contains:MCP surface empty"
+    },
+    {
+      "status": "PASS",
+      "name": "doctor exits non-zero on that failure",
+      "expected": "2",
+      "actual": "2"
+    },
+    {
+      "status": "PASS",
+      "name": "doctor confirms a live surface",
+      "expected": "contains:MCP surface live",
+      "actual": "contains:MCP surface live"
+    },
+    {
+      "status": "PASS",
+      "name": "lain query runs against the persisted graph",
+      "expected": "absent:error: unrecognized",
+      "actual": "absent:error: unrecognized"
+    },
+    {
+      "status": "PASS",
+      "name": "lain init scaffolds repos.yaml",
+      "expected": "written",
+      "actual": "written"
+    },
+    {
+      "status": "PASS",
+      "name": "federation lists both repos",
+      "expected": "contains:beta",
+      "actual": "contains:beta"
+    },
+    {
+      "status": "PASS",
+      "name": "a symbol in alpha resolves in alpha",
+      "expected": "contains:alpha_inner",
+      "actual": "contains:alpha_inner"
+    },
+    {
+      "status": "PASS",
+      "name": "a symbol in beta resolves in beta",
+      "expected": "contains:beta_inner",
+      "actual": "contains:beta_inner"
+    },
+    {
+      "status": "PASS",
+      "name": "repo_id=alpha lists alpha's symbols",
+      "expected": "contains:alpha_",
+      "actual": "contains:alpha_"
+    },
+    {
+      "status": "PASS",
+      "name": "and leaks nothing from beta",
+      "expected": "absent:beta_",
+      "actual": "absent:beta_"
+    },
+    {
+      "status": "PASS",
+      "name": "get_code_snippet reads beta's own checkout",
+      "expected": "contains:beta_only_helper",
+      "actual": "contains:beta_only_helper"
+    },
+    {
+      "status": "PASS",
+      "name": "cross-repo blast radius groups by repo",
+      "expected": "contains:alpha",
+      "actual": "contains:alpha"
+    },
+    {
+      "status": "PASS",
+      "name": "a wrong-typed arg names the type, not 'missing'",
+      "expected": "contains:boolean",
+      "actual": "contains:boolean"
+    },
+    {
+      "status": "PASS",
+      "name": "search_org finds symbols across repos",
+      "expected": "contains:beta_only_helper",
+      "actual": "contains:beta_only_helper"
+    },
+    {
+      "status": "PASS",
+      "name": "get_repo_info describes a repo",
+      "expected": "contains:alpha",
+      "actual": "contains:alpha"
+    },
+    {
+      "status": "PASS",
+      "name": "federation health counts both repos",
+      "expected": "contains:\"total_repos\":2",
+      "actual": "contains:\"total_repos\":2"
+    },
+    {
+      "status": "PASS",
+      "name": "federation health reports both ready",
+      "expected": "contains:\"ready\":2",
+      "actual": "contains:\"ready\":2"
+    },
+    {
+      "status": "PASS",
+      "name": "cross-repo blast radius, repo pinned explicitly",
+      "expected": "contains:beta",
+      "actual": "contains:beta"
+    },
+    {
+      "status": "PASS",
+      "name": "run_clippy answers",
+      "expected": "absent:__RPC_ERROR__",
+      "actual": "absent:__RPC_ERROR__"
+    },
+    {
+      "status": "PASS",
+      "name": "request_reload answers",
+      "expected": "absent:__RPC_ERROR__",
+      "actual": "absent:__RPC_ERROR__"
+    },
+    {
+      "status": "PASS",
+      "name": "register_job_webhook answers",
+      "expected": "absent:__RPC_ERROR__",
+      "actual": "absent:__RPC_ERROR__"
+    },
+    {
+      "status": "PASS",
+      "name": "get_job_status reports an unknown job as not found",
+      "expected": "contains:not found",
+      "actual": "contains:not found"
+    },
+    {
+      "status": "PASS",
+      "name": "debug_sleep answers",
+      "expected": "absent:__RPC_ERROR__",
+      "actual": "absent:__RPC_ERROR__"
+    },
+    {
+      "status": "PASS",
+      "name": "install_language_server advertises its schema (not invoked: it mutates the machine)",
+      "expected": "contains:language",
+      "actual": "contains:language"
+    },
+    {
+      "status": "PASS",
+      "name": "add_annotation answers",
+      "expected": "contains:repo_id",
+      "actual": "contains:repo_id"
+    },
+    {
+      "status": "PASS",
+      "name": "list_annotations sees it",
+      "expected": "contains:demo annotation",
+      "actual": "contains:demo annotation"
+    },
+    {
+      "status": "PASS",
+      "name": "resolve_annotation closes it",
+      "expected": "contains:resolved",
+      "actual": "contains:resolved"
+    },
+    {
+      "status": "PASS",
+      "name": "leave_handoff_note answers",
+      "expected": "contains:expires_at_unix_ms",
+      "actual": "contains:expires_at_unix_ms"
+    },
+    {
+      "status": "PASS",
+      "name": "get_pending_handoffs sees it",
+      "expected": "contains:demo handoff",
+      "actual": "contains:demo handoff"
+    },
+    {
+      "status": "PASS",
+      "name": "every advertised tool is exercised (96/97 + 1 exempt)",
+      "expected": "complete",
+      "actual": "complete"
+    },
+    {
+      "status": "PASS",
+      "name": "diff_precision \u2265 baseline (1.0)",
+      "expected": "1.0",
+      "actual": "1.0"
+    },
+    {
+      "status": "PASS",
+      "name": "diff_recall \u2265 baseline (1.0)",
+      "expected": "1.0",
+      "actual": "1.0"
+    },
+    {
+      "status": "PASS",
+      "name": "binds_precision \u2265 baseline (1.0)",
+      "expected": "1.0",
+      "actual": "1.0"
+    },
+    {
+      "status": "PASS",
+      "name": "binds_recall \u2265 baseline (1.0)",
+      "expected": "1.0",
+      "actual": "1.0"
+    },
+    {
+      "status": "PASS",
+      "name": "reads_field_precision \u2265 baseline (1.0)",
+      "expected": "1.0",
+      "actual": "1.0"
+    },
+    {
+      "status": "PASS",
+      "name": "reads_field_recall \u2265 baseline (1.0)",
+      "expected": "1.0",
+      "actual": "1.0"
+    },
+    {
+      "status": "PASS",
+      "name": "contract precision/recall meets baseline",
+      "expected": "contains:diff_precision",
+      "actual": "contains:diff_precision"
+    },
+    {
+      "status": "PASS",
+      "name": "list_services answers JSON-RPC",
+      "expected": "absent:__RPC_ERROR__",
+      "actual": "absent:__RPC_ERROR__"
+    },
+    {
+      "status": "PASS",
+      "name": "get_service answers JSON-RPC",
+      "expected": "absent:__RPC_ERROR__",
+      "actual": "absent:__RPC_ERROR__"
+    },
+    {
+      "status": "PASS",
+      "name": "list_contracts answers JSON-RPC",
+      "expected": "absent:__RPC_ERROR__",
+      "actual": "absent:__RPC_ERROR__"
+    },
+    {
+      "status": "PASS",
+      "name": "list_service_refs answers JSON-RPC",
+      "expected": "absent:__RPC_ERROR__",
+      "actual": "absent:__RPC_ERROR__"
+    },
+    {
+      "status": "PASS",
+      "name": "get_contract answers JSON-RPC",
+      "expected": "absent:__RPC_ERROR__",
+      "actual": "absent:__RPC_ERROR__"
+    },
+    {
+      "status": "PASS",
+      "name": "list_unresolved answers JSON-RPC",
+      "expected": "absent:__RPC_ERROR__",
+      "actual": "absent:__RPC_ERROR__"
+    },
+    {
+      "status": "PASS",
+      "name": "check_binding answers JSON-RPC",
+      "expected": "absent:__RPC_ERROR__",
+      "actual": "absent:__RPC_ERROR__"
+    },
+    {
+      "status": "PASS",
+      "name": "trace_impact answers JSON-RPC",
+      "expected": "absent:__RPC_ERROR__",
+      "actual": "absent:__RPC_ERROR__"
+    },
+    {
+      "status": "PASS",
+      "name": "trace_flow answers JSON-RPC",
+      "expected": "absent:__RPC_ERROR__",
+      "actual": "absent:__RPC_ERROR__"
+    },
+    {
+      "status": "PASS",
+      "name": "get_coverage answers JSON-RPC",
+      "expected": "absent:__RPC_ERROR__",
+      "actual": "absent:__RPC_ERROR__"
+    },
+    {
+      "status": "PASS",
+      "name": "resolve_evidence answers JSON-RPC",
+      "expected": "absent:__RPC_ERROR__",
+      "actual": "absent:__RPC_ERROR__"
+    },
+    {
+      "status": "PASS",
+      "name": "read_source answers JSON-RPC",
+      "expected": "absent:__RPC_ERROR__",
+      "actual": "absent:__RPC_ERROR__"
+    },
+    {
+      "status": "PASS",
+      "name": "get_snapshot answers JSON-RPC",
+      "expected": "absent:__RPC_ERROR__",
+      "actual": "absent:__RPC_ERROR__"
+    },
+    {
+      "status": "PASS",
+      "name": "diff_contracts answers JSON-RPC",
+      "expected": "absent:__RPC_ERROR__",
+      "actual": "absent:__RPC_ERROR__"
+    },
+    {
+      "status": "PASS",
+      "name": "apply_contract_context answers JSON-RPC",
+      "expected": "absent:__RPC_ERROR__",
+      "actual": "absent:__RPC_ERROR__"
+    },
+    {
+      "status": "PASS",
+      "name": "apply_contract_context dry-runs the declaration",
+      "expected": "contains:dry run",
+      "actual": "contains:dry run"
+    },
+    {
+      "status": "PASS",
+      "name": "apply_contract_context returns the YAML it would write",
+      "expected": "contains:http:GET /demo",
+      "actual": "contains:http:GET /demo"
+    },
+    {
+      "status": "PASS",
+      "name": "the dry run left repos.yaml alone",
+      "expected": "absent:http:GET /demo",
+      "actual": "absent:http:GET /demo"
+    }
+  ],
+  "tool_latency": {
+    "get_capabilities": {
+      "calls": 1,
+      "min_ms": 7,
+      "max_ms": 7,
+      "p50_ms": 7
+    },
+    "list_packages": {
+      "calls": 1,
+      "min_ms": 6,
+      "max_ms": 6,
+      "p50_ms": 6
+    },
+    "load_package": {
+      "calls": 1,
+      "min_ms": 6,
+      "max_ms": 6,
+      "p50_ms": 6
+    },
+    "get_health": {
+      "calls": 1,
+      "min_ms": 396,
+      "max_ms": 396,
+      "p50_ms": 396
+    },
+    "get_call_sites": {
+      "calls": 1,
+      "min_ms": 6,
+      "max_ms": 6,
+      "p50_ms": 6
+    },
+    "get_blast_radius": {
+      "calls": 2,
+      "min_ms": 7,
+      "max_ms": 9,
+      "p50_ms": 9
+    },
+    "find_dead_code": {
+      "calls": 1,
+      "min_ms": 8,
+      "max_ms": 8,
+      "p50_ms": 8
+    },
+    "find_anchors": {
+      "calls": 1,
+      "min_ms": 6,
+      "max_ms": 6,
+      "p50_ms": 6
+    },
+    "explain_dispatch": {
+      "calls": 1,
+      "min_ms": 9,
+      "max_ms": 9,
+      "p50_ms": 9
+    },
+    "get_call_chain": {
+      "calls": 1,
+      "min_ms": 7,
+      "max_ms": 7,
+      "p50_ms": 7
+    },
+    "trace_dependency": {
+      "calls": 1,
+      "min_ms": 7,
+      "max_ms": 7,
+      "p50_ms": 7
+    },
+    "explain_symbol": {
+      "calls": 3,
+      "min_ms": 48,
+      "max_ms": 1573,
+      "p50_ms": 56
+    },
+    "get_code_snippet": {
+      "calls": 1,
+      "min_ms": 6,
+      "max_ms": 6,
+      "p50_ms": 6
+    },
+    "query_graph": {
+      "calls": 4,
+      "min_ms": 6,
+      "max_ms": 7,
+      "p50_ms": 7
+    },
+    "describe_schema": {
+      "calls": 1,
+      "min_ms": 7,
+      "max_ms": 7,
+      "p50_ms": 7
+    },
+    "get_coupling_radar": {
+      "calls": 2,
+      "min_ms": 6,
+      "max_ms": 351,
+      "p50_ms": 351
+    },
+    "get_commit_history": {
+      "calls": 1,
+      "min_ms": 7,
+      "max_ms": 7,
+      "p50_ms": 7
+    },
+    "get_branch_status": {
+      "calls": 1,
+      "min_ms": 7,
+      "max_ms": 7,
+      "p50_ms": 7
+    },
+    "get_recent_activity": {
+      "calls": 1,
+      "min_ms": 7,
+      "max_ms": 7,
+      "p50_ms": 7
+    },
+    "explore_architecture": {
+      "calls": 1,
+      "min_ms": 7,
+      "max_ms": 7,
+      "p50_ms": 7
+    },
+    "get_master_map": {
+      "calls": 1,
+      "min_ms": 7,
+      "max_ms": 7,
+      "p50_ms": 7
+    },
+    "get_layered_map": {
+      "calls": 1,
+      "min_ms": 7,
+      "max_ms": 7,
+      "p50_ms": 7
+    },
+    "list_entry_points": {
+      "calls": 1,
+      "min_ms": 7,
+      "max_ms": 7,
+      "p50_ms": 7
+    },
+    "architectural_observations": {
+      "calls": 1,
+      "min_ms": 7,
+      "max_ms": 7,
+      "p50_ms": 7
+    },
+    "suggest_refactor_targets": {
+      "calls": 1,
+      "min_ms": 9,
+      "max_ms": 9,
+      "p50_ms": 9
+    },
+    "find_untested_functions": {
+      "calls": 1,
+      "min_ms": 8,
+      "max_ms": 8,
+      "p50_ms": 8
+    },
+    "get_coverage_summary": {
+      "calls": 1,
+      "min_ms": 7,
+      "max_ms": 7,
+      "p50_ms": 7
+    },
+    "compare_modules": {
+      "calls": 1,
+      "min_ms": 6,
+      "max_ms": 6,
+      "p50_ms": 6
+    },
+    "detect_overlap": {
+      "calls": 1,
+      "min_ms": 6,
+      "max_ms": 6,
+      "p50_ms": 6
+    },
+    "get_context_for_prompt": {
+      "calls": 1,
+      "min_ms": 7,
+      "max_ms": 7,
+      "p50_ms": 7
+    },
+    "get_world_state": {
+      "calls": 1,
+      "min_ms": 7,
+      "max_ms": 7,
+      "p50_ms": 7
+    },
+    "get_server_status": {
+      "calls": 1,
+      "min_ms": 7,
+      "max_ms": 7,
+      "p50_ms": 7
+    },
+    "get_reload_status": {
+      "calls": 1,
+      "min_ms": 6,
+      "max_ms": 6,
+      "p50_ms": 6
+    },
+    "list_recent_projects": {
+      "calls": 1,
+      "min_ms": 6,
+      "max_ms": 6,
+      "p50_ms": 6
+    },
+    "get_agent_strategy": {
+      "calls": 1,
+      "min_ms": 6,
+      "max_ms": 6,
+      "p50_ms": 6
+    },
+    "get_test_template": {
+      "calls": 1,
+      "min_ms": 7,
+      "max_ms": 7,
+      "p50_ms": 7
+    },
+    "navigate_to_anchor": {
+      "calls": 1,
+      "min_ms": 7,
+      "max_ms": 7,
+      "p50_ms": 7
+    },
+    "get_context_depth": {
+      "calls": 1,
+      "min_ms": 6,
+      "max_ms": 6,
+      "p50_ms": 6
+    },
+    "get_anchor_score": {
+      "calls": 1,
+      "min_ms": 7,
+      "max_ms": 7,
+      "p50_ms": 7
+    },
+    "get_cross_runtime_callers": {
+      "calls": 1,
+      "min_ms": 7,
+      "max_ms": 7,
+      "p50_ms": 7
+    },
+    "get_audit_log": {
+      "calls": 1,
+      "min_ms": 7,
+      "max_ms": 7,
+      "p50_ms": 7
+    },
+    "sync_state": {
+      "calls": 1,
+      "min_ms": 6,
+      "max_ms": 6,
+      "p50_ms": 6
+    },
+    "run_enrichment": {
+      "calls": 1,
+      "min_ms": 6,
+      "max_ms": 6,
+      "p50_ms": 6
+    },
+    "get_file_diff": {
+      "calls": 1,
+      "min_ms": 6,
+      "max_ms": 6,
+      "p50_ms": 6
+    },
+    "understand_repository": {
+      "calls": 1,
+      "min_ms": 9,
+      "max_ms": 9,
+      "p50_ms": 9
+    },
+    "find_symbol": {
+      "calls": 1,
+      "min_ms": 6,
+      "max_ms": 6,
+      "p50_ms": 6
+    },
+    "get_context": {
+      "calls": 1,
+      "min_ms": 49,
+      "max_ms": 49,
+      "p50_ms": 49
+    },
+    "find_related": {
+      "calls": 1,
+      "min_ms": 266,
+      "max_ms": 266,
+      "p50_ms": 266
+    },
+    "assess_change": {
+      "calls": 1,
+      "min_ms": 7,
+      "max_ms": 7,
+      "p50_ms": 7
+    },
+    "search_code": {
+      "calls": 1,
+      "min_ms": 12,
+      "max_ms": 12,
+      "p50_ms": 12
+    },
+    "register_agent": {
+      "calls": 2,
+      "min_ms": 6,
+      "max_ms": 6,
+      "p50_ms": 6
+    },
+    "claim_files": {
+      "calls": 4,
+      "min_ms": 87,
+      "max_ms": 135,
+      "p50_ms": 123
+    },
+    "list_occupancy": {
+      "calls": 1,
+      "min_ms": 48,
+      "max_ms": 48,
+      "p50_ms": 48
+    },
+    "list_active_agents": {
+      "calls": 2,
+      "min_ms": 92,
+      "max_ms": 192,
+      "p50_ms": 192
+    },
+    "who_am_i": {
+      "calls": 1,
+      "min_ms": 91,
+      "max_ms": 91,
+      "p50_ms": 91
+    },
+    "my_claims": {
+      "calls": 1,
+      "min_ms": 49,
+      "max_ms": 49,
+      "p50_ms": 49
+    },
+    "heartbeat": {
+      "calls": 1,
+      "min_ms": 47,
+      "max_ms": 47,
+      "p50_ms": 47
+    },
+    "release_files": {
+      "calls": 2,
+      "min_ms": 42,
+      "max_ms": 42,
+      "p50_ms": 42
+    },
+    "list_subagents": {
+      "calls": 1,
+      "min_ms": 8,
+      "max_ms": 8,
+      "p50_ms": 8
+    },
+    "lain_intent": {
+      "calls": 1,
+      "min_ms": 134,
+      "max_ms": 134,
+      "p50_ms": 134
+    },
+    "list_active_intents": {
+      "calls": 1,
+      "min_ms": 47,
+      "max_ms": 47,
+      "p50_ms": 47
+    },
+    "unregister_agent": {
+      "calls": 1,
+      "min_ms": 178,
+      "max_ms": 178,
+      "p50_ms": 178
+    },
+    "run_build": {
+      "calls": 1,
+      "min_ms": 60,
+      "max_ms": 60,
+      "p50_ms": 60
+    },
+    "run_tests": {
+      "calls": 1,
+      "min_ms": 118,
+      "max_ms": 118,
+      "p50_ms": 118
+    },
+    "run_clippy": {
+      "calls": 1,
+      "min_ms": 115,
+      "max_ms": 115,
+      "p50_ms": 115
+    },
+    "request_reload": {
+      "calls": 1,
+      "min_ms": 8,
+      "max_ms": 8,
+      "p50_ms": 8
+    },
+    "register_job_webhook": {
+      "calls": 1,
+      "min_ms": 12,
+      "max_ms": 12,
+      "p50_ms": 12
+    },
+    "get_job_status": {
+      "calls": 1,
+      "min_ms": 7,
+      "max_ms": 7,
+      "p50_ms": 7
+    },
+    "debug_sleep": {
+      "calls": 1,
+      "min_ms": 8,
+      "max_ms": 8,
+      "p50_ms": 8
+    },
+    "add_annotation": {
+      "calls": 1,
+      "min_ms": 24,
+      "max_ms": 24,
+      "p50_ms": 24
+    },
+    "list_annotations": {
+      "calls": 1,
+      "min_ms": 7,
+      "max_ms": 7,
+      "p50_ms": 7
+    },
+    "resolve_annotation": {
+      "calls": 1,
+      "min_ms": 6,
+      "max_ms": 6,
+      "p50_ms": 6
+    },
+    "leave_handoff_note": {
+      "calls": 1,
+      "min_ms": 7,
+      "max_ms": 7,
+      "p50_ms": 7
+    },
+    "get_pending_handoffs": {
+      "calls": 1,
+      "min_ms": 6,
+      "max_ms": 6,
+      "p50_ms": 6
+    },
+    "prepare_snapshot": {
+      "calls": 1,
+      "min_ms": 83,
+      "max_ms": 83,
+      "p50_ms": 83
+    },
+    "list_services": {
+      "calls": 1,
+      "min_ms": 24,
+      "max_ms": 24,
+      "p50_ms": 24
+    },
+    "get_service": {
+      "calls": 1,
+      "min_ms": 12,
+      "max_ms": 12,
+      "p50_ms": 12
+    },
+    "list_contracts": {
+      "calls": 1,
+      "min_ms": 16,
+      "max_ms": 16,
+      "p50_ms": 16
+    },
+    "list_service_refs": {
+      "calls": 1,
+      "min_ms": 17,
+      "max_ms": 17,
+      "p50_ms": 17
+    },
+    "get_contract": {
+      "calls": 1,
+      "min_ms": 20,
+      "max_ms": 20,
+      "p50_ms": 20
+    },
+    "list_unresolved": {
+      "calls": 1,
+      "min_ms": 24,
+      "max_ms": 24,
+      "p50_ms": 24
+    },
+    "check_binding": {
+      "calls": 1,
+      "min_ms": 18,
+      "max_ms": 18,
+      "p50_ms": 18
+    },
+    "trace_impact": {
+      "calls": 1,
+      "min_ms": 20,
+      "max_ms": 20,
+      "p50_ms": 20
+    },
+    "trace_flow": {
+      "calls": 1,
+      "min_ms": 11,
+      "max_ms": 11,
+      "p50_ms": 11
+    },
+    "get_coverage": {
+      "calls": 1,
+      "min_ms": 19,
+      "max_ms": 19,
+      "p50_ms": 19
+    },
+    "resolve_evidence": {
+      "calls": 1,
+      "min_ms": 11,
+      "max_ms": 11,
+      "p50_ms": 11
+    },
+    "read_source": {
+      "calls": 1,
+      "min_ms": 38,
+      "max_ms": 38,
+      "p50_ms": 38
+    },
+    "get_snapshot": {
+      "calls": 1,
+      "min_ms": 10,
+      "max_ms": 10,
+      "p50_ms": 10
+    },
+    "diff_contracts": {
+      "calls": 1,
+      "min_ms": 10,
+      "max_ms": 10,
+      "p50_ms": 10
+    },
+    "apply_contract_context": {
+      "calls": 1,
+      "min_ms": 23,
+      "max_ms": 23,
+      "p50_ms": 23
+    }
+  }
+}

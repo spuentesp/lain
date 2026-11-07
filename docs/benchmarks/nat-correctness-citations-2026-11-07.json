@@ -1,0 +1,357 @@
+{
+  "version": 1,
+  "sources": [
+    {
+      "id": 1,
+      "url": "/data/agents/orca/workspaces/lain/booby/docs/benchmarks/nat-correctness-audit-2026-11-07.json",
+      "title": "Captured live contract tool responses",
+      "accessed": "2026-11-06",
+      "quotes": [
+        {
+          "text": "{\n  \"started_utc\": \"2026-11-07T00:58:16.689217+00:00\",\n  \"mode\": \"static-no-lsp\",\n  \"binary_sha256\": \"c94c770863a869cbf64441354b0f79355c4b5851d82d1440aa1ff37bdad15a59\",\n  \"config\": \"data_dir: /tmp/lain-correctness-audit-nmc275kc/.lain/federation\\nmax_concurrent_indexers: 3\\nrepos:\\n  - id: nat\\n    source: {type: workspace_dir, path: /data/agents/tmp-lain-tests/nvidia-eval/NeMo-Agent-Toolkit}\\n  - id: nat-ui\\n    source: {type: workspace_dir, path: /data/agents/tmp-lain-tests/nvidia-eval/NeMo-Agent-Toolkit-UI}\\n  - id: nat-examples\\n    source: {type: workspace_dir, path: /data/agents/tmp-lain-tests/nvidia-eval/NeMo-Agent-Toolkit-Examples}\\nservices:\\n  - {name: nat, repo: nat, hosts: [localhost, 127.0.0.1], env: [NAT_BACKEND_URL, NAT_SERVER_URL, NAT_URL, NEXT_PUBLIC_NAT_URL]}\\n  - {name: nat-ui, repo: nat-ui}\\n  - {name: nat-examples, repo: nat-examples}\\n# The NAT server registers its routes from its runtime config file, so the\\n# analyzer cannot read them from source. The operator states them here.\\nprovides:\\n  - {service: nat, key: \\\"http:POST /chat/stream\\\", source: \\\"nat config.yaml (general.endpoint.path)\\\"}\\n  - {service: nat, key: \\\"http:POST /chat\\\", source: \\\"nat config.yaml\\\"}\\n  - {service: nat, key: \\\"ws:/websocket\\\", source: \\\"nat config.yaml (general.endpoint.websocket_path)\\\"}\\n# The UI proxy dials the host expression UPSTREAM_HTTP_ORIGIN, built from\\n# NAT_BACKEND_URL. The const lives in the request handler and the fetch\\n# sits in a nested closure; the analyzer follows the const across the\\n# scope and then through the assignments that build the origin, so the\\n# host resolves to the NAT_BACKEND_URL env var and the env: list of the\\n# nat service routes it. The alias below stays as the fallback for a\\n# host the analyzer cannot trace.\\nhost_aliases:\\n  - {host: UPSTREAM_HTTP_ORIGIN, service: nat,\\n     source: \\\"nat-ui proxy/server.js (NAT_BACKEND_URL)\\\"}\",",
+          "added": "2026-11-06"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "url": "https://github.com/NVIDIA/NeMo-Agent-Toolkit-Examples/blob/eadbb7573b9ba12c01a9df85c601a32a886d7b25/examples/agent_identity_tool/scripts/mock_registry_server.py",
+      "title": "nat-examples:examples/agent_identity_tool/scripts/mock_registry_server.py",
+      "accessed": "2026-11-06",
+      "quotes": [
+        {
+          "text": "\"url\": \"wss://ws.example.com/stream\",\n            },\n        ],\n        \"metadata\": {\n            \"model\": \"gpt-4-turbo\",",
+          "added": "2026-11-06"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "url": "https://github.com/NVIDIA/NeMo-Agent-Toolkit-UI/blob/41cb8cf843091a24bd06d0a5f844a3cb824049d8/__tests__/api/routes.test.ts",
+      "title": "nat-ui:__tests__/api/routes.test.ts",
+      "accessed": "2026-11-06",
+      "quotes": [
+        {
+          "text": "const initResponse = await fetch(`${serverURL}/init`, {\n                method: 'POST',\n                headers: { 'Content-Type': 'application/json' },\n                body: JSON.stringify({ uuid: ragUuid }),\n              });",
+          "added": "2026-11-06"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "url": "https://github.com/NVIDIA/NeMo-Agent-Toolkit-UI/blob/41cb8cf843091a24bd06d0a5f844a3cb824049d8/__tests__/components/Chat.websocket.test.tsx",
+      "title": "nat-ui:__tests__/components/Chat.websocket.test.tsx",
+      "accessed": "2026-11-06",
+      "quotes": [
+        {
+          "text": "const baseUrl = 'ws://test-server.com/websocket';\n\n      // Simulate the cookie extraction logic from the actual implementation\n      const mockDocumentCookie = `other=value; ${SESSION_COOKIE_NAME}=${mockSessionId}; another=test`;",
+          "added": "2026-11-06"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "url": "https://github.com/NVIDIA/NeMo-Agent-Toolkit-UI/blob/41cb8cf843091a24bd06d0a5f844a3cb824049d8/__tests__/proxy/proxy-integration.test.js",
+      "title": "nat-ui:__tests__/proxy/proxy-integration.test.js",
+      "accessed": "2026-11-06",
+      "quotes": [
+        {
+          "text": "const response = await fetch(`http://localhost:${PROXY_PORT}`);\n      proxyRunning = true;\n    } catch (err) {\n      console.warn('⚠️  Proxy server not running on port', PROXY_PORT);\n      console.warn(",
+          "added": "2026-11-06"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "url": "https://github.com/NVIDIA/NeMo-Agent-Toolkit-UI/blob/41cb8cf843091a24bd06d0a5f844a3cb824049d8/components/Chat/Chat.tsx",
+      "title": "nat-ui:components/Chat/Chat.tsx",
+      "accessed": "2026-11-06",
+      "quotes": [
+        {
+          "text": "response = await fetch(`${HTTP_PROXY_PATH}${httpEndpointPath}`, {\n            method: 'POST',\n            headers: {\n              'Content-Type': 'application/json',\n              'Conversation-Id': selectedConversation?.id || '',",
+          "added": "2026-11-06"
+        },
+        {
+          "text": "ws.onclose = async (event) => {\n        console.log(\n          '[WebSocket] Connection closed. Code:',\n          event.code,",
+          "added": "2026-11-06"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "url": "https://github.com/NVIDIA/NeMo-Agent-Toolkit-UI/blob/41cb8cf843091a24bd06d0a5f844a3cb824049d8/components/DataStreamDisplay/DataStreamDisplay.tsx",
+      "title": "nat-ui:components/DataStreamDisplay/DataStreamDisplay.tsx",
+      "accessed": "2026-11-06",
+      "quotes": [
+        {
+          "text": "const textRes = await fetch(\n            `${HTTP_PROXY_PATH}${UPDATE_DATA_STREAM}?stream=${selectedStream}`,\n          );\n          if (textRes.ok) {\n            const textData = await textRes.json();",
+          "added": "2026-11-06"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "url": "https://github.com/NVIDIA/NeMo-Agent-Toolkit-UI/blob/41cb8cf843091a24bd06d0a5f844a3cb824049d8/components/DataStreamDisplay/DataStreamManager.tsx",
+      "title": "nat-ui:components/DataStreamDisplay/DataStreamManager.tsx",
+      "accessed": "2026-11-06",
+      "quotes": [
+        {
+          "text": "const streamsRes = await fetch(\n          `${HTTP_PROXY_PATH}${UPDATE_DATA_STREAM}`,\n        );\n        if (streamsRes.ok) {\n          const streamsData = await streamsRes.json();",
+          "added": "2026-11-06"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "url": "https://github.com/NVIDIA/NeMo-Agent-Toolkit-UI/blob/41cb8cf843091a24bd06d0a5f844a3cb824049d8/hooks/useFeedback.ts",
+      "title": "nat-ui:hooks/useFeedback.ts",
+      "accessed": "2026-11-06",
+      "quotes": [
+        {
+          "text": "const response = await fetch('/api/feedback', {\n          method: 'POST',\n          headers: { 'Content-Type': 'application/json' },\n          body: JSON.stringify(payload),\n        });",
+          "added": "2026-11-06"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "url": "https://github.com/NVIDIA/NeMo-Agent-Toolkit-UI/blob/41cb8cf843091a24bd06d0a5f844a3cb824049d8/pages/api/mcp/clients.ts",
+      "title": "nat-ui:pages/api/mcp/clients.ts",
+      "accessed": "2026-11-06",
+      "quotes": [
+        {
+          "text": "const response = await fetch(url, {\n      method: 'GET',\n      signal: controller.signal,\n    });\n    clearTimeout(timeoutId);",
+          "added": "2026-11-06"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "url": "https://github.com/NVIDIA/NeMo-Agent-Toolkit-UI/blob/41cb8cf843091a24bd06d0a5f844a3cb824049d8/pages/database-updates.tsx",
+      "title": "nat-ui:pages/database-updates.tsx",
+      "accessed": "2026-11-06",
+      "quotes": [
+        {
+          "text": "const response = await fetch(\n        `${HTTP_PROXY_PATH}${UPDATE_DATA_STREAM}?type=finalized`,\n      );\n      if (!response.ok) {\n        throw new Error('Failed to fetch entries');",
+          "added": "2026-11-06"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "url": "https://github.com/NVIDIA/NeMo-Agent-Toolkit-UI/blob/41cb8cf843091a24bd06d0a5f844a3cb824049d8/proxy/server.js",
+      "title": "nat-ui:proxy/server.js",
+      "accessed": "2026-11-06",
+      "quotes": [
+        {
+          "text": "const initRes = await fetch(initUrl, {\n            method: 'POST',\n            headers: { 'Content-Type': 'application/json' },\n            body: JSON.stringify({ uuid: RAG_UUID }),\n          });",
+          "added": "2026-11-06"
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "url": "https://github.com/NVIDIA/NeMo-Agent-Toolkit-UI/blob/41cb8cf843091a24bd06d0a5f844a3cb824049d8/utils/api/mcpClient.ts",
+      "title": "nat-ui:utils/api/mcpClient.ts",
+      "accessed": "2026-11-06",
+      "quotes": [
+        {
+          "text": "const response = await fetch(`${HTTP_PROXY_PATH}${MCP_CLIENT_TOOL_LIST}`, {\n      method: 'GET',\n      headers: {\n        'Content-Type': 'application/json',\n      },",
+          "added": "2026-11-06"
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "url": "https://github.com/NVIDIA/NeMo-Agent-Toolkit-UI/blob/41cb8cf843091a24bd06d0a5f844a3cb824049d8/utils/app/content.ts",
+      "title": "nat-ui:utils/app/content.ts",
+      "accessed": "2026-11-06",
+      "quotes": [
+        {
+          "text": "const response = await fetch(`/content/${filename}`);\n\n    if (!response.ok) {\n      console.error(`Failed to load content file: ${filename}`);\n      return parseJson ? null : '';",
+          "added": "2026-11-06"
+        }
+      ]
+    },
+    {
+      "id": 15,
+      "url": "https://github.com/NVIDIA/NeMo-Agent-Toolkit/blob/2fdf56a41a4a3237a4dd83492fed8e11be7eec99/packages/nvidia_nat_mysql/src/nat/plugins/mysql/mysql_object_store.py",
+      "title": "nat:packages/nvidia_nat_mysql/src/nat/plugins/mysql/mysql_object_store.py",
+      "accessed": "2026-11-06",
+      "quotes": [
+        {
+          "text": "await cur.execute(\"INSERT IGNORE INTO object_meta (path, size) VALUES (%s, %s)\",\n                                      (key, len(item.data)))\n                    if cur.rowcount == 0:\n                        raise KeyAlreadyExistsError(\n                            key=key, additional_message=f\"MySQL table {self._bucket_name} already has key {key}\")",
+          "added": "2026-11-06"
+        }
+      ]
+    },
+    {
+      "id": 16,
+      "url": "https://github.com/NVIDIA/NeMo-Agent-Toolkit/blob/2fdf56a41a4a3237a4dd83492fed8e11be7eec99/ci/scripts/gitlab/artifactory_upload.py",
+      "title": "nat:ci/scripts/gitlab/artifactory_upload.py",
+      "accessed": "2026-11-06",
+      "quotes": [
+        {
+          "text": "response = requests.get(\n        f\"{kitmaker_url}/api/v0/projects\",\n        headers=headers,\n        timeout=(30, 600),\n    )",
+          "added": "2026-11-06"
+        }
+      ]
+    },
+    {
+      "id": 17,
+      "url": "https://github.com/NVIDIA/NeMo-Agent-Toolkit/blob/2fdf56a41a4a3237a4dd83492fed8e11be7eec99/examples/MCP/simple_calculator_fastmcp_protected/tests/test_simple_calculator_fastmcp_protected.py",
+      "title": "nat:examples/MCP/simple_calculator_fastmcp_protected/tests/test_simple_calculator_fastmcp_protected.py",
+      "accessed": "2026-11-06",
+      "quotes": [
+        {
+          "text": "response = httpx.get(f\"{fastmcp_protected_base_url}/mcp\", timeout=5.0)\n    assert response.status_code == 401",
+          "added": "2026-11-06"
+        }
+      ]
+    },
+    {
+      "id": 18,
+      "url": "https://github.com/NVIDIA/NeMo-Agent-Toolkit/blob/2fdf56a41a4a3237a4dd83492fed8e11be7eec99/packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py",
+      "title": "nat:packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py",
+      "accessed": "2026-11-06",
+      "quotes": [
+        {
+          "text": "response = await client.post(f\"{config.endpoint.generate}\", json=input_message)\n    assert response.status_code == 200\n\n\nasync def test_generate_endpoint_returns_error_body_when_workflow_raises(client: httpx.AsyncClient, config: Config):",
+          "added": "2026-11-06"
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "url": "https://github.com/NVIDIA/NeMo-Agent-Toolkit/blob/2fdf56a41a4a3237a4dd83492fed8e11be7eec99/packages/nvidia_nat_mcp/scripts/check_mcp_auth_cookie.py",
+      "title": "nat:packages/nvidia_nat_mcp/scripts/check_mcp_auth_cookie.py",
+      "accessed": "2026-11-06",
+      "quotes": [
+        {
+          "text": "default=\"ws://localhost:8000/websocket?session={user_id}\",\n                        help=\"WebSocket URL template with {user_id} placeholder for ws mode.\")\n    parser.add_argument(\"--http-endpoint\",\n                        choices=[\"chat\"],\n                        default=\"chat\",",
+          "added": "2026-11-06"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "url": "https://github.com/NVIDIA/NeMo-Agent-Toolkit/blob/2fdf56a41a4a3237a4dd83492fed8e11be7eec99/packages/nvidia_nat_mcp/scripts/check_mcp_auth_jwt.py",
+      "title": "nat:packages/nvidia_nat_mcp/scripts/check_mcp_auth_jwt.py",
+      "accessed": "2026-11-06",
+      "quotes": [
+        {
+          "text": "parser.add_argument(\"--ws-url\", default=\"ws://localhost:8000/websocket\", help=\"WebSocket URL for ws mode.\")\n    parser.add_argument(\"--http-endpoint\",\n                        choices=[\"chat\", \"chat-stream\"],\n                        default=\"chat\",\n                        help=(\"Preset HTTP endpoint for http mode. \"",
+          "added": "2026-11-06"
+        }
+      ]
+    },
+    {
+      "id": 21,
+      "url": "https://github.com/NVIDIA/NeMo-Agent-Toolkit/blob/2fdf56a41a4a3237a4dd83492fed8e11be7eec99/packages/nvidia_nat_memmachine/tests/test_memmachine_integration.py",
+      "title": "nat:packages/nvidia_nat_memmachine/tests/test_memmachine_integration.py",
+      "accessed": "2026-11-06",
+      "quotes": [
+        {
+          "text": "response = requests.get(f\"{base_url}/api/v2/health\", timeout=5)\n        response.raise_for_status()\n        return base_url\n    except Exception:\n        reason = f\"Unable to connect to MemMachine server at {base_url}. Please ensure the server is running.\"",
+          "added": "2026-11-06"
+        }
+      ]
+    },
+    {
+      "id": 22,
+      "url": "https://github.com/NVIDIA/NeMo-Agent-Toolkit/blob/2fdf56a41a4a3237a4dd83492fed8e11be7eec99/packages/nvidia_nat_test/src/nat/test/plugin.py",
+      "title": "nat:packages/nvidia_nat_test/src/nat/test/plugin.py",
+      "accessed": "2026-11-06",
+      "quotes": [
+        {
+          "text": "response = requests.get(f\"{url}/runtimes\", timeout=30)\n        response.raise_for_status()\n\n        # Check if the required python version is installed\n        runtimes = response.json()",
+          "added": "2026-11-06"
+        }
+      ]
+    },
+    {
+      "id": 23,
+      "url": "https://github.com/NVIDIA/NeMo-Agent-Toolkit-UI/blob/41cb8cf843091a24bd06d0a5f844a3cb824049d8/constants/index.js",
+      "title": "nat-ui:constants/index.js",
+      "accessed": "2026-11-06",
+      "quotes": [
+        {
+          "text": "const UPDATE_DATA_STREAM = '/update-data-stream';\nconst MCP_CLIENT_TOOL_LIST = '/mcp/client/tool/list';\nconst FEEDBACK = '/feedback';\n\n// =============================================================================",
+          "added": "2026-11-06"
+        },
+        {
+          "text": "const HTTP_PROXY_PATH = process.env.HTTP_PUBLIC_PATH || '/api';\nconst WEBSOCKET_PROXY_PATH = process.env.WS_PUBLIC_PATH || '/ws';\nconst WEBSOCKET_BACKEND_PATH = '/websocket';",
+          "added": "2026-11-06"
+        }
+      ]
+    },
+    {
+      "id": 24,
+      "url": "https://github.com/NVIDIA/NeMo-Agent-Toolkit-UI/blob/41cb8cf843091a24bd06d0a5f844a3cb824049d8/utils/app/const.ts",
+      "title": "nat-ui:utils/app/const.ts",
+      "accessed": "2026-11-06",
+      "quotes": [
+        {
+          "text": "export const getMcpApiUrl = () => {\n  const mcpPath = process.env.NEXT_PUBLIC_MCP_PATH || MCP_CLIENT_TOOL_LIST;\n  return `${HTTP_PROXY_PATH}${mcpPath}`;\n};",
+          "added": "2026-11-06"
+        }
+      ]
+    },
+    {
+      "id": 25,
+      "url": "https://github.com/NVIDIA/NeMo-Agent-Toolkit/blob/2fdf56a41a4a3237a4dd83492fed8e11be7eec99/packages/nvidia_nat_mcp/src/nat/plugins/mcp/client/fastapi_routes.py",
+      "title": "nat:packages/nvidia_nat_mcp/src/nat/plugins/mcp/client/fastapi_routes.py",
+      "accessed": "2026-11-06",
+      "quotes": [
+        {
+          "text": "app.add_api_route(\n        path=\"/mcp/client/tool/list\",\n        endpoint=get_mcp_client_tool_list,\n        methods=[\"GET\"],\n        response_model=MCPClientToolListResponse,",
+          "added": "2026-11-06"
+        },
+        {
+          "text": "app.add_api_route(path=\"/mcp/client/tool/list/per_user\",\n                      endpoint=get_per_user_mcp_client_tool_list,\n                      methods=[\"GET\"],\n                      response_model=MCPClientToolListResponse,\n                      description=\"Get list of MCP client tools for per-user workflows\",",
+          "added": "2026-11-06"
+        }
+      ]
+    },
+    {
+      "id": 26,
+      "url": "/data/agents/orca/workspaces/lain/booby/src/server/sensors/graphql_consumer_sensor.rs",
+      "title": "src/server/sensors/graphql_consumer_sensor.rs",
+      "accessed": "2026-11-06",
+      "quotes": [
+        {
+          "text": "// Python / JS function calls: `gql(\"...\")` or `.execute(\"...\")`\n    for tag in [\"gql(\\\"\", \".execute(\\\"\"] {\n        let mut search_from = 0;\n        while let Some(rel) = content[search_from..].find(tag) {\n            let start = search_from + rel;",
+          "added": "2026-11-06"
+        }
+      ]
+    },
+    {
+      "id": 27,
+      "url": "/data/agents/orca/workspaces/lain/booby/src/server/sensors/websocket_sensor.rs",
+      "title": "src/server/sensors/websocket_sensor.rs",
+      "accessed": "2026-11-06",
+      "quotes": [
+        {
+          "text": "// with the handler name (group 2 of the YAML's\n        // `ws-event-handler` regex); group 1 (the event name\n        // `on{open,…}`) is kept in `literal` so the alternation\n        // matches the four `on{…}` shapes in a single\n        // non-optional branch.",
+          "added": "2026-11-06"
+        },
+        {
+          "text": "graph.upsert_node(node)?;\n            count += 1;\n        } else if !handler_name.is_empty() {\n            // Server handler -> ProviderFact + Uses edge\n            let route = format!(\"/{}\", handler_name);\n            let key = format!(\"ws:handler:{}\", handler_name);\n            if !seen_keys.insert(key.clone()) {\n                continue;\n            }\n\n            let mut node = crate::server::sensors::util::site_node(\n                NodeType::HttpRoute,\n                key,\n                &node_path,\n                None,\n                line,\n                namespace,",
+          "added": "2026-11-06"
+        }
+      ]
+    },
+    {
+      "id": 28,
+      "url": "/data/agents/orca/workspaces/lain/booby/docs/benchmarks/nvidia-correctness-fixes-2026-11-07.json",
+      "title": "Analyzer revision 9: corrected NVIDIA results and final verification",
+      "accessed": "2026-11-07",
+      "quotes": [
+        {
+          "text": "\"analyzer_revision\": 9,\n  \"binary_sha256\": \"f181991e132306b1b17da6019de18a71db451d92721e4796e10b81390c93f503\",\n  \"smokes\": [\n    {",
+          "added": "2026-11-07"
+        }
+      ]
+    }
+  ]
+}

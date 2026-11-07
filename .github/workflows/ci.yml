@@ -684,6 +684,11 @@ jobs:
       - name: Windows archive contract tests
         working-directory: .
         run: python3 scripts/test_package_windows_release.py
+      - name: Startup benchmark and contract smoke harness tests
+        working-directory: .
+        run: |
+          python3 tests/e2e/test_nvidia_startup_bench.py
+          python3 tests/e2e/test_contract_smoke_scope.py
 
   arch-guardrails:
     name: Architecture guardrails (no redundant code)
