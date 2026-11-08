@@ -372,7 +372,9 @@ pub fn get_cross_repo_blast_radius_for_repo(
         total_count: total,
         truncated,
         answer_scope: truncated.then(|| {
-            crate::server::tools::answer_scope::IncompleteReason::Truncated.wire_label().to_string()
+            crate::server::tools::answer_scope::IncompleteReason::Truncated
+                .wire_label()
+                .to_string()
         }),
     })
 }
@@ -603,7 +605,11 @@ mod tests {
         // the list is not the whole answer.
         let tmp = tempfile::tempdir().unwrap();
         let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
-        for (name, path) in [("shared", "src/a.rs"), ("mid", "src/b.rs"), ("deep", "src/c.rs")] {
+        for (name, path) in [
+            ("shared", "src/a.rs"),
+            ("mid", "src/b.rs"),
+            ("deep", "src/c.rs"),
+        ] {
             fed.backend()
                 .upsert_node_global(
                     &format!("repo-a:Function:{path}:{name}:0"),

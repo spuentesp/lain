@@ -886,11 +886,11 @@ mod tests {
                fetch(target);"#,
         );
         assert_eq!(found.len(), 1);
+        assert_eq!(found[0].url.host, HostPart::Expr("HTTP_PROXY_PATH".into()));
         assert_eq!(
-            found[0].url.host,
-            HostPart::Expr("HTTP_PROXY_PATH".into())
+            found[0].url.template.as_deref(),
+            Some("/update-data-stream")
         );
-        assert_eq!(found[0].url.template.as_deref(), Some("/update-data-stream"));
     }
 
     #[test]
@@ -900,10 +900,7 @@ mod tests {
                fetch(`${HTTP_PROXY_PATH}${httpEndpointPath}`, { method: 'POST' });"#,
         );
         assert_eq!(found.len(), 1);
-        assert_eq!(
-            found[0].url.host,
-            HostPart::Expr("HTTP_PROXY_PATH".into())
-        );
+        assert_eq!(found[0].url.host, HostPart::Expr("HTTP_PROXY_PATH".into()));
         assert_eq!(found[0].url.template, None);
     }
 

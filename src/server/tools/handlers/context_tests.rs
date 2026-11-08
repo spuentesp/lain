@@ -159,7 +159,6 @@ fn test_get_call_sites_no_callers() {
     assert!(text.contains("No call sites") || text.contains("caller"));
 }
 
-
 // ─── Answer scope: why an empty answer may not be a confirmed absence ──
 //
 // The five cases the objective-gap plan names: a correctly resolved
@@ -302,7 +301,8 @@ fn stale_index_reports_the_stale_file() {
 
     let mut target = scanned_node("call_target", "src/target.rs", &ns);
     // Scanned an hour ago; the file was written just now.
-    target.last_lsp_sync = Some(crate::server::time::unix_secs(std::time::SystemTime::now()) - 3600);
+    target.last_lsp_sync =
+        Some(crate::server::time::unix_secs(std::time::SystemTime::now()) - 3600);
     db.upsert_node(target).unwrap();
 
     let report = get_call_sites_report_scoped(&dir, &db, &overlay, "call_target", None).unwrap();

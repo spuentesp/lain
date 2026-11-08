@@ -658,7 +658,10 @@ fn convention_based_env_default_host_stays_unresolved_without_service_attributio
         "poll",
         1,
         MethodSpec::Known(HttpMethod::Get),
-        url_with_host_method(HostPart::Expr("HTTP_PROXY_PATH".into()), Some("/update-data-stream")),
+        url_with_host_method(
+            HostPart::Expr("HTTP_PROXY_PATH".into()),
+            Some("/update-data-stream"),
+        ),
         CallVia::Library {
             name: "fetch".into(),
         },
@@ -677,7 +680,10 @@ fn convention_based_env_default_host_stays_unresolved_without_service_attributio
     let mut cfg = default_config();
     cfg.services.clear(); // no env / hosts entry can claim the expression
     let out = ContractJoiner::run(&[p, known.clone(), dynamic.clone()], &[], &cfg);
-    assert!(out.binds.is_empty(), "a convention-based host must not bind");
+    assert!(
+        out.binds.is_empty(),
+        "a convention-based host must not bind"
+    );
     let known_id = GlobalId::parse(&known.id).unwrap();
     let dynamic_id = GlobalId::parse(&dynamic.id).unwrap();
     let known_res = out.index.consumer(&known_id).expect("known resolution");
@@ -694,7 +700,10 @@ fn convention_based_env_default_host_stays_unresolved_without_service_attributio
     let dynamic_res = out.index.consumer(&dynamic_id).expect("dynamic resolution");
     match &dynamic_res.target {
         Some(ConsumerTarget::Unresolved { reason, .. }) => assert!(
-            matches!(reason, UnresolvedReason::Unnormalized | UnresolvedReason::NoMatch),
+            matches!(
+                reason,
+                UnresolvedReason::Unnormalized | UnresolvedReason::NoMatch
+            ),
             "runtime-selected path stays uncertain, got {reason:?}"
         ),
         other => panic!("expected Unresolved, got {other:?}"),

@@ -224,15 +224,14 @@ pub async fn get_call_chain(
         // one: neither end is reached through a dispatcher and neither
         // end's file moved on after its scan. Otherwise the path may
         // exist and the static graph cannot see it.
-        let dynamic = starts.iter().any(|n| {
-            crate::server::tools::answer_scope::dispatches_dynamically(graph, n)
-        }) || ends.iter().any(|id| {
-            graph
-                .get_node(id)
-                .ok()
-                .flatten()
-                .is_some_and(|n| crate::server::tools::answer_scope::dispatches_dynamically(graph, &n))
-        });
+        let dynamic = starts
+            .iter()
+            .any(|n| crate::server::tools::answer_scope::dispatches_dynamically(graph, n))
+            || ends.iter().any(|id| {
+                graph.get_node(id).ok().flatten().is_some_and(|n| {
+                    crate::server::tools::answer_scope::dispatches_dynamically(graph, &n)
+                })
+            });
         let scope = crate::server::tools::answer_scope::reason_for(
             from_defs > 1 || to_defs > 1,
             false,

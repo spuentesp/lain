@@ -91,11 +91,7 @@ impl IncompleteReason {
 /// dynamically — it publishes to a bus, resolves through a container, or
 /// is routed by a router — which is what makes its own incoming callers
 /// invisible.
-pub fn reason_for(
-    ambiguous: bool,
-    stale: bool,
-    dynamic: bool,
-) -> Option<IncompleteReason> {
+pub fn reason_for(ambiguous: bool, stale: bool, dynamic: bool) -> Option<IncompleteReason> {
     if ambiguous {
         return Some(IncompleteReason::AmbiguousTarget);
     }

@@ -441,7 +441,11 @@ pub fn get_call_sites_report_scoped(
     // Say up front what the answer cannot cover, so a reader does not have
     // to infer it from the counts.
     if let Some(reason) = answer_scope {
-        result.push_str(&format!("Note: {} — {}.\n\n", reason.wire_label(), reason.explanation()));
+        result.push_str(&format!(
+            "Note: {} — {}.\n\n",
+            reason.wire_label(),
+            reason.explanation()
+        ));
     }
 
     for (caller, sites) in &lines_by_caller {
