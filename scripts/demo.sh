@@ -384,7 +384,7 @@ check_contains "cursor adapter names the server 'lain'" '"lain"' \
 HOME="$CLIENT_FAKE_HOME/vscode" XDG_CONFIG_HOME="$CLIENT_FAKE_HOME/vscode/.config" \
     "$LAIN" setup --workspace "$SUBJECT" --agent vscode --yes --no-model --print-config \
     > "$CLIENT_FAKE_HOME/vscode.out" 2>&1
-check_contains "vscode adapter emits `servers.lain` schema" '"servers"' \
+check_contains 'vscode adapter emits `servers.lain` schema' '"servers"' \
     "$(cat "$CLIENT_FAKE_HOME/vscode.out")"
 check_contains "vscode adapter names the server 'lain'" '"lain"' \
     "$(cat "$CLIENT_FAKE_HOME/vscode.out")"
