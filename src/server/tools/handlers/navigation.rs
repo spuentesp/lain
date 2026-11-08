@@ -170,6 +170,8 @@ pub async fn get_call_chain(
             )));
         }
     }
+    let from_defs = starts.len();
+    let to_defs = end_nodes.len();
     let ends: HashSet<String> = end_nodes.into_iter().map(|n| n.id).collect();
 
     let mut queue = VecDeque::new();
@@ -218,9 +220,37 @@ pub async fn get_call_chain(
     }
 
     let Some(end_id) = found else {
+        // "No path" is only conclusive when the answer could have found
+        // one: neither end is reached through a dispatcher and neither
+        // end's file moved on after its scan. Otherwise the path may
+        // exist and the static graph cannot see it.
+        let dynamic = starts.iter().any(|n| {
+            crate::server::tools::answer_scope::dispatches_dynamically(graph, n)
+        }) || ends.iter().any(|id| {
+            graph
+                .get_node(id)
+                .ok()
+                .flatten()
+                .is_some_and(|n| crate::server::tools::answer_scope::dispatches_dynamically(graph, &n))
+        });
+        let scope = crate::server::tools::answer_scope::reason_for(
+            from_defs > 1 || to_defs > 1,
+            false,
+            dynamic,
+        );
+        let note = match scope {
+            Some(reason) => format!(" — {}: {}", reason.wire_label(), reason.explanation()),
+            None => String::new(),
+        };
         return Ok(format!(
-            "No call path found from '{}' to '{}' in this repository.",
-            from, to
+            "No call path found from '{}' to '{}' in this repository{}.\n\
+             The search covered every definition of both names ({from_defs} for '{from}', \
+             {to_defs} for '{to}').",
+            from,
+            to,
+            note,
+            from_defs = from_defs,
+            to_defs = to_defs,
         ));
     };
 

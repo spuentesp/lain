@@ -275,6 +275,11 @@ pub struct CallSitesReport {
     pub other_definitions: Vec<crate::schema::GraphNode>,
     pub sites: Vec<CallSiteEntry>,
     pub total_sites: usize,
+    /// Why the answer cannot be read as "nothing calls this", or `None`
+    /// when it can. `None` on an empty result is a *confirmed* absence:
+    /// the name matched one definition, the index is current for its
+    /// file, and the graph holds no caller for it.
+    pub answer_scope: Option<crate::server::tools::answer_scope::IncompleteReason>,
 }
 
 pub fn get_call_sites_scoped(
@@ -312,12 +317,26 @@ pub fn get_call_sites_report_scoped(
         .collect::<Vec<_>>();
 
     if callers.is_empty() {
-        // A leaf really has no callers; a stale file only looks like one. These
-        // read identically to a caller acting on the answer, so distinguish them.
-        let text = match freshness.as_ref().and_then(|f| f.note(&node.path)) {
-            Some(note) => format!(
-                "{amb}{note}\nNo call sites found for '{symbol}' in the graph — \
-                 callers added since the last index would not appear."
+        // A leaf really has no callers; a stale file only looks like one, and a
+        // symbol dispatched dynamically has callers the static graph cannot
+        // see. These read identically to a caller acting on the answer, so
+        // distinguish them.
+        // A snapshot has no disk to compare against, so it is never stale.
+        let stale = match freshness.as_ref() {
+            Some(crate::graph::Freshness::Fresh) => false,
+            Some(_) => true,
+            None => false,
+        };
+        let scope = crate::server::tools::answer_scope::reason_for(
+            !other_defs.is_empty(),
+            stale,
+            crate::server::tools::answer_scope::dispatches_dynamically(graph, &node),
+        );
+        let text = match scope {
+            Some(reason) => format!(
+                "{amb}No call sites found for '{symbol}' in the graph — {} ({}).",
+                reason.explanation(),
+                reason.wire_label()
             ),
             None => format!("{amb}No call sites found for '{symbol}' ({symbol} is a leaf)"),
         };
@@ -327,6 +346,7 @@ pub fn get_call_sites_report_scoped(
             other_definitions: other_defs,
             sites: Vec::new(),
             total_sites: 0,
+            answer_scope: scope,
         });
     }
 
@@ -344,6 +364,13 @@ pub fn get_call_sites_report_scoped(
     // positions and the real count.
     let mut lines_by_caller: Vec<(&crate::schema::GraphNode, Vec<usize>)> = Vec::new();
     let mut total_sites = 0usize;
+    // A `Calls` edge whose call line cannot be located is the one case
+    // where the graph knows a caller but cannot point at the call. The
+    // reason it cannot point at it is either the file moved on after its
+    // scan (stale) or the call is not spelled as the symbol's name
+    // (an alias, a trait object — dynamic).
+    let mut unlocated_caller_stale = false;
+    let mut unlocated_caller_dynamic = false;
     for caller in &callers {
         // An uncommitted edit shifts the caller: search its current range,
         // from the overlay's copy of the same function, when there is one.
@@ -357,9 +384,43 @@ pub fn get_call_sites_report_scoped(
             &node.name,
             snapshot,
         )?;
+        if sites.is_empty() {
+            // A file that is current on disk but does not spell the
+            // callee's name means the call is not statically locatable —
+            // an alias, a trait object, a macro. A file that moved on
+            // after its scan means the index is behind the code.
+            let caller_fresh = snapshot.is_none()
+                && matches!(
+                    graph.freshness(workspace, &caller.path),
+                    crate::graph::Freshness::Fresh
+                );
+            if caller_fresh {
+                unlocated_caller_dynamic = true;
+            } else if snapshot.is_none() {
+                unlocated_caller_stale = true;
+            } else {
+                unlocated_caller_dynamic = true;
+            }
+        }
         total_sites += sites.len();
         lines_by_caller.push((caller, sites));
     }
+
+    // The answer's completeness: a name that matched several definitions
+    // is answered "about one of them"; a stale target file makes the
+    // whole answer provisional; a symbol dispatched dynamically has
+    // callers the static graph cannot see.
+    let stale_target = match freshness.as_ref() {
+        Some(crate::graph::Freshness::Fresh) => false,
+        Some(_) => true,
+        None => false,
+    };
+    let answer_scope = crate::server::tools::answer_scope::reason_for(
+        !other_defs.is_empty(),
+        stale_target || unlocated_caller_stale,
+        crate::server::tools::answer_scope::dispatches_dynamically(graph, &node)
+            || unlocated_caller_dynamic,
+    );
 
     let heading = if total_sites > 0 && total_sites != callers.len() {
         format!(
@@ -376,6 +437,12 @@ pub fn get_call_sites_report_scoped(
         )
     };
     result.push_str(&heading);
+
+    // Say up front what the answer cannot cover, so a reader does not have
+    // to infer it from the counts.
+    if let Some(reason) = answer_scope {
+        result.push_str(&format!("Note: {} — {}.\n\n", reason.wire_label(), reason.explanation()));
+    }
 
     for (caller, sites) in &lines_by_caller {
         if sites.is_empty() {
@@ -419,6 +486,7 @@ pub fn get_call_sites_report_scoped(
         other_definitions: other_defs,
         sites,
         total_sites,
+        answer_scope,
     })
 }
 

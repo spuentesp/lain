@@ -1140,7 +1140,13 @@ pub(crate) fn unresolved_reason_label(r: UnresolvedReason) -> &'static str {
         // Joinder verdict (Phase A review §S1 — unified model).
         NoRouteInService => "no_route_in_service",
         NoMatch => "no_match",
-        Unnormalized => "no_route_in_service",
+        // A dynamic path is its own reason: the target is chosen at
+        // runtime, so "no route in service" would claim the service was
+        // checked and had no such route — which is not what happened.
+        // The NAT audit recorded exactly this confusion (sites moving
+        // between `no_match` and `no_route_in_service` for a path that
+        // was never static).
+        Unnormalized => "dynamic_target",
         WrapperUnconfigured => "wrapper_unconfigured",
         EnvUnmapped => "env_unmapped",
         EnvAmbiguous => "env_ambiguous",
@@ -1626,7 +1632,7 @@ mod tests {
         );
         assert_eq!(
             unresolved_reason_label(UnresolvedReason::Unnormalized),
-            "no_route_in_service"
+            "dynamic_target"
         );
         assert_eq!(
             unresolved_reason_label(UnresolvedReason::WrapperUnconfigured),

@@ -103,6 +103,9 @@ pub struct BlastRadiusReport {
     pub nodes: Vec<BlastRadiusNode>,
     pub heuristic_count: usize,
     pub co_change_partners: Vec<(String, usize)>,
+    /// Why the answer cannot be read as "nothing depends on this", or
+    /// `None` when it can.
+    pub answer_scope: Option<crate::server::tools::answer_scope::IncompleteReason>,
 }
 
 pub async fn get_blast_radius_scoped(
@@ -354,8 +357,26 @@ pub async fn get_blast_radius_report_scoped(
     // resolvable caller); deriving it from `visited` instead drifted
     // whenever an edge pointed at an unresolvable node.
     let total_affected = affected_names.len();
+    // "No dependents found" is only a confirmed absence when the answer
+    // could have found them: the name matched one definition, the index
+    // is current for its file, and the symbol is not reached through a
+    // dispatcher. Otherwise say what is missing.
+    let scope = crate::server::tools::answer_scope::reason_for(
+        !other_defs.is_empty(),
+        !historical && crate::server::tools::answer_scope::is_stale(graph, workspace, &node.path),
+        crate::server::tools::answer_scope::dispatches_dynamically(graph, &node),
+    );
     if affected_names.is_empty() {
-        output.push_str("\n  (no dependents found — symbol may be a leaf or not yet indexed)");
+        match scope {
+            Some(reason) => output.push_str(&format!(
+                "\n  (no dependents found — {}; {})",
+                reason.wire_label(),
+                reason.explanation()
+            )),
+            None => output.push_str(
+                "\n  (no dependents found — the index is current for this file and nothing in it calls the symbol)",
+            ),
+        }
         // Don't show total count when there are no names to show
     } else {
         // Direct callers and transitive reach answer different questions and
@@ -452,6 +473,7 @@ pub async fn get_blast_radius_report_scoped(
         nodes: session_nodes,
         heuristic_count: heuristic_caller_count as usize,
         co_change_partners,
+        answer_scope: scope,
     })
 }
 
@@ -851,8 +873,15 @@ mod tests {
             "the warning must name the file, got:\n{output}"
         );
         assert!(
-            !output.contains("Overlay freshness") && !output.contains("stale"),
+            !output.contains("Overlay freshness"),
             "the bare overlay-age marker must be gone, got:\n{output}"
+        );
+        // The answer now names the reason it cannot be conclusive, in
+        // the shared vocabulary the other graph tools use.
+        assert!(
+            output.contains("stale_or_unindexed"),
+            "a file edited after its scan makes the answer provisional, and the \
+             answer must say so; got:\n{output}"
         );
     }
 

@@ -73,6 +73,13 @@ pub struct ExplainDispatch {
     pub runtime_callers: Vec<RuntimeCaller>,
     pub co_change_partners: Vec<String>,
     pub verdict: &'static str,
+    /// Why the answer may not cover everything, or `None` when it does.
+    /// `None` alongside `insufficient_evidence` means the graph really
+    /// holds no signal for this symbol — a confirmed absence of
+    /// *evidence*, which is still not proof that nothing calls it. A
+    /// reason names what could not be seen (an ambiguous name, a stale
+    /// index, a dispatcher the static graph cannot follow).
+    pub answer_scope: Option<&'static str>,
 }
 
 /// Look up everything we know about `symbol` and render the verdict.
@@ -255,6 +262,17 @@ pub fn build_with_store(
         (false, false, false) => "insufficient_evidence",
     };
 
+    // The verdict says which signals fired; this says why an empty
+    // answer might be empty rather than complete. A symbol that
+    // dispatches dynamically has callers the static graph cannot see, so
+    // "no static callers" is not evidence that none exist.
+    let answer_scope = crate::server::tools::answer_scope::reason_for(
+        false,
+        false,
+        crate::server::tools::answer_scope::dispatches_dynamically(graph, target),
+    )
+    .map(|r| r.wire_label());
+
     ExplainDispatch {
         symbol: target.name.clone(),
         target_id: target.id.clone(),
@@ -264,6 +282,7 @@ pub fn build_with_store(
         runtime_callers,
         co_change_partners,
         verdict,
+        answer_scope,
     }
 }
 

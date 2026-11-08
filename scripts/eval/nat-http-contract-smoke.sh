@@ -324,11 +324,23 @@ for i in sites:
     line = i["consumer"].get("line")
     if i.get("target_service") is not None:
         sys.exit(f"FAIL {path}:{line} invented target_service {i.get('target_service')}")
-    if i.get("reason") not in {"no_match", "no_route_in_service", "unnormalized"}:
-        sys.exit(f"FAIL {path}:{line} unexpected reason {i.get('reason')}")
+    reason = i.get("reason")
+    if reason not in {"no_match", "no_route_in_service", "dynamic_target"}:
+        sys.exit(f"FAIL {path}:{line} unexpected reason {reason}")
     if i.get("candidates"):
         sys.exit(f"FAIL {path}:{line} has candidates despite no service attribution")
     found.setdefault(path, set()).add(line)
+# The four static-path sites resolve to a known path with no service
+# (`no_match`); a runtime-selected path is `dynamic_target` — chosen at
+# runtime is not the same finding as a missing route.
+static_paths = {"components/DataStreamDisplay/DataStreamDisplay.tsx",
+                "components/DataStreamDisplay/DataStreamManager.tsx",
+                "pages/database-updates.tsx"}
+for i in sites:
+    path = i["consumer"]["path"]
+    line = i["consumer"].get("line")
+    if path in static_paths and i.get("reason") != "no_match":
+        sys.exit(f"FAIL {path}:{line} expected no_match for a static path, got {i.get('reason')}")
 for path, lines in expect.items():
     if not lines <= found.get(path, set()):
         sys.exit(f"FAIL {path}: expected lines {lines}, found {found.get(path, set())}")

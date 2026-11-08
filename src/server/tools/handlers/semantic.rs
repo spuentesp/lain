@@ -461,15 +461,33 @@ pub async fn assess_change_report_scoped(
         "high"
     };
 
+    // Why the answer may not cover everything. The blast radius knows
+    // whether the symbol dispatches dynamically and whether its file is
+    // current; the call-site report knows whether the name was ambiguous.
+    // A reason here means "no dependents found" is not a confirmed
+    // absence.
+    let answer_scope = blast.answer_scope.or(callsites.answer_scope);
+
     // Zero is what the index detected, not a safety result: dynamic
     // dispatch, reflection, config/framework wiring and repositories
-    // outside this index are invisible to it.
+    // outside this index are invisible to it. When the answer also
+    // knows *why* it could not be conclusive, it says so specifically
+    // on top of that general limit.
     let caveat = if risk == "low" {
-        " No dependents found in the indexed graph; this is detected reach, \
+        let mut caveat = " No dependents found in the indexed graph; this is detected reach, \
          not proof of safety (dynamic dispatch, reflection, config wiring and \
          repos outside this index are not visible)."
+            .to_string();
+        if let Some(reason) = answer_scope {
+            caveat.push_str(&format!(
+                " For this answer: {} — {}.",
+                reason.wire_label(),
+                reason.explanation()
+            ));
+        }
+        caveat
     } else {
-        ""
+        String::new()
     };
 
     let direct_nodes: Vec<_> = blast
@@ -535,6 +553,11 @@ pub async fn assess_change_report_scoped(
                 "transitive": transitive_count,
                 "heuristic": blast.heuristic_count,
             },
+            // `null` means the answer is complete — including a `low`
+            // risk that is a confirmed absence. A reason names what the
+            // answer cannot cover, so a reader never mistakes "not
+            // detected" for "does not exist".
+            "answer_scope": crate::server::tools::answer_scope::scope_value(answer_scope),
         }),
     })
 }

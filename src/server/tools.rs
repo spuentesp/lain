@@ -2,6 +2,7 @@
 //!
 //! Follows SOLID and DRY principles by delegating logic to specialized handlers.
 
+pub mod answer_scope;
 pub mod capabilities;
 pub mod definitions;
 pub mod handlers;

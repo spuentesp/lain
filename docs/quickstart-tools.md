@@ -237,6 +237,11 @@ All callers of a function.
 { "name": "get_call_sites", "arguments": { "symbol": "my_function" } }
 ```
 
+The structured output carries an `answer_scope` field: `null` when the
+answer is complete (an empty result is then a confirmed absence), or a
+label naming what the answer could not cover — see
+[Reading the answers](#answer_scope-why-an-answer-may-not-be-complete).
+
 ### get_context_depth
 Distance from an entry point (abstraction layers).
 ```json
@@ -410,6 +415,32 @@ A few tools are easy to over-trust. What they actually mean:
 | `get_coupling_radar` | Files that change together in git history | A static dependency. It is temporal correlation. |
 | `semantic_search` | Nearest neighbours by embedding | Exact matches. Use `query_graph` or `get_call_sites` for those. **Conditional**: filtered from `tools/list` when no model is loaded (no model → no advertised tool, not a "not loaded" answer); passes the filter when `--embedding-model` is set. |
 | `get_cross_repo_blast_radius` | Callers across the federation (**incoming** `Calls`) | What the symbol depends on — that is `trace_dependency`. `depth` is a string range (`"1..3"`), not a number. |
+
+### `answer_scope`: why an answer may not be complete
+
+`get_call_sites`, `get_blast_radius`, `assess_change`, `explain_dispatch` and
+`get_cross_repo_blast_radius` all report an `answer_scope` field (in the
+structured output; the text responses say the same thing in words). It is
+`null` when the answer is complete — **including an empty answer that is
+a confirmed absence**: the name matched one definition, the index is
+current for that file, and the graph holds no caller. A non-null value
+names the specific gap:
+
+| `answer_scope` | What the answer could not cover |
+|----------------|-------------------------------|
+| `unresolved_name` | The name did not resolve to a symbol in the graph. |
+| `ambiguous_target` | The name matches more than one definition, so the answer covers one of them. |
+| `dynamic_target` | The target is chosen at runtime — a bus, a container, a router, or a call spelled differently from the symbol's name — so callers the static graph cannot see are not counted. |
+| `stale_or_unindexed` | The file changed after it was last indexed (or was never indexed), so recent changes are missing. |
+| `truncated` | The traversal hit its cap or depth limit, so the result is a prefix of the full answer. |
+
+So an empty `get_call_sites` with `answer_scope: null` means *nothing in
+the current index calls this*, while an empty one with
+`answer_scope: "dynamic_target"` means *the index could not see the
+callers*. The second is not a safe change. The same field appears in
+`assess_change`: `risk: "low"` with a `null` scope is detected reach,
+and `risk: "low"` with a scope is an answer the analyzer could not
+complete.
 
 When the graph is behind HEAD, `get_health` says so and "not found"
 answers point at it. Treat a `Degraded ⚠` server's silence as "not in

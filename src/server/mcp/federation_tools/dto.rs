@@ -64,6 +64,12 @@ pub struct CrossRepoBlastRadius {
     pub by_repo: BTreeMap<String, Vec<String>>,
     pub total_count: usize,
     pub truncated: bool,
+    /// Why the answer cannot be read as complete, or `None` when it can.
+    /// `truncated` above is the observable; this names what it means for
+    /// the answer, so a reader does not have to know the cap to
+    /// understand that the list is a prefix of the full reach.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer_scope: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

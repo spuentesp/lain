@@ -371,6 +371,9 @@ pub fn get_cross_repo_blast_radius_for_repo(
         by_repo,
         total_count: total,
         truncated,
+        answer_scope: truncated.then(|| {
+            crate::server::tools::answer_scope::IncompleteReason::Truncated.wire_label().to_string()
+        }),
     })
 }
 
@@ -590,6 +593,85 @@ mod tests {
         );
         assert_eq!(result.total_count, 0);
         assert!(!result.truncated);
+    }
+
+    #[tokio::test]
+    async fn cross_repo_blast_radius_reports_a_truncated_walk_as_incomplete() {
+        // A walk that stops at the depth limit returns a prefix of the
+        // real reach. The flag says so; the answer scope says what it
+        // means, so a reader does not have to know the cap to know that
+        // the list is not the whole answer.
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        for (name, path) in [("shared", "src/a.rs"), ("mid", "src/b.rs"), ("deep", "src/c.rs")] {
+            fed.backend()
+                .upsert_node_global(
+                    &format!("repo-a:Function:{path}:{name}:0"),
+                    crate::schema::NodeType::Function,
+                    path,
+                    name,
+                )
+                .unwrap();
+        }
+        // shared <- mid <- deep (incoming calls: shared is called by mid,
+        // mid is called by deep).
+        fed.backend()
+            .upsert_edge(crate::schema::GraphEdge::new(
+                crate::schema::EdgeType::Calls,
+                "repo-a:Function:src/b.rs:mid:0".into(),
+                "repo-a:Function:src/a.rs:shared:0".into(),
+            ))
+            .unwrap();
+        fed.backend()
+            .upsert_edge(crate::schema::GraphEdge::new(
+                crate::schema::EdgeType::Calls,
+                "repo-a:Function:src/c.rs:deep:0".into(),
+                "repo-a:Function:src/b.rs:mid:0".into(),
+            ))
+            .unwrap();
+
+        // Depth 1..2 stops before `deep` is reached.
+        let result = get_cross_repo_blast_radius_for_repo(&fed, "repo-a", "shared", 1..2).unwrap();
+        assert!(
+            result.truncated,
+            "a walk that stops at the depth limit must say so"
+        );
+        assert_eq!(
+            result.answer_scope.as_deref(),
+            Some("truncated"),
+            "a truncated walk is an incomplete answer, and must name itself"
+        );
+    }
+
+    #[tokio::test]
+    async fn cross_repo_blast_radius_reports_a_complete_walk_as_complete() {
+        // The counterpart: a walk that reaches the whole reach within
+        // the depth limit carries no reason — the list is the answer.
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        for (name, path) in [("shared", "src/a.rs"), ("mid", "src/b.rs")] {
+            fed.backend()
+                .upsert_node_global(
+                    &format!("repo-a:Function:{path}:{name}:0"),
+                    crate::schema::NodeType::Function,
+                    path,
+                    name,
+                )
+                .unwrap();
+        }
+        fed.backend()
+            .upsert_edge(crate::schema::GraphEdge::new(
+                crate::schema::EdgeType::Calls,
+                "repo-a:Function:src/b.rs:mid:0".into(),
+                "repo-a:Function:src/a.rs:shared:0".into(),
+            ))
+            .unwrap();
+        let result = get_cross_repo_blast_radius_for_repo(&fed, "repo-a", "shared", 1..3).unwrap();
+        assert!(!result.truncated);
+        assert_eq!(
+            result.answer_scope, None,
+            "a complete walk carries no reason"
+        );
     }
 
     #[tokio::test]

@@ -47,7 +47,8 @@
               "external_ref",
               "dynamic_sql",
               "orm_dynamic_query",
-              "external_schema_ref"
+              "external_schema_ref",
+              "dynamic_target"
             ]
           },
           "target_service": {

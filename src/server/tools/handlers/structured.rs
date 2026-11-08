@@ -340,6 +340,11 @@ pub async fn get_call_sites_output(
         "sites": sites,
         "count": report.total_sites,
         "ambiguous": !report.other_definitions.is_empty(),
+        // `null` means the answer is complete — including an empty
+        // answer that is a confirmed absence (nothing in the current
+        // index calls this). A reason names what the answer cannot
+        // cover.
+        "answer_scope": crate::server::tools::answer_scope::scope_value(report.answer_scope),
     });
     Ok(ToolOutput {
         text: report.text,
