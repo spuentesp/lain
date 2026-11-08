@@ -96,6 +96,11 @@ reference.
 
 **Pass criteria:** required CI fast-lane checks, acceptance, demo, and mutation gate pass on the same final tree; optional NVIDIA checks either pass or have a written, evidence-backed deferral. Docs identify the tested revisions and retain unresolved findings that have not been closed.
 
+Checkpoint, 2026-11-08: the local workspace, lint, schema, acceptance, demo,
+and NVIDIA checks passed; the full 608-case incremental mutation gate remains
+required. See the [verification record](../../benchmarks/objective-gap-verification-2026-11-08.json)
+for source and binary identities, results, and runtime evidence. Step 5 is open.
+
 ## Completion checklist
 
 - [x] Tokio acceptance proves the expected call site and pinned inputs.
@@ -103,4 +108,4 @@ reference.
 - [x] Graph tools explain ambiguity, unresolved calls, stale data, and truncation where applicable.
 - [x] Startup reports state comparable conditions and reflect verified raw data.
 - [ ] Required and optional checks have recorded results from the final tree.
-- [ ] Documentation matches those results; no open audit item is described as closed without evidence.
+- [x] Documentation matches those results; no open audit item is described as closed without evidence.

@@ -4,6 +4,8 @@ The completed cache implementation and its before/after measurements are documen
 
 **These are not the same measurement as the one in STARTUP_CACHE.md.** This baseline ran the executable with SHA-256 `f183b1e4…` (embedded build stamp `dfd10bf7-dirty`, an older build that Cargo's build-script cache retained) against the checkout `4b877781fdca8ef6ec1690693b12dabfa729202e`. It had no completed-federation cache: a "warm" run reused the data directory and re-ran every startup phase. The later runs used different executables (`ec647fc3…`, `c94c7708…`) and a checkpoint-restore startup path, so the two sets of numbers are not one series and the difference between them is not attributable to the cache alone. [STARTUP_CACHE.md § Reconciling the pre-cache and post-cache runs](STARTUP_CACHE.md#reconciling-the-pre-cache-and-post-cache-runs) has the side-by-side table and what each comparison does and does not establish.
 
+The [2026-11-08 verification record](benchmarks/objective-gap-verification-2026-11-08.json) separately records later functional checks and binary hashes, the audit of all five timing datasets, and the outstanding mutation gate. Existing startup targets remain unchanged.
+
 Build the release executables, then run the benchmark against existing NVIDIA clones:
 
 ```bash

@@ -1,0 +1,2587 @@
+{
+  "schema_version": 1,
+  "recorded_utc": "2026-11-08T20:31:00.223974+00:00",
+  "status": "in_progress",
+  "remaining_required_check": "full incremental mutation gate",
+  "release_binary": {
+    "build_commit": "b0956095",
+    "server_version": "0.13.0",
+    "binary_sha256": "c694a4002ce7e79557bc2cec382795c447cdb8e587a87836f12f0310acb719b2",
+    "sidecar_sha256": "e5906b9c58d503c85994872ad2385f8a60c737351fb987ff923e8cadcd485b69"
+  },
+  "release_source_commit": "b0956095dd6477537bbec7f6b4c9d3472e1d7637",
+  "production_code_commit": "040b2e07899549cf89cb296da090cbe47cc08337",
+  "fixture_followup_commit": "714e736ebead6a641db6f3061d35b88a42b6a954",
+  "production_source_review": "The sole Rust delta after 040b2e07 is 15 added fixture lines inside the federation test module; non-test definitions are identical.",
+  "platform": "Linux 7.2.6-1-default x86_64",
+  "toolchain": {
+    "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+    "cargo": "cargo 1.98.1 (797e8a9bc 2026-08-05)"
+  },
+  "full_workspace_tests": {
+    "exit_code": 0,
+    "command": "CARGO_BUILD_JOBS=2 cargo test --locked --workspace --no-fail-fast",
+    "suites": 113,
+    "passed": 4150,
+    "failed": 0,
+    "ignored": 16,
+    "suite_results": [
+      {
+        "status": "ok",
+        "passed": 2927,
+        "failed": 0,
+        "ignored": 8
+      },
+      {
+        "status": "ok",
+        "passed": 0,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 0,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 0,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 0,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 0,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 6,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 3,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 4,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 8,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 76,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 7,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 4,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 7,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 7,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 0,
+        "failed": 0,
+        "ignored": 2
+      },
+      {
+        "status": "ok",
+        "passed": 14,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 9,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 6,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 3,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 43,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 3,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 3,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 4,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 8,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 7,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 32,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 4,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 9,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 0,
+        "failed": 0,
+        "ignored": 1
+      },
+      {
+        "status": "ok",
+        "passed": 6,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 14,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 13,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 4,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 4,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 1
+      },
+      {
+        "status": "ok",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 56,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 19,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 10,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 3,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 2,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 30,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 12,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 5,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 14,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 4,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 6,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 21,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 68,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 8,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 6,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 5,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 4,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 6,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 7,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 3,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 3,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 4,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 0,
+        "failed": 0,
+        "ignored": 1
+      },
+      {
+        "status": "ok",
+        "passed": 5,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 8,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 28,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 33,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 5,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 14,
+        "failed": 0,
+        "ignored": 1
+      },
+      {
+        "status": "ok",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 7,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 6,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 16,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 5,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 9,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 4,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 3,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 3,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 10,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 8,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 3,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 26,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 81,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 3,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 8,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 7,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 3,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 3,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 2,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 9,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 9,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 3,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 8,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 8,
+        "failed": 0,
+        "ignored": 1
+      },
+      {
+        "status": "ok",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 5,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 3,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 2,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 2,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 217,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 4,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 2,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 21,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 6,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 6,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "status": "ok",
+        "passed": 0,
+        "failed": 0,
+        "ignored": 1
+      }
+    ]
+  },
+  "focused_cross_repo_tests": {
+    "exit_code": 0,
+    "passed": 9,
+    "command": "CARGO_BUILD_JOBS=1 cargo test --locked --lib cross_repo_blast_radius"
+  },
+  "local_checks": {
+    "ci_configured_clippy": "passed",
+    "cargo_fmt": "passed",
+    "clean_export_build": "passed",
+    "live_schema": "100 tools match docs/tool-schema.json",
+    "npm_ci_and_tests": "passed with CI=1",
+    "architecture_guards_and_self_tests": "passed",
+    "health_badge_contract_tests": "passed",
+    "windows_archive_contract_tests": "3 passed",
+    "startup_harness_tests": "9 passed",
+    "contract_scope_harness_tests": "3 passed",
+    "module_resolution": "passed",
+    "mutation_score_floor": "passed",
+    "tool_doc_arguments": "passed"
+  },
+  "acceptance": {
+    "exit_code": 0,
+    "passed": 37,
+    "failed": 0,
+    "stdout": "lain: lain 0.13.0\n\nPASS  language: Rust \u2014 who calls candidate_recipes\n      casey/just@6119e6a, indexed in 8s; expected ['complete_argument', 'complete_recipe']; got ['complete_argument', 'complete_recipe']\nPASS  language: Python \u2014 who calls get_encoding_from_headers\n      psf/requests@611c616, indexed in 3s; expected ['build_response', 'get_unicode_from_response', 'test_get_encoding_from_headers']; got ['build_response', 'get_unicode_from_response', 'test_get_encoding_from_headers']\nPASS  language: TypeScript \u2014 who calls mergeHeaders\n      sindresorhus/ky@0d59458, indexed in 4s; expected ['constructor']; got ['constructor']\nPASS  language: JavaScript \u2014 who calls createETagGenerator\n      expressjs/express@9a34acf, indexed in 2s; expected ['utils.js']; got ['utils.js']\nPASS  language: Go \u2014 who calls CompDebug\n      spf13/cobra@adbc881, indexed in 1s; expected ['CompDebugln', 'CompError']; got ['CompDebugln', 'CompError']\nPASS  language: Java \u2014 who calls addArgument\n      square/javapoet@b9017a9, indexed in 3s; expected ['add', 'addNamed']; got ['add', 'addNamed']\nPASS  language: C \u2014 who calls apply_patch\n      DaveGamble/cJSON@6d9f244, indexed in 3s; expected ['cJSONUtils_ApplyPatches', 'cJSONUtils_ApplyPatchesCaseSensitive']; got ['cJSONUtils_ApplyPatches', 'cJSONUtils_ApplyPatchesCaseSensitive']\nPASS  language: C++ \u2014 who calls consume_positional\n      jarro2783/cxxopts@60286de, indexed in 3s; expected ['parse']; got ['parse']\nPASS  language: C# \u2014 who calls AddPreOptionsLines\n      commandlineparser/commandline@1e3607b, indexed in 5s; expected ['AutoBuild', 'DefaultParsingErrorsHandler']; got ['AutoBuild', 'DefaultParsingErrorsHandler']\nPASS  language: Ruby \u2014 who calls cache_control\n      sinatra/sinatra@cb22afd, indexed in 4s; expected ['expires', 'static!']; got ['HelpersTest', 'expires', 'static!']\nPASS  language: Swift \u2014 who calls appendStreamCompletion\n      Alamofire/Alamofire@bda9ed5, indexed in 5s; expected ['responseStream', 'responseStreamString']; got ['responseStream', 'responseStreamString']\nPASS  language: Kotlin \u2014 who calls saveAsArg\n      Kotlin/kotlinx-cli@32112b6, indexed in 1s; expected ['parse', 'treatAsArgument']; got ['parse', 'treatAsArgument']\nPASS  language: Scala \u2014 who calls overlayAll\n      com-lihaoyi/fansi@c8d4e5b, indexed in 1s; expected ['overlay']; got ['FansiTests', 'overlay']\nPASS  language: PHP \u2014 who calls checkPositiveEntry\n      vlucas/phpdotenv@301c079, indexed in 2s; expected ['testFullParse']; got ['testFullParse']\nPASS  language: Vue \u2014 who calls useNasaStore\n      vuejs/pinia@f4e0cb7, indexed in 2s; expected ['NasaPODSwrv.vue']; got ['NasaPODSwrv.vue']\nPASS  language: Svelte \u2014 who calls formatPrice\n      synthetic fixture, indexed in 1s; expected ['label', 'total']; got ['label', 'total']\nPASS  setup: configures an agent, verifies it, installs no language server unasked\n      state=configured verified=True tools=75 languages=['Python'] servers=[('pylsp', 'not_installed')]\nPASS  first query: lain oneshot get_blast_radius\n      direct+indirect callers include ['get_environ_proxies', 'resolve_proxies']: ['get_environ_proxies', 'resolve_proxies'] (of 28)\nPASS  lain doctor: ready after persisted indexing\n      exit 0; Agent-ready: YES (persisted snapshot assessment)\nPASS  find_symbol finds a method\n      Use this: `2170de5e-d42e-5477-be43-b525219601ad`  (path=`src/requests/sessions.py`, type=function)\nPASS  search_code: search by name/meaning without a model\n      top results ['should_bypass_proxies', 'get_environ_proxies', 'proxy_bypass', 'TestGetEnvironProxies', 'clean_proxy_environ']\nPASS  assess_change: callers before changing a symbol\n      expected ['merge_environment_settings', 'merge_hooks', 'prepare_request'] got ['merge_environment_settings', 'merge_hooks', 'prepare_request']\nPASS  get_call_chain: how two functions connect\n      request (src/requests/sessions.py) \u2192 merge_environment_settings \u2192 get_environ_proxies \u2192 should_bypass_proxies\nPASS  find_anchors: architectural entry points\n      1. request (Function) in src/requests/sessions.py (score: 100.000)\nPASS  list_entry_points answers\n      ## Entry Points |  | - main (src/requests/help.py)\nPASS  explain_dispatch: evidence, or insufficient_evidence\n      verdict: static_only\nPASS  co-change radar from git history\n      Files that co-change with 'src/requests/sessions.py' (src/requests/sessions.py) \u2014 top 2 partners:\nPASS  get_capabilities reports optional semantic search honestly\n      state=unavailable_optional optional=True reason=None\nPASS  advisory claims: a second editor sees the conflict\n      beta told alpha holds src/requests/api.py\nPASS  intents: declare a goal, other agents see it\n      declared and listed\nPASS  repos add + workspaces create keep both repos\n      Added repo 'bytes' (https://github.com/tokio-rs/bytes.git @ master) to ./repos.yaml | Added repo 'tokio' (https://github.com/tokio-rs/tokio.git @ master) to ./repos.yaml | Created workspace 'tokio-stack' in ./workspaces.yaml\nPASS  repos.yaml pins bytes and tokio revisions\n      pins present exactly once each: bytes=1 tokio=1\nPASS  Command Center serves\n      GET / -> 200\nPASS  cross-repo blast radius: tokio callers of bytes::Bytes::copy_from_slice\n      by repo: {'bytes': 6, 'tokio': 6}; tokio ids: ['tokio:Function:tokio-util/src/io/copy_to_bytes.rs:start_send:60', 'tokio:File:tokio/tests/async_send_sync.rs:async_send_sync.rs:0', 'tokio:Function:examples/connect-udp.rs:connect:45', 'tokio:Function:tokio/tests/rt_emscripten_block_on.rs:wait_without_a_deadline_needs_jspi:105', 'tokio:Function:tokio/tests/sync_emscripten_blocking.rs:mpsc_blocking_recv_wakes_from_host_activation:60']\nPASS  search_org finds same-name symbols across repos\n      [{\"global_id\":\"bytes:Function:src/buf/buf_mut.rs:put_slice:245\",\"kind\":\"Function\",\"name\":\"put_slice\",\"path\":\"src/buf/buf_mut.rs\",\"repo_id\":\"bytes\"},{\"global_id\"\nPASS  get_health answers on a multi-repo server\n      ## Lain Server Health (federation)\nPASS  semantic search (model installed): plain-English questions find the function\n      8/12 in top 5 (bar 8); embedded 944/944; missed ['get_netrc_auth', 'super_len', 'get_encoding_from_headers', 'default_user_agent']\n\n37/37 claims hold.\n"
+  },
+  "capability_demo": {
+    "exit_code": 0,
+    "passed": 171,
+    "failed": 0,
+    "skipped": 2,
+    "boot_and_index_ms": 6444,
+    "checks": [
+      {
+        "status": "PASS",
+        "name": "tools/list advertises the full surface",
+        "expected": "97",
+        "actual": "97"
+      },
+      {
+        "status": "PASS",
+        "name": "get_capabilities reports the current capability snapshot",
+        "expected": "contains:schema_version",
+        "actual": "contains:schema_version"
+      },
+      {
+        "status": "PASS",
+        "name": "list_packages renders the skill menu",
+        "expected": "contains:why_off_by_default",
+        "actual": "contains:why_off_by_default"
+      },
+      {
+        "status": "PASS",
+        "name": "list_packages names its packages",
+        "expected": "contains:verify",
+        "actual": "contains:verify"
+      },
+      {
+        "status": "PASS",
+        "name": "load_package signals a tools/list change",
+        "expected": "contains:tools_list_changed",
+        "actual": "contains:tools_list_changed"
+      },
+      {
+        "status": "PASS",
+        "name": "load_package returns the tools it brings",
+        "expected": "contains:add_annotation",
+        "actual": "contains:add_annotation"
+      },
+      {
+        "status": "PASS",
+        "name": "get_health reports Operational",
+        "expected": "contains:Operational",
+        "actual": "contains:Operational"
+      },
+      {
+        "status": "PASS",
+        "name": "graph indexed the subject (19 nodes)",
+        "expected": "indexed",
+        "actual": "indexed"
+      },
+      {
+        "status": "PASS",
+        "name": "GET / (Command Center) serves",
+        "expected": "200",
+        "actual": "200"
+      },
+      {
+        "status": "PASS",
+        "name": "GET /app.js serves",
+        "expected": "200",
+        "actual": "200"
+      },
+      {
+        "status": "PASS",
+        "name": "GET /styles.css serves",
+        "expected": "200",
+        "actual": "200"
+      },
+      {
+        "status": "PASS",
+        "name": "GET /assets/d3.v7.min.js serves",
+        "expected": "200",
+        "actual": "200"
+      },
+      {
+        "status": "PASS",
+        "name": "GET /events (SSE) serves",
+        "expected": "200",
+        "actual": "200"
+      },
+      {
+        "status": "PASS",
+        "name": "setup rejects unknown --agent",
+        "expected": "contains:supported values",
+        "actual": "contains:supported values"
+      },
+      {
+        "status": "PASS",
+        "name": "setup lists all 6 supported values",
+        "expected": "contains:codex",
+        "actual": "contains:codex"
+      },
+      {
+        "status": "PASS",
+        "name": "setup lists all 6 supported values",
+        "expected": "contains:cursor",
+        "actual": "contains:cursor"
+      },
+      {
+        "status": "PASS",
+        "name": "setup lists all 6 supported values",
+        "expected": "contains:vscode",
+        "actual": "contains:vscode"
+      },
+      {
+        "status": "PASS",
+        "name": "setup lists all 6 supported values",
+        "expected": "contains:continue",
+        "actual": "contains:continue"
+      },
+      {
+        "status": "PASS",
+        "name": "cursor adapter writes ~/.cursor/mcp.json",
+        "expected": "contains:\"mcpServers\"",
+        "actual": "contains:\"mcpServers\""
+      },
+      {
+        "status": "PASS",
+        "name": "cursor adapter names the server 'lain'",
+        "expected": "contains:\"lain\"",
+        "actual": "contains:\"lain\""
+      },
+      {
+        "status": "PASS",
+        "name": "vscode adapter emits `servers.lain` schema",
+        "expected": "contains:\"servers\"",
+        "actual": "contains:\"servers\""
+      },
+      {
+        "status": "PASS",
+        "name": "vscode adapter names the server 'lain'",
+        "expected": "contains:\"lain\"",
+        "actual": "contains:\"lain\""
+      },
+      {
+        "status": "PASS",
+        "name": "continue adapter emits a v1 block",
+        "expected": "contains:schema: v1",
+        "actual": "contains:schema: v1"
+      },
+      {
+        "status": "PASS",
+        "name": "continue adapter emits mcpServers",
+        "expected": "contains:mcpServers:",
+        "actual": "contains:mcpServers:"
+      },
+      {
+        "status": "PASS",
+        "name": "codex adapter delegates to codex mcp add",
+        "expected": "contains:codex mcp add",
+        "actual": "contains:codex mcp add"
+      },
+      {
+        "status": "PASS",
+        "name": "generic adapter is idempotent (one lain entry)",
+        "expected": "1",
+        "actual": "1"
+      },
+      {
+        "status": "PASS",
+        "name": "get_call_sites finds the one real caller",
+        "expected": "contains:entry",
+        "actual": "contains:entry"
+      },
+      {
+        "status": "PASS",
+        "name": "get_call_sites reports exactly 1 calling function",
+        "expected": "1",
+        "actual": "1"
+      },
+      {
+        "status": "PASS",
+        "name": "blast radius: direct dependent is orchestrate",
+        "expected": "contains:orchestrate",
+        "actual": "contains:orchestrate"
+      },
+      {
+        "status": "PASS",
+        "name": "blast radius: exactly 1 direct dependent",
+        "expected": "1",
+        "actual": "1"
+      },
+      {
+        "status": "PASS",
+        "name": "blast radius: entry() shows up as indirect",
+        "expected": "contains:entry",
+        "actual": "contains:entry"
+      },
+      {
+        "status": "PASS",
+        "name": "find_dead_code finds never_called",
+        "expected": "contains:never_called",
+        "actual": "contains:never_called"
+      },
+      {
+        "status": "PASS",
+        "name": "find_dead_code excludes the test fn",
+        "expected": "absent:test_entry",
+        "actual": "absent:test_entry"
+      },
+      {
+        "status": "PASS",
+        "name": "find_dead_code excludes live helper_a",
+        "expected": "absent:helper_a",
+        "actual": "absent:helper_a"
+      },
+      {
+        "status": "PASS",
+        "name": "find_dead_code excludes the hub",
+        "expected": "absent:orchestrate",
+        "actual": "absent:orchestrate"
+      },
+      {
+        "status": "PASS",
+        "name": "find_anchors ranks the hub first",
+        "expected": "orchestrate",
+        "actual": "orchestrate"
+      },
+      {
+        "status": "PASS",
+        "name": "explain_dispatch reports the static caller",
+        "expected": "contains:static_callers",
+        "actual": "contains:static_callers"
+      },
+      {
+        "status": "PASS",
+        "name": "explain_dispatch does not claim insufficient evidence",
+        "expected": "absent:insufficient_evidence",
+        "actual": "absent:insufficient_evidence"
+      },
+      {
+        "status": "PASS",
+        "name": "get_call_chain links entry to helper_a",
+        "expected": "contains:helper_a",
+        "actual": "contains:helper_a"
+      },
+      {
+        "status": "PASS",
+        "name": "trace_dependency sees a callee",
+        "expected": "contains:helper_",
+        "actual": "contains:helper_"
+      },
+      {
+        "status": "PASS",
+        "name": "explain_symbol names the file",
+        "expected": "contains:core.rs",
+        "actual": "contains:core.rs"
+      },
+      {
+        "status": "PASS",
+        "name": "get_code_snippet reads the subject's own file",
+        "expected": "contains:never_called",
+        "actual": "contains:never_called"
+      },
+      {
+        "status": "PASS",
+        "name": "explain_symbol warns 'parse' is ambiguous",
+        "expected": "contains:defined 2 times",
+        "actual": "contains:defined 2 times"
+      },
+      {
+        "status": "PASS",
+        "name": "the warning offers ids to disambiguate",
+        "expected": "contains:Pass a node id",
+        "actual": "contains:Pass a node id"
+      },
+      {
+        "status": "PASS",
+        "name": "a node id resolves without an ambiguity warning",
+        "expected": "absent:defined 2 times",
+        "actual": "absent:defined 2 times"
+      },
+      {
+        "status": "PASS",
+        "name": "ids round-trip from query_graph into explain_symbol",
+        "expected": "contains:Explanation",
+        "actual": "contains:Explanation"
+      },
+      {
+        "status": "PASS",
+        "name": "find by type+name",
+        "expected": "contains:orchestrate",
+        "actual": "contains:orchestrate"
+      },
+      {
+        "status": "PASS",
+        "name": "chained find \u2192 connect \u2192 limit",
+        "expected": "contains:count",
+        "actual": "contains:count"
+      },
+      {
+        "status": "PASS",
+        "name": "CoChangedWith traversal runs",
+        "expected": "contains:count",
+        "actual": "contains:count"
+      },
+      {
+        "status": "PASS",
+        "name": "describe_schema lists node types",
+        "expected": "contains:Function",
+        "actual": "contains:Function"
+      },
+      {
+        "status": "PASS",
+        "name": "coupling radar sees the co-change",
+        "expected": "contains:helpers.rs",
+        "actual": "contains:helpers.rs"
+      },
+      {
+        "status": "PASS",
+        "name": "commit history reaches the subject repo",
+        "expected": "contains:touch core",
+        "actual": "contains:touch core"
+      },
+      {
+        "status": "PASS",
+        "name": "branch status answers",
+        "expected": "contains:branch",
+        "actual": "contains:branch"
+      },
+      {
+        "status": "PASS",
+        "name": "recent activity is not an error",
+        "expected": "absent:__TOOL_ERROR__",
+        "actual": "absent:__TOOL_ERROR__"
+      },
+      {
+        "status": "PASS",
+        "name": "explore_architecture answers",
+        "expected": "a result",
+        "actual": "a result"
+      },
+      {
+        "status": "PASS",
+        "name": "get_master_map answers",
+        "expected": "a result",
+        "actual": "a result"
+      },
+      {
+        "status": "PASS",
+        "name": "get_layered_map answers",
+        "expected": "a result",
+        "actual": "a result"
+      },
+      {
+        "status": "PASS",
+        "name": "list_entry_points answers",
+        "expected": "a result",
+        "actual": "a result"
+      },
+      {
+        "status": "PASS",
+        "name": "architectural_observations answers",
+        "expected": "a result",
+        "actual": "a result"
+      },
+      {
+        "status": "PASS",
+        "name": "suggest_refactor_targets answers",
+        "expected": "a result",
+        "actual": "a result"
+      },
+      {
+        "status": "PASS",
+        "name": "find_untested_functions answers",
+        "expected": "a result",
+        "actual": "a result"
+      },
+      {
+        "status": "PASS",
+        "name": "get_coverage_summary answers",
+        "expected": "a result",
+        "actual": "a result"
+      },
+      {
+        "status": "PASS",
+        "name": "compare_modules answers",
+        "expected": "a result",
+        "actual": "a result"
+      },
+      {
+        "status": "PASS",
+        "name": "detect_overlap answers (refusal is a result)",
+        "expected": "a result",
+        "actual": "a result"
+      },
+      {
+        "status": "PASS",
+        "name": "get_context_for_prompt answers",
+        "expected": "a result",
+        "actual": "a result"
+      },
+      {
+        "status": "PASS",
+        "name": "get_world_state answers",
+        "expected": "a result",
+        "actual": "a result"
+      },
+      {
+        "status": "PASS",
+        "name": "get_server_status answers",
+        "expected": "a result",
+        "actual": "a result"
+      },
+      {
+        "status": "PASS",
+        "name": "get_reload_status answers",
+        "expected": "a result",
+        "actual": "a result"
+      },
+      {
+        "status": "PASS",
+        "name": "list_recent_projects answers",
+        "expected": "a result",
+        "actual": "a result"
+      },
+      {
+        "status": "PASS",
+        "name": "get_agent_strategy answers",
+        "expected": "a result",
+        "actual": "a result"
+      },
+      {
+        "status": "PASS",
+        "name": "get_test_template answers (refusal is a result)",
+        "expected": "a result",
+        "actual": "a result"
+      },
+      {
+        "status": "PASS",
+        "name": "navigate_to_anchor answers",
+        "expected": "a result",
+        "actual": "a result"
+      },
+      {
+        "status": "PASS",
+        "name": "get_context_depth answers",
+        "expected": "a result",
+        "actual": "a result"
+      },
+      {
+        "status": "PASS",
+        "name": "get_anchor_score answers",
+        "expected": "a result",
+        "actual": "a result"
+      },
+      {
+        "status": "PASS",
+        "name": "get_cross_runtime_callers answers (refusal is a result)",
+        "expected": "a result",
+        "actual": "a result"
+      },
+      {
+        "status": "PASS",
+        "name": "get_audit_log answers",
+        "expected": "a result",
+        "actual": "a result"
+      },
+      {
+        "status": "PASS",
+        "name": "sync_state answers",
+        "expected": "a result",
+        "actual": "a result"
+      },
+      {
+        "status": "PASS",
+        "name": "run_enrichment answers",
+        "expected": "a result",
+        "actual": "a result"
+      },
+      {
+        "status": "PASS",
+        "name": "get_file_diff answers",
+        "expected": "a result",
+        "actual": "a result"
+      },
+      {
+        "status": "PASS",
+        "name": "understand_repository answers",
+        "expected": "a result",
+        "actual": "a result"
+      },
+      {
+        "status": "PASS",
+        "name": "find_symbol answers",
+        "expected": "a result",
+        "actual": "a result"
+      },
+      {
+        "status": "PASS",
+        "name": "get_context answers",
+        "expected": "a result",
+        "actual": "a result"
+      },
+      {
+        "status": "PASS",
+        "name": "find_related answers",
+        "expected": "a result",
+        "actual": "a result"
+      },
+      {
+        "status": "PASS",
+        "name": "assess_change answers",
+        "expected": "a result",
+        "actual": "a result"
+      },
+      {
+        "status": "PASS",
+        "name": "search_code answers",
+        "expected": "a result",
+        "actual": "a result"
+      },
+      {
+        "status": "PASS",
+        "name": "two agents register",
+        "expected": "both",
+        "actual": "both"
+      },
+      {
+        "status": "PASS",
+        "name": "alpha's edit claim is granted",
+        "expected": "contains:granted",
+        "actual": "contains:granted"
+      },
+      {
+        "status": "PASS",
+        "name": "beta's edit on ./src/core.rs conflicts",
+        "expected": "contains:conflicts",
+        "actual": "contains:conflicts"
+      },
+      {
+        "status": "PASS",
+        "name": "the conflict names the holder",
+        "expected": "contains:alpha",
+        "actual": "contains:alpha"
+      },
+      {
+        "status": "PASS",
+        "name": "the conflict states the blocking intent",
+        "expected": "contains:edit",
+        "actual": "contains:edit"
+      },
+      {
+        "status": "PASS",
+        "name": "beta's read conflicts with alpha's edit",
+        "expected": "contains:\"name\"",
+        "actual": "contains:\"name\""
+      },
+      {
+        "status": "PASS",
+        "name": "and the refusal names the holder",
+        "expected": "contains:alpha",
+        "actual": "contains:alpha"
+      },
+      {
+        "status": "PASS",
+        "name": "occupancy shows holders",
+        "expected": "contains:holders",
+        "actual": "contains:holders"
+      },
+      {
+        "status": "PASS",
+        "name": "occupancy names alpha",
+        "expected": "contains:alpha",
+        "actual": "contains:alpha"
+      },
+      {
+        "status": "PASS",
+        "name": "occupancy carries intent",
+        "expected": "contains:intent",
+        "actual": "contains:intent"
+      },
+      {
+        "status": "PASS",
+        "name": "list_active_agents sees alpha",
+        "expected": "contains:alpha",
+        "actual": "contains:alpha"
+      },
+      {
+        "status": "PASS",
+        "name": "list_active_agents sees beta",
+        "expected": "contains:beta",
+        "actual": "contains:beta"
+      },
+      {
+        "status": "PASS",
+        "name": "who_am_i identifies the caller",
+        "expected": "contains:alpha",
+        "actual": "contains:alpha"
+      },
+      {
+        "status": "PASS",
+        "name": "my_claims lists alpha's claim",
+        "expected": "contains:core.rs",
+        "actual": "contains:core.rs"
+      },
+      {
+        "status": "PASS",
+        "name": "heartbeat refreshes the session",
+        "expected": "absent:__TOOL_ERROR__",
+        "actual": "absent:__TOOL_ERROR__"
+      },
+      {
+        "status": "PASS",
+        "name": "release accepts a bare path string",
+        "expected": "contains:released",
+        "actual": "contains:released"
+      },
+      {
+        "status": "PASS",
+        "name": "beta can claim once alpha releases",
+        "expected": "contains:granted",
+        "actual": "contains:granted"
+      },
+      {
+        "status": "PASS",
+        "name": "and sees no conflict this time",
+        "expected": "absent:\"name\"",
+        "actual": "absent:\"name\""
+      },
+      {
+        "status": "PASS",
+        "name": "list_subagents answers",
+        "expected": "absent:__RPC_ERROR__",
+        "actual": "absent:__RPC_ERROR__"
+      },
+      {
+        "status": "PASS",
+        "name": "lain_intent declares an intent",
+        "expected": "contains:intent_id",
+        "actual": "contains:intent_id"
+      },
+      {
+        "status": "PASS",
+        "name": "list_active_intents shows the goal",
+        "expected": "contains:demo: refactor core",
+        "actual": "contains:demo: refactor core"
+      },
+      {
+        "status": "PASS",
+        "name": "unregister_agent removes the session",
+        "expected": "contains:\"removed\":true",
+        "actual": "contains:\"removed\":true"
+      },
+      {
+        "status": "PASS",
+        "name": "and alpha is no longer listed",
+        "expected": "absent:\"alpha\"",
+        "actual": "absent:\"alpha\""
+      },
+      {
+        "status": "PASS",
+        "name": "run_build compiles the subject",
+        "expected": "success",
+        "actual": "success"
+      },
+      {
+        "status": "PASS",
+        "name": "run_tests runs the subject's test",
+        "expected": "absent:__RPC_ERROR__",
+        "actual": "absent:__RPC_ERROR__"
+      },
+      {
+        "status": "PASS",
+        "name": "blast radius emits a UI session link",
+        "expected": "yes",
+        "actual": "yes"
+      },
+      {
+        "status": "PASS",
+        "name": "GET /ui/blast-radius/<id> renders",
+        "expected": "200",
+        "actual": "200"
+      },
+      {
+        "status": "PASS",
+        "name": "the page carries the graph payload",
+        "expected": "contains:is_direct",
+        "actual": "contains:is_direct"
+      },
+      {
+        "status": "PASS",
+        "name": "GET /ui/coupling/<id> renders",
+        "expected": "200",
+        "actual": "200"
+      },
+      {
+        "status": "PASS",
+        "name": "lain --help lists the subcommands",
+        "expected": "contains:server",
+        "actual": "contains:server"
+      },
+      {
+        "status": "PASS",
+        "name": "lain doctor runs its checks",
+        "expected": "contains:lain doctor",
+        "actual": "contains:lain doctor"
+      },
+      {
+        "status": "PASS",
+        "name": "doctor catches an empty MCP surface",
+        "expected": "contains:MCP surface empty",
+        "actual": "contains:MCP surface empty"
+      },
+      {
+        "status": "PASS",
+        "name": "doctor exits non-zero on that failure",
+        "expected": "2",
+        "actual": "2"
+      },
+      {
+        "status": "PASS",
+        "name": "doctor confirms a live surface",
+        "expected": "contains:MCP surface live",
+        "actual": "contains:MCP surface live"
+      },
+      {
+        "status": "PASS",
+        "name": "lain query runs against the persisted graph",
+        "expected": "absent:error: unrecognized",
+        "actual": "absent:error: unrecognized"
+      },
+      {
+        "status": "PASS",
+        "name": "lain init scaffolds repos.yaml",
+        "expected": "written",
+        "actual": "written"
+      },
+      {
+        "status": "PASS",
+        "name": "federation lists both repos",
+        "expected": "contains:beta",
+        "actual": "contains:beta"
+      },
+      {
+        "status": "PASS",
+        "name": "a symbol in alpha resolves in alpha",
+        "expected": "contains:alpha_inner",
+        "actual": "contains:alpha_inner"
+      },
+      {
+        "status": "PASS",
+        "name": "a symbol in beta resolves in beta",
+        "expected": "contains:beta_inner",
+        "actual": "contains:beta_inner"
+      },
+      {
+        "status": "PASS",
+        "name": "repo_id=alpha lists alpha's symbols",
+        "expected": "contains:alpha_",
+        "actual": "contains:alpha_"
+      },
+      {
+        "status": "PASS",
+        "name": "and leaks nothing from beta",
+        "expected": "absent:beta_",
+        "actual": "absent:beta_"
+      },
+      {
+        "status": "PASS",
+        "name": "get_code_snippet reads beta's own checkout",
+        "expected": "contains:beta_only_helper",
+        "actual": "contains:beta_only_helper"
+      },
+      {
+        "status": "PASS",
+        "name": "cross-repo blast radius groups by repo",
+        "expected": "contains:alpha",
+        "actual": "contains:alpha"
+      },
+      {
+        "status": "PASS",
+        "name": "a wrong-typed arg names the type, not 'missing'",
+        "expected": "contains:boolean",
+        "actual": "contains:boolean"
+      },
+      {
+        "status": "PASS",
+        "name": "search_org finds symbols across repos",
+        "expected": "contains:beta_only_helper",
+        "actual": "contains:beta_only_helper"
+      },
+      {
+        "status": "PASS",
+        "name": "get_repo_info describes a repo",
+        "expected": "contains:alpha",
+        "actual": "contains:alpha"
+      },
+      {
+        "status": "PASS",
+        "name": "federation health counts both repos",
+        "expected": "contains:\"total_repos\":2",
+        "actual": "contains:\"total_repos\":2"
+      },
+      {
+        "status": "PASS",
+        "name": "federation health reports both ready",
+        "expected": "contains:\"ready\":2",
+        "actual": "contains:\"ready\":2"
+      },
+      {
+        "status": "PASS",
+        "name": "cross-repo blast radius, repo pinned explicitly",
+        "expected": "contains:beta",
+        "actual": "contains:beta"
+      },
+      {
+        "status": "PASS",
+        "name": "run_clippy answers",
+        "expected": "absent:__RPC_ERROR__",
+        "actual": "absent:__RPC_ERROR__"
+      },
+      {
+        "status": "PASS",
+        "name": "request_reload answers",
+        "expected": "absent:__RPC_ERROR__",
+        "actual": "absent:__RPC_ERROR__"
+      },
+      {
+        "status": "PASS",
+        "name": "register_job_webhook answers",
+        "expected": "absent:__RPC_ERROR__",
+        "actual": "absent:__RPC_ERROR__"
+      },
+      {
+        "status": "PASS",
+        "name": "get_job_status reports an unknown job as not found",
+        "expected": "contains:not found",
+        "actual": "contains:not found"
+      },
+      {
+        "status": "PASS",
+        "name": "debug_sleep answers",
+        "expected": "absent:__RPC_ERROR__",
+        "actual": "absent:__RPC_ERROR__"
+      },
+      {
+        "status": "PASS",
+        "name": "install_language_server advertises its schema (not invoked: it mutates the machine)",
+        "expected": "contains:language",
+        "actual": "contains:language"
+      },
+      {
+        "status": "PASS",
+        "name": "add_annotation answers",
+        "expected": "contains:repo_id",
+        "actual": "contains:repo_id"
+      },
+      {
+        "status": "PASS",
+        "name": "list_annotations sees it",
+        "expected": "contains:demo annotation",
+        "actual": "contains:demo annotation"
+      },
+      {
+        "status": "PASS",
+        "name": "resolve_annotation closes it",
+        "expected": "contains:resolved",
+        "actual": "contains:resolved"
+      },
+      {
+        "status": "PASS",
+        "name": "leave_handoff_note answers",
+        "expected": "contains:expires_at_unix_ms",
+        "actual": "contains:expires_at_unix_ms"
+      },
+      {
+        "status": "PASS",
+        "name": "get_pending_handoffs sees it",
+        "expected": "contains:demo handoff",
+        "actual": "contains:demo handoff"
+      },
+      {
+        "status": "PASS",
+        "name": "every advertised tool is exercised (96/97 + 1 exempt)",
+        "expected": "complete",
+        "actual": "complete"
+      },
+      {
+        "status": "PASS",
+        "name": "diff_precision \u2265 baseline (1.0)",
+        "expected": "1.0",
+        "actual": "1.0"
+      },
+      {
+        "status": "PASS",
+        "name": "diff_recall \u2265 baseline (1.0)",
+        "expected": "1.0",
+        "actual": "1.0"
+      },
+      {
+        "status": "PASS",
+        "name": "binds_precision \u2265 baseline (1.0)",
+        "expected": "1.0",
+        "actual": "1.0"
+      },
+      {
+        "status": "PASS",
+        "name": "binds_recall \u2265 baseline (1.0)",
+        "expected": "1.0",
+        "actual": "1.0"
+      },
+      {
+        "status": "PASS",
+        "name": "reads_field_precision \u2265 baseline (1.0)",
+        "expected": "1.0",
+        "actual": "1.0"
+      },
+      {
+        "status": "PASS",
+        "name": "reads_field_recall \u2265 baseline (1.0)",
+        "expected": "1.0",
+        "actual": "1.0"
+      },
+      {
+        "status": "PASS",
+        "name": "contract precision/recall meets baseline",
+        "expected": "contains:diff_precision",
+        "actual": "contains:diff_precision"
+      },
+      {
+        "status": "PASS",
+        "name": "list_services answers JSON-RPC",
+        "expected": "absent:__RPC_ERROR__",
+        "actual": "absent:__RPC_ERROR__"
+      },
+      {
+        "status": "PASS",
+        "name": "get_service answers JSON-RPC",
+        "expected": "absent:__RPC_ERROR__",
+        "actual": "absent:__RPC_ERROR__"
+      },
+      {
+        "status": "PASS",
+        "name": "list_contracts answers JSON-RPC",
+        "expected": "absent:__RPC_ERROR__",
+        "actual": "absent:__RPC_ERROR__"
+      },
+      {
+        "status": "PASS",
+        "name": "list_service_refs answers JSON-RPC",
+        "expected": "absent:__RPC_ERROR__",
+        "actual": "absent:__RPC_ERROR__"
+      },
+      {
+        "status": "PASS",
+        "name": "get_contract answers JSON-RPC",
+        "expected": "absent:__RPC_ERROR__",
+        "actual": "absent:__RPC_ERROR__"
+      },
+      {
+        "status": "PASS",
+        "name": "list_unresolved answers JSON-RPC",
+        "expected": "absent:__RPC_ERROR__",
+        "actual": "absent:__RPC_ERROR__"
+      },
+      {
+        "status": "PASS",
+        "name": "check_binding answers JSON-RPC",
+        "expected": "absent:__RPC_ERROR__",
+        "actual": "absent:__RPC_ERROR__"
+      },
+      {
+        "status": "PASS",
+        "name": "trace_impact answers JSON-RPC",
+        "expected": "absent:__RPC_ERROR__",
+        "actual": "absent:__RPC_ERROR__"
+      },
+      {
+        "status": "PASS",
+        "name": "trace_flow answers JSON-RPC",
+        "expected": "absent:__RPC_ERROR__",
+        "actual": "absent:__RPC_ERROR__"
+      },
+      {
+        "status": "PASS",
+        "name": "get_coverage answers JSON-RPC",
+        "expected": "absent:__RPC_ERROR__",
+        "actual": "absent:__RPC_ERROR__"
+      },
+      {
+        "status": "PASS",
+        "name": "resolve_evidence answers JSON-RPC",
+        "expected": "absent:__RPC_ERROR__",
+        "actual": "absent:__RPC_ERROR__"
+      },
+      {
+        "status": "PASS",
+        "name": "read_source answers JSON-RPC",
+        "expected": "absent:__RPC_ERROR__",
+        "actual": "absent:__RPC_ERROR__"
+      },
+      {
+        "status": "PASS",
+        "name": "get_snapshot answers JSON-RPC",
+        "expected": "absent:__RPC_ERROR__",
+        "actual": "absent:__RPC_ERROR__"
+      },
+      {
+        "status": "PASS",
+        "name": "diff_contracts answers JSON-RPC",
+        "expected": "absent:__RPC_ERROR__",
+        "actual": "absent:__RPC_ERROR__"
+      },
+      {
+        "status": "PASS",
+        "name": "apply_contract_context answers JSON-RPC",
+        "expected": "absent:__RPC_ERROR__",
+        "actual": "absent:__RPC_ERROR__"
+      },
+      {
+        "status": "PASS",
+        "name": "apply_contract_context dry-runs the declaration",
+        "expected": "contains:dry run",
+        "actual": "contains:dry run"
+      },
+      {
+        "status": "PASS",
+        "name": "apply_contract_context returns the YAML it would write",
+        "expected": "contains:http:GET /demo",
+        "actual": "contains:http:GET /demo"
+      },
+      {
+        "status": "PASS",
+        "name": "the dry run left repos.yaml alone",
+        "expected": "absent:http:GET /demo",
+        "actual": "absent:http:GET /demo"
+      }
+    ],
+    "tool_latency": {
+      "get_capabilities": {
+        "calls": 1,
+        "min_ms": 21,
+        "max_ms": 21,
+        "p50_ms": 21
+      },
+      "list_packages": {
+        "calls": 1,
+        "min_ms": 20,
+        "max_ms": 20,
+        "p50_ms": 20
+      },
+      "load_package": {
+        "calls": 1,
+        "min_ms": 23,
+        "max_ms": 23,
+        "p50_ms": 23
+      },
+      "get_health": {
+        "calls": 1,
+        "min_ms": 914,
+        "max_ms": 914,
+        "p50_ms": 914
+      },
+      "get_call_sites": {
+        "calls": 1,
+        "min_ms": 7,
+        "max_ms": 7,
+        "p50_ms": 7
+      },
+      "get_blast_radius": {
+        "calls": 2,
+        "min_ms": 7,
+        "max_ms": 16,
+        "p50_ms": 16
+      },
+      "find_dead_code": {
+        "calls": 1,
+        "min_ms": 7,
+        "max_ms": 7,
+        "p50_ms": 7
+      },
+      "find_anchors": {
+        "calls": 1,
+        "min_ms": 7,
+        "max_ms": 7,
+        "p50_ms": 7
+      },
+      "explain_dispatch": {
+        "calls": 1,
+        "min_ms": 6,
+        "max_ms": 6,
+        "p50_ms": 6
+      },
+      "get_call_chain": {
+        "calls": 1,
+        "min_ms": 6,
+        "max_ms": 6,
+        "p50_ms": 6
+      },
+      "trace_dependency": {
+        "calls": 1,
+        "min_ms": 6,
+        "max_ms": 6,
+        "p50_ms": 6
+      },
+      "explain_symbol": {
+        "calls": 3,
+        "min_ms": 50,
+        "max_ms": 55,
+        "p50_ms": 52
+      },
+      "get_code_snippet": {
+        "calls": 1,
+        "min_ms": 7,
+        "max_ms": 7,
+        "p50_ms": 7
+      },
+      "query_graph": {
+        "calls": 4,
+        "min_ms": 6,
+        "max_ms": 11,
+        "p50_ms": 10
+      },
+      "describe_schema": {
+        "calls": 1,
+        "min_ms": 7,
+        "max_ms": 7,
+        "p50_ms": 7
+      },
+      "get_coupling_radar": {
+        "calls": 2,
+        "min_ms": 7,
+        "max_ms": 114,
+        "p50_ms": 114
+      },
+      "get_commit_history": {
+        "calls": 1,
+        "min_ms": 8,
+        "max_ms": 8,
+        "p50_ms": 8
+      },
+      "get_branch_status": {
+        "calls": 1,
+        "min_ms": 7,
+        "max_ms": 7,
+        "p50_ms": 7
+      },
+      "get_recent_activity": {
+        "calls": 1,
+        "min_ms": 6,
+        "max_ms": 6,
+        "p50_ms": 6
+      },
+      "explore_architecture": {
+        "calls": 1,
+        "min_ms": 6,
+        "max_ms": 6,
+        "p50_ms": 6
+      },
+      "get_master_map": {
+        "calls": 1,
+        "min_ms": 6,
+        "max_ms": 6,
+        "p50_ms": 6
+      },
+      "get_layered_map": {
+        "calls": 1,
+        "min_ms": 6,
+        "max_ms": 6,
+        "p50_ms": 6
+      },
+      "list_entry_points": {
+        "calls": 1,
+        "min_ms": 7,
+        "max_ms": 7,
+        "p50_ms": 7
+      },
+      "architectural_observations": {
+        "calls": 1,
+        "min_ms": 7,
+        "max_ms": 7,
+        "p50_ms": 7
+      },
+      "suggest_refactor_targets": {
+        "calls": 1,
+        "min_ms": 7,
+        "max_ms": 7,
+        "p50_ms": 7
+      },
+      "find_untested_functions": {
+        "calls": 1,
+        "min_ms": 7,
+        "max_ms": 7,
+        "p50_ms": 7
+      },
+      "get_coverage_summary": {
+        "calls": 1,
+        "min_ms": 6,
+        "max_ms": 6,
+        "p50_ms": 6
+      },
+      "compare_modules": {
+        "calls": 1,
+        "min_ms": 6,
+        "max_ms": 6,
+        "p50_ms": 6
+      },
+      "detect_overlap": {
+        "calls": 1,
+        "min_ms": 6,
+        "max_ms": 6,
+        "p50_ms": 6
+      },
+      "get_context_for_prompt": {
+        "calls": 1,
+        "min_ms": 6,
+        "max_ms": 6,
+        "p50_ms": 6
+      },
+      "get_world_state": {
+        "calls": 1,
+        "min_ms": 10,
+        "max_ms": 10,
+        "p50_ms": 10
+      },
+      "get_server_status": {
+        "calls": 1,
+        "min_ms": 7,
+        "max_ms": 7,
+        "p50_ms": 7
+      },
+      "get_reload_status": {
+        "calls": 1,
+        "min_ms": 6,
+        "max_ms": 6,
+        "p50_ms": 6
+      },
+      "list_recent_projects": {
+        "calls": 1,
+        "min_ms": 9,
+        "max_ms": 9,
+        "p50_ms": 9
+      },
+      "get_agent_strategy": {
+        "calls": 1,
+        "min_ms": 10,
+        "max_ms": 10,
+        "p50_ms": 10
+      },
+      "get_test_template": {
+        "calls": 1,
+        "min_ms": 14,
+        "max_ms": 14,
+        "p50_ms": 14
+      },
+      "navigate_to_anchor": {
+        "calls": 1,
+        "min_ms": 24,
+        "max_ms": 24,
+        "p50_ms": 24
+      },
+      "get_context_depth": {
+        "calls": 1,
+        "min_ms": 25,
+        "max_ms": 25,
+        "p50_ms": 25
+      },
+      "get_anchor_score": {
+        "calls": 1,
+        "min_ms": 27,
+        "max_ms": 27,
+        "p50_ms": 27
+      },
+      "get_cross_runtime_callers": {
+        "calls": 1,
+        "min_ms": 48,
+        "max_ms": 48,
+        "p50_ms": 48
+      },
+      "get_audit_log": {
+        "calls": 1,
+        "min_ms": 30,
+        "max_ms": 30,
+        "p50_ms": 30
+      },
+      "sync_state": {
+        "calls": 1,
+        "min_ms": 28,
+        "max_ms": 28,
+        "p50_ms": 28
+      },
+      "run_enrichment": {
+        "calls": 1,
+        "min_ms": 34,
+        "max_ms": 34,
+        "p50_ms": 34
+      },
+      "get_file_diff": {
+        "calls": 1,
+        "min_ms": 35,
+        "max_ms": 35,
+        "p50_ms": 35
+      },
+      "understand_repository": {
+        "calls": 1,
+        "min_ms": 32,
+        "max_ms": 32,
+        "p50_ms": 32
+      },
+      "find_symbol": {
+        "calls": 1,
+        "min_ms": 48,
+        "max_ms": 48,
+        "p50_ms": 48
+      },
+      "get_context": {
+        "calls": 1,
+        "min_ms": 121,
+        "max_ms": 121,
+        "p50_ms": 121
+      },
+      "find_related": {
+        "calls": 1,
+        "min_ms": 958,
+        "max_ms": 958,
+        "p50_ms": 958
+      },
+      "assess_change": {
+        "calls": 1,
+        "min_ms": 25,
+        "max_ms": 25,
+        "p50_ms": 25
+      },
+      "search_code": {
+        "calls": 1,
+        "min_ms": 43,
+        "max_ms": 43,
+        "p50_ms": 43
+      },
+      "register_agent": {
+        "calls": 2,
+        "min_ms": 12,
+        "max_ms": 26,
+        "p50_ms": 26
+      },
+      "claim_files": {
+        "calls": 4,
+        "min_ms": 84,
+        "max_ms": 172,
+        "p50_ms": 137
+      },
+      "list_occupancy": {
+        "calls": 1,
+        "min_ms": 68,
+        "max_ms": 68,
+        "p50_ms": 68
+      },
+      "list_active_agents": {
+        "calls": 2,
+        "min_ms": 107,
+        "max_ms": 186,
+        "p50_ms": 186
+      },
+      "who_am_i": {
+        "calls": 1,
+        "min_ms": 97,
+        "max_ms": 97,
+        "p50_ms": 97
+      },
+      "my_claims": {
+        "calls": 1,
+        "min_ms": 54,
+        "max_ms": 54,
+        "p50_ms": 54
+      },
+      "heartbeat": {
+        "calls": 1,
+        "min_ms": 56,
+        "max_ms": 56,
+        "p50_ms": 56
+      },
+      "release_files": {
+        "calls": 2,
+        "min_ms": 49,
+        "max_ms": 68,
+        "p50_ms": 68
+      },
+      "list_subagents": {
+        "calls": 1,
+        "min_ms": 7,
+        "max_ms": 7,
+        "p50_ms": 7
+      },
+      "lain_intent": {
+        "calls": 1,
+        "min_ms": 143,
+        "max_ms": 143,
+        "p50_ms": 143
+      },
+      "list_active_intents": {
+        "calls": 1,
+        "min_ms": 56,
+        "max_ms": 56,
+        "p50_ms": 56
+      },
+      "unregister_agent": {
+        "calls": 1,
+        "min_ms": 226,
+        "max_ms": 226,
+        "p50_ms": 226
+      },
+      "run_build": {
+        "calls": 1,
+        "min_ms": 78,
+        "max_ms": 78,
+        "p50_ms": 78
+      },
+      "run_tests": {
+        "calls": 1,
+        "min_ms": 223,
+        "max_ms": 223,
+        "p50_ms": 223
+      },
+      "run_clippy": {
+        "calls": 1,
+        "min_ms": 134,
+        "max_ms": 134,
+        "p50_ms": 134
+      },
+      "request_reload": {
+        "calls": 1,
+        "min_ms": 8,
+        "max_ms": 8,
+        "p50_ms": 8
+      },
+      "register_job_webhook": {
+        "calls": 1,
+        "min_ms": 9,
+        "max_ms": 9,
+        "p50_ms": 9
+      },
+      "get_job_status": {
+        "calls": 1,
+        "min_ms": 8,
+        "max_ms": 8,
+        "p50_ms": 8
+      },
+      "debug_sleep": {
+        "calls": 1,
+        "min_ms": 11,
+        "max_ms": 11,
+        "p50_ms": 11
+      },
+      "add_annotation": {
+        "calls": 1,
+        "min_ms": 8,
+        "max_ms": 8,
+        "p50_ms": 8
+      },
+      "list_annotations": {
+        "calls": 1,
+        "min_ms": 9,
+        "max_ms": 9,
+        "p50_ms": 9
+      },
+      "resolve_annotation": {
+        "calls": 1,
+        "min_ms": 9,
+        "max_ms": 9,
+        "p50_ms": 9
+      },
+      "leave_handoff_note": {
+        "calls": 1,
+        "min_ms": 10,
+        "max_ms": 10,
+        "p50_ms": 10
+      },
+      "get_pending_handoffs": {
+        "calls": 1,
+        "min_ms": 7,
+        "max_ms": 7,
+        "p50_ms": 7
+      },
+      "prepare_snapshot": {
+        "calls": 1,
+        "min_ms": 37,
+        "max_ms": 37,
+        "p50_ms": 37
+      },
+      "list_services": {
+        "calls": 1,
+        "min_ms": 16,
+        "max_ms": 16,
+        "p50_ms": 16
+      },
+      "get_service": {
+        "calls": 1,
+        "min_ms": 33,
+        "max_ms": 33,
+        "p50_ms": 33
+      },
+      "list_contracts": {
+        "calls": 1,
+        "min_ms": 32,
+        "max_ms": 32,
+        "p50_ms": 32
+      },
+      "list_service_refs": {
+        "calls": 1,
+        "min_ms": 12,
+        "max_ms": 12,
+        "p50_ms": 12
+      },
+      "get_contract": {
+        "calls": 1,
+        "min_ms": 12,
+        "max_ms": 12,
+        "p50_ms": 12
+      },
+      "list_unresolved": {
+        "calls": 1,
+        "min_ms": 27,
+        "max_ms": 27,
+        "p50_ms": 27
+      },
+      "check_binding": {
+        "calls": 1,
+        "min_ms": 43,
+        "max_ms": 43,
+        "p50_ms": 43
+      },
+      "trace_impact": {
+        "calls": 1,
+        "min_ms": 25,
+        "max_ms": 25,
+        "p50_ms": 25
+      },
+      "trace_flow": {
+        "calls": 1,
+        "min_ms": 28,
+        "max_ms": 28,
+        "p50_ms": 28
+      },
+      "get_coverage": {
+        "calls": 1,
+        "min_ms": 26,
+        "max_ms": 26,
+        "p50_ms": 26
+      },
+      "resolve_evidence": {
+        "calls": 1,
+        "min_ms": 29,
+        "max_ms": 29,
+        "p50_ms": 29
+      },
+      "read_source": {
+        "calls": 1,
+        "min_ms": 17,
+        "max_ms": 17,
+        "p50_ms": 17
+      },
+      "get_snapshot": {
+        "calls": 1,
+        "min_ms": 13,
+        "max_ms": 13,
+        "p50_ms": 13
+      },
+      "diff_contracts": {
+        "calls": 1,
+        "min_ms": 13,
+        "max_ms": 13,
+        "p50_ms": 13
+      },
+      "apply_contract_context": {
+        "calls": 1,
+        "min_ms": 10,
+        "max_ms": 10,
+        "p50_ms": 10
+      }
+    }
+  },
+  "nvidia_smoke": {
+    "exit_code": 0,
+    "stdout": "federation states: ready ready ready\nhttp endpoints: 22 bound consumers: 2\nHTTP provider source scopes: {'declared': 2, 'example': 1, 'mixed': 1, 'non_test_source': 13, 'test': 5}\nHTTP bound-consumer source scopes: {'non_test_source': 1, 'test': 1}\nNon-test source HTTP bindings: 1\nRuntime production coverage: not established by this static smoke\nunresolved consumers: 40 {'no_match': 32, 'dynamic_target': 2, 'no_route_in_service': 4, 'env_unmapped': 2}\n--- declared providers present ---\nOK   http:POST /chat/stream\nOK   http:POST /chat\nOK   http:GET /mcp/client/tool/list\nOK   http:GET /mcp/client/tool/list/per_user\n--- SQL source is not a GraphQL consumer ---\nOK   no MySQL-to-GraphQL false consumers\n--- client callback is not a WebSocket provider ---\nOK   no /async callback provider\n--- protocol candidates and URL-expression precision ---\nOK   7 WebSocket rows preserve protocol; helper expressions preserve uncertainty and /init\n--- no garbage ANY routes (prose or log lines as paths) ---\n0\n--- nat-ui Next.js API route ---\nOK   http:ANY /api/mcp/clients\n--- the UI proxy is attributed to the nat service ---\nOK   proxy/server.js -> no_route_in_service (service nat)\n--- HTTP_PROXY_PATH sites stay unresolved without service attribution ---\nOK   6 HTTP_PROXY_PATH sites unresolved, service-free, candidate-free\nPASS: expected routes and attribution verified; source-scope coverage reported separately\n",
+    "runtime_production_coverage_established": false,
+    "raw_files_directory": "/data/agents/tmp-lain-tests/objective-gap-final-evidence-2026-11-08/nat-final"
+  },
+  "nvidia_inputs": {
+    "openshell": {
+      "path": "/data/agents/tmp-lain-tests/nvidia-eval/OpenShell",
+      "commit": "d4e32263eb4554c46c5bae702acada2f4af03eb0",
+      "dirty": false,
+      "tracked_files": 2129
+    },
+    "nemo-fabric": {
+      "path": "/data/agents/tmp-lain-tests/nvidia-eval/NeMo-Fabric",
+      "commit": "4fdf65a4b4c96024327501ae28243f2d206e7ec7",
+      "dirty": false,
+      "tracked_files": 1165
+    },
+    "nemoclaw": {
+      "path": "/data/agents/tmp-lain-tests/nvidia-eval/NemoClaw",
+      "commit": "37f1e4cb9942a3dc05c0c76995f86624261bc7b1",
+      "dirty": false,
+      "tracked_files": 6655
+    },
+    "nat": {
+      "path": "/data/agents/tmp-lain-tests/nvidia-eval/NeMo-Agent-Toolkit",
+      "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+      "dirty": false,
+      "tracked_files": 2776
+    },
+    "nat-ui": {
+      "path": "/data/agents/tmp-lain-tests/nvidia-eval/NeMo-Agent-Toolkit-UI",
+      "commit": "41cb8cf843091a24bd06d0a5f844a3cb824049d8",
+      "dirty": false,
+      "tracked_files": 175
+    },
+    "nat-examples": {
+      "path": "/data/agents/tmp-lain-tests/nvidia-eval/NeMo-Agent-Toolkit-Examples",
+      "commit": "eadbb7573b9ba12c01a9df85c601a32a886d7b25",
+      "dirty": false,
+      "tracked_files": 169
+    }
+  },
+  "startup_dataset_audit": {
+    "datasets": [
+      {
+        "artifact": "nvidia-startup-2026-11-06.json",
+        "source_commit": "4b877781fdca8ef6ec1690693b12dabfa729202e",
+        "binary_sha256": "f183b1e442694c044f503acff246296e2fbe93e2af396c79ad76694aa70576eb",
+        "readiness_medians_s": {
+          "openshell/cold": 276.1881616800092,
+          "openshell/warm": 165.2252979420009,
+          "nat/cold": 40.84999551202054,
+          "nat/warm": 23.880030969972722
+        },
+        "median_loadavg_start": 4.95751953125,
+        "ready_launches": 12,
+        "warm_cache_hits": 0
+      },
+      {
+        "artifact": "nvidia-startup-cache-2026-11-06.json",
+        "source_commit": "4b877781fdca8ef6ec1690693b12dabfa729202e",
+        "binary_sha256": "ec647fc3272d6b06e70987403c24b01b52b950a966494940b2d185cffccf55db",
+        "readiness_medians_s": {
+          "openshell/cold": 94.93191946900333,
+          "openshell/warm": 5.353037601016695,
+          "nat/cold": 19.0303102619946,
+          "nat/warm": 1.2103784819773864
+        },
+        "median_loadavg_start": 6.349609375,
+        "ready_launches": 12,
+        "warm_cache_hits": 6
+      },
+      {
+        "artifact": "nvidia-startup-concurrency-1-2026-11-06.json",
+        "source_commit": "4b877781fdca8ef6ec1690693b12dabfa729202e",
+        "binary_sha256": "c94c770863a869cbf64441354b0f79355c4b5851d82d1440aa1ff37bdad15a59",
+        "readiness_medians_s": {
+          "openshell/cold": 89.8420361019962,
+          "openshell/warm": 3.7240516180172563,
+          "nat/cold": 17.145199485006742,
+          "nat/warm": 1.107198048994178
+        },
+        "median_loadavg_start": 5.35302734375,
+        "ready_launches": 12,
+        "warm_cache_hits": 6
+      },
+      {
+        "artifact": "nvidia-startup-concurrency-2-2026-11-06.json",
+        "source_commit": "4b877781fdca8ef6ec1690693b12dabfa729202e",
+        "binary_sha256": "c94c770863a869cbf64441354b0f79355c4b5851d82d1440aa1ff37bdad15a59",
+        "readiness_medians_s": {
+          "openshell/cold": 81.91113603199483,
+          "openshell/warm": 3.6242720499867573,
+          "nat/cold": 15.970665201020893,
+          "nat/warm": 1.1088726599991787
+        },
+        "median_loadavg_start": 7.529296875,
+        "ready_launches": 12,
+        "warm_cache_hits": 6
+      },
+      {
+        "artifact": "nvidia-startup-objective-gap-2026-11-08.json",
+        "source_commit": "e5087e4ca96bb987265b7e4ce5266f4cfb4c574f",
+        "binary_sha256": "c9764a93c36d96f0229bbb9c352e5d7d7960274279e65d5bbb9da17cb4a400c0",
+        "readiness_medians_s": {
+          "openshell/cold": 187.91732551698806,
+          "openshell/warm": 5.451714887982234,
+          "nat/cold": 22.887048151984345,
+          "nat/warm": 1.931836318981368
+        },
+        "median_loadavg_start": 13.529296875,
+        "ready_launches": 12,
+        "warm_cache_hits": 6
+      }
+    ],
+    "controlled_comparison": false,
+    "targets_changed": false
+  },
+  "mutation": {
+    "status": "pending",
+    "candidate_count": 608,
+    "base_ref": "origin/dev",
+    "base_commit": "da9ce61289feb35b40d9b8a5df66f23a77786cd2",
+    "command": "TMPDIR=<owned scratch> CARGO_BUILD_JOBS=1 scripts/mutation-gate.sh origin/dev",
+    "runtime_state": "/data/agents/tmp-lain-tests/objective-gap-final-evidence-2026-11-08/mutation-state.json",
+    "raw_log": "/data/agents/tmp-lain-tests/objective-gap-final-evidence-2026-11-08/mutation.log",
+    "note": "This committed checkpoint does not claim a full mutation pass. The runtime state file records the subsequent execution."
+  },
+  "resource_cleanup": {
+    "test_executables_reduced": 107,
+    "logical_size_reduction_bytes": 41638890824,
+    "temporary_acceptance_clones_demo_fixtures_and_NAT_graphs": "removed after preserving evidence",
+    "free_disk_bytes_at_checkpoint": 78227550208
+  },
+  "raw_evidence_directory": "/data/agents/tmp-lain-tests/objective-gap-final-evidence-2026-11-08",
+  "raw_evidence_manifest": {
+    "lain-objective-gap-cross-repo-final.log": {
+      "sha256": "1cb5a5f893252899f02d90b14973b69b1d804c8a9fe0919184248125babae2af",
+      "bytes": 2109
+    },
+    "lain-objective-gap-guards-final.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    "lain-objective-gap-startup-audit.json": {
+      "sha256": "82bc245000a68793488125ac16b8eb8b39e33ebdf4c6704cef4546136a6f3383",
+      "bytes": 2785
+    },
+    "lain-objective-gap-release-identity.json": {
+      "sha256": "ea7d3d99ca5842a994cd6c47cd11c07dcd45ab3e98b2b4e48f7953d5a1607689",
+      "bytes": 150
+    },
+    "lain-objective-gap-checks.log": {
+      "sha256": "d000ac479e88e6073c656040abc224a1eb4569665f0bb099dfa90c50c5b9d2ec",
+      "bytes": 1140
+    },
+    "demo.json": {
+      "sha256": "9f499187b63fac4bff26cf510c256b73f81d864d0b5579580203c8af3f4a0d1e",
+      "bytes": 36940
+    },
+    "lain-objective-gap-full-test.log": {
+      "sha256": "456ecb5017fca6a75cb7d43ec228234a267d05e0df23fe6a3d33a3db2696e05b",
+      "bytes": 411350
+    },
+    "lain-objective-gap-final-diff.patch": {
+      "sha256": "a67a6644228a611bce0c5af7fd50154af66ddd10e2fd2a6f0b313a6a9e66797d",
+      "bytes": 1544208
+    },
+    "nat.log": {
+      "sha256": "4c2fa07ea0a6e920fb1d199adf88bd0d2005f8fad5c788ab1c9a0abe9505ca0b",
+      "bytes": 1412
+    },
+    "demo.log": {
+      "sha256": "ef5dc38775d3d6e15acba66617330f0b5d55c7bcd0afebb4178ab81f4cb31e25",
+      "bytes": 13920
+    },
+    "lain-objective-gap-clean-build.log": {
+      "sha256": "636d65f9ad37f5f9a5d929a79222b58702e3ea6d367a667ced42bd5b00bceeca",
+      "bytes": 68
+    },
+    "lain-objective-gap-release-build.log": {
+      "sha256": "1b2aa4cbd34714c8724197a90d0d2f6e40002f547f34265ff4bbb97007267281",
+      "bytes": 226
+    },
+    "lain-objective-gap-badge.log": {
+      "sha256": "a919e13eab6f50e4396df00bd7ed93c2c87d81cf81566eb472f798d6b77e0f34",
+      "bytes": 705
+    },
+    "lain-objective-gap-mutant-list.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    "acceptance.log": {
+      "sha256": "77fcb85c77171d7cf017fda60816d0df0feebbd99912848daed828881d6c6600",
+      "bytes": 6241
+    },
+    "lain-objective-gap-mutant-list.json": {
+      "sha256": "1b79b3dd149faeae6925817bce0c44312a4ac0f1a9c1e71bb0313d9e1131c8e3",
+      "bytes": 1476453
+    },
+    "schema.json": {
+      "sha256": "4dd0249def5919bf75b5d0ee1dcb1615740913991a1fb09118cf74f83d12ee5d",
+      "bytes": 164978
+    },
+    "lain-objective-gap-cleanup.json": {
+      "sha256": "e8a198ebefbb7267c5cc8cee303ccf41773014ba211522031db13914600eec69",
+      "bytes": 15939
+    },
+    "npm-final.log": {
+      "sha256": "a0336657e3b523a89d9cf70f8bed8bfdc8029e07f54a827121a8b517f8261903",
+      "bytes": 1090
+    },
+    "lain-objective-gap-npm.log": {
+      "sha256": "2ddb7a65d2e7d4007968d2b5e76f1cca8e845ccc9337730b5c74d5c8956b3a42",
+      "bytes": 879
+    },
+    "lain-objective-gap-harness-final.log": {
+      "sha256": "61024c3bf4238f6f95cc9878a64e8daf58add5947b169b6f8743a3bb56c589f1",
+      "bytes": 208
+    },
+    "lain-objective-gap-clippy-final.log": {
+      "sha256": "ff831c2a433f7ea8c00050899e7fe7a7224071b8c3443d84a886461f1fa38b8e",
+      "bytes": 141
+    },
+    "nat-final/unresolved-response.json": {
+      "sha256": "0c32044d9d7a30755acc807a345018a8dfe3606ab38e6c9f2c1f6e161b1f5308",
+      "bytes": 48903
+    },
+    "nat-final/http-source-scope.json": {
+      "sha256": "0740d25d5acd613f2a980b4663d3f2a5d0833fd82912daf553bb5daf7bf7eb04",
+      "bytes": 4151
+    },
+    "nat-final/server.log": {
+      "sha256": "6f1421846c5bb20a601674eb8d8a7ddb9f91ac15b11b17b5ce68286e457e4c07",
+      "bytes": 20047
+    },
+    "nat-final/http-contracts.json": {
+      "sha256": "e49322023ec5848f3faec8536ed880173f4d33b4d421a3265da0efd7889f27ae",
+      "bytes": 12139
+    },
+    "nat-final/repos.yaml": {
+      "sha256": "1fbd4561425289800d1201f0da6bbef605d9db26a36b3bda3ab9432c9062d211",
+      "bytes": 1738
+    },
+    "nat-final/websocket-contracts.json": {
+      "sha256": "3b5e488e5d8da9dacca9473f8f59c0b01401bfa36c47d499f61516cdede39ccd",
+      "bytes": 384
+    },
+    "nat-before-followup/unresolved-response.json": {
+      "sha256": "79500637b44651daaf742791900afbb9d274c5e1bd5b02869e96907e671bcda5",
+      "bytes": 48903
+    },
+    "nat-before-followup/http-source-scope.json": {
+      "sha256": "0740d25d5acd613f2a980b4663d3f2a5d0833fd82912daf553bb5daf7bf7eb04",
+      "bytes": 4151
+    },
+    "nat-before-followup/server.log": {
+      "sha256": "c27e8c572389e035b898487689d76b672b428e5bb8214954d2e24f01e3f7cfaa",
+      "bytes": 25733
+    },
+    "nat-before-followup/http-contracts.json": {
+      "sha256": "e49322023ec5848f3faec8536ed880173f4d33b4d421a3265da0efd7889f27ae",
+      "bytes": 12139
+    },
+    "nat-before-followup/repos.yaml": {
+      "sha256": "4e2ff6f83d2f400d635538b97356056fc6e8c2b3e90b94b097ae90152ba9f6e8",
+      "bytes": 1690
+    },
+    "nat-before-followup/websocket-contracts.json": {
+      "sha256": "3b5e488e5d8da9dacca9473f8f59c0b01401bfa36c47d499f61516cdede39ccd",
+      "bytes": 384
+    }
+  }
+}

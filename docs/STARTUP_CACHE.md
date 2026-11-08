@@ -60,8 +60,8 @@ The repeat benchmark measured checkout `e5087e4c` with executable `c9764a93…` 
 | Executable SHA-256 | `f183b1e4…` | `ec647fc3…` / `c94c7708…` | `c9764a93…` |
 | Embedded build stamp | `dfd10bf7-dirty` | `4b877781-dirty` | `e5087e4c-dirty` |
 | Source checkout | `4b877781fdca…` | `4b877781fdca…` | `e5087e4ca96b…` |
-| Host load average at launch (12 CPUs) | 4.96 median | 6.35–7.53 median | 13.53 median |
-| OpenShell cold (median) | 276.19 s | 94.93 s | 187.92 s |
+| Host load average at launch (12 CPUs) | 4.96 median | 5.35–7.53 median | 13.53 median |
+| OpenShell cold (median) | 276.19 s | 94.93 s / 81.91–89.84 s | 187.92 s |
 | OpenShell warm (median) | 165.23 s | 5.35 s / 3.62–3.72 s | 5.45 s |
 | Toolkit cold (median) | 40.85 s | 19.03 s / 15.97–17.15 s | 22.89 s |
 | Toolkit warm (median) | 23.88 s | 1.21 s / 1.11 s | 1.93 s |
@@ -222,3 +222,11 @@ The current working tree passed `cargo test --locked --workspace -j 2`: 4,133 te
 The focused mutation gate for `src/server/federation/startup_cache.rs` tested all 72 generated mutants against the library suite: 69 were caught and three were unviable; none were missed or timed out. This was a path-filtered batch, not a mutation run over every changed Rust file. The JS suite passed 78 tests; npm-shim installer and launcher tests, three Windows archive contract tests, nine startup benchmark harness tests, and three contract-smoke scope tests passed. The npm-shim install hook emitted a recoverable model-install warning from the older globally cached binary; the package install and its tests exited successfully.
 
 These checks ran on Linux. Native macOS and Windows execution require CI runners. The release coverage command was attempted locally but stopped before completion when its separate target grew to 26 GB and filled the 280 GB volume; that generated target and its isolated temporary files were removed, restoring the prior 26 GB free. Coverage remains outstanding for CI. Existing same-day NVIDIA correctness and capability evidence above remains separate from this test run.
+
+## Verification checkpoint — 2026-11-08
+
+The [verification record](benchmarks/objective-gap-verification-2026-11-08.json) records 4,150 passing workspace tests across 113 suites, zero failures, and 16 ignored tests; the final cross-repo fixtures passed 9/9. The production code is unchanged from `040b2e07`; `714e736e` adds a fixture assertion for a separate indexing member. CI-configured Clippy, formatting, a clean-export build, architecture guards and their self-tests, npm CI/install tests, health-badge contract tests, and the Python harness checks passed locally.
+
+Release build `b0956095` (`lain` SHA-256 `c694a4002ce7…`, sidecar `e5906b9c58d5…`) passed all 37 acceptance claims, all 171 capability-demo checks, the 100-tool schema comparison, and the NVIDIA smoke. The demo skipped two semantic checks because its isolated environment had no embedding model. The startup audit recalculated medians and checked input pins and within-build fingerprints across the five existing timing artifacts; those artifacts retain their original binary identities and the existing targets remain unchanged.
+
+The full incremental mutation gate has 608 cases and remains required. The earlier 72-case startup-cache batch is partial evidence. Step 5 stays open until the full gate passes; the verification record links its runtime state and raw log. Generated test executables lost 38.78 GiB of debug sections, and owned acceptance clones, demo fixtures, and NVIDIA graphs were removed after preserving their evidence.

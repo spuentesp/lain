@@ -46,7 +46,7 @@ Six sites changed their reported reason, and they moved in both directions. Four
 
 NAT-04 is only partly addressed. The bound consumers are `http:GET /mcp/client/tool/list` and `http:POST /chat/stream`; the first is a non-test source binding at `nat-ui:utils/api/mcpClient.ts:28` and the second is a test [29]. The strict `NAT_REQUIRE_NON_TEST_HTTP_BINDINGS=1` gate fails only when no non-test source binding exists, and one now does, so its failure condition is no longer met [29]. The binding itself is a heuristic match — detector `unbound_host`, confidence 0.6, exact route match — and a static source classification does not establish runtime deployment [29].
 
-The measurement used a debug build of the analyzer, because the release build did not finish inside its time budget. Analyzer output does not depend on the build profile. The revision-9 numbers remain the record for the earlier correction; this section supersedes them only for the findings whose status changed [28] [29].
+The measurement used a debug build of the analyzer, because the release build did not finish inside its time budget. A later release-build check is recorded below. The revision-9 numbers remain the record for the earlier correction; this section supersedes them only for the findings whose status changed [28] [29].
 
 ## The four `HTTP_PROXY_PATH` sites (traced 2026-11-07)
 
@@ -71,9 +71,15 @@ Per-site outcomes, all verified against the pinned nat-ui revision `41cb8cf8`:
 | `Chat.tsx:1165` | `${HTTP_PROXY_PATH}${httpEndpointPath}` | Unresolved (`dynamic_target`), no service | The path is a runtime-selected variable; the proxy's per-path dispatch means the destination (nat backend or nat-ui itself) depends on that variable. Runtime selection prevents static resolution — kept unresolved rather than guessed. The reason is `dynamic_target` rather than `no_route_in_service`: no service was checked, so the old label claimed more than the analyzer knew. |
 | `pages/api/mcp/clients.ts:18` | `url` (dynamic) | Unresolved (`dynamic_target`), no service | Dynamic path; same runtime-selection reason. |
 
-Two of the six sites that carry the expression are not among the four audited: `proxy/server.js:189` and `:213` are the proxy's own routing code, not client calls, so they produce no consumer facts.
+The proxy's own references at `proxy/server.js:189` and `:213` are routing code and produce no consumer facts. They are additional source references, outside the six emitted consumer records above.
 
 Classification rules this analysis pins (and the smoke now asserts): a convention-based match must not be reported as a production binding; the four static-path sites carry `no_match` with no `target_service` and no candidates; the dynamic sites carry `dynamic_target` — a runtime-selected path is its own reason, not "the service has no such route" — and are never reported as confirmed absences. Regressions: `convention_based_env_default_host_stays_unresolved_without_service_attribution` (joiner), `env_default_const_resolves_to_its_literal_fallback` and `env_default_with_dynamic_suffix_stays_dynamic` (JS URL resolution), and the `HTTP_PROXY_PATH sites stay unresolved` section of `scripts/eval/nat-http-contract-smoke.sh` (live multi-repo check).
+
+## Release-build verification — 2026-11-08
+
+The default NVIDIA smoke passed on release build `b0956095` (`lain` SHA-256 `c694a4002ce7…`, Git sidecar `e5906b9c58d5…`), using the same clean pins: nat `2fdf56a4`, nat-ui `41cb8cf8`, and nat-examples `eadbb757`. It found 22 HTTP endpoints, two bound consumers, and 40 unresolved consumers: 32 `no_match`, two `dynamic_target`, four `no_route_in_service`, and two `env_unmapped`. All six `HTTP_PROXY_PATH` consumers remained service-free and candidate-free; the four static-path cases retained `no_match`, while the two runtime-selected paths retained `dynamic_target`.
+
+One bound consumer is in non-test source and one is a test. This static check still does not establish runtime production coverage. The [verification record](benchmarks/objective-gap-verification-2026-11-08.json) preserves the smoke output, binary hashes, input revisions, and raw-evidence locations. The full incremental mutation gate remains outstanding in that checkpoint.
 
 ## Baseline findings
 
