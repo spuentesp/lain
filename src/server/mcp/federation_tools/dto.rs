@@ -65,9 +65,9 @@ pub struct CrossRepoBlastRadius {
     pub total_count: usize,
     pub truncated: bool,
     /// Why the answer cannot be read as complete, or `None` when it can.
-    /// `truncated` above is the observable; this names what it means for
-    /// the answer, so a reader does not have to know the cap to
-    /// understand that the list is a prefix of the full reach.
+    /// Covers duplicate seed names, stale or incomplete indexing, runtime
+    /// dispatch, and traversal truncation. Omitted when the index has no
+    /// observed gap.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answer_scope: Option<String>,
 }

@@ -442,6 +442,14 @@ callers*. The second is not a safe change. The same field appears in
 and `risk: "low"` with a scope is an answer the analyzer could not
 complete.
 
+Cross-repository blast radius also checks for duplicate names within the
+selected repo, runtime-dispatch edges, and missing or unfinished federation
+members. Selecting `repo_id` alone does not disambiguate two definitions in
+that repo. Its complete response omits `answer_scope` rather than emitting
+`null`; a non-null reason uses the same vocabulary above. If several gaps
+apply, ambiguity takes priority, followed by stale indexing, runtime dispatch,
+and truncation; `truncated` still reports the traversal limit independently.
+
 When the graph is behind HEAD, `get_health` says so and "not found"
 answers point at it. Treat a `Degraded ⚠` server's silence as "not in
 this graph", never as "does not exist".

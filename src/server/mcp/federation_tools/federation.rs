@@ -303,20 +303,46 @@ pub fn get_cross_repo_blast_radius_for_repo(
     // global id. `backend.find_nodes_by_name` covers both repos added
     // through `add_repo` / `project_repo` and nodes inserted directly
     // into the backend (same fallback pattern `resolve_symbol` uses).
-    let seed = fed
+    let mut candidates = fed
         .backend()
         .find_nodes_by_name(name)?
         .into_iter()
-        .find(|n| match GlobalId::parse(&n.id) {
+        .filter(|n| match GlobalId::parse(&n.id) {
             Ok(g) => {
                 g.repo_id() == rid.as_str()
                     && qualifier.is_none_or(|q| n.container.as_deref() == Some(q))
             }
             Err(_) => false,
         })
-        .ok_or_else(|| {
-            LainError::NotFound(format!("symbol {symbol} not found in repo {repo_id}"))
-        })?;
+        .collect::<Vec<_>>();
+    candidates.sort_by(|a, b| a.path.cmp(&b.path).then_with(|| a.id.cmp(&b.id)));
+    let seed = candidates.first().ok_or_else(|| {
+        LainError::NotFound(format!("symbol {symbol} not found in repo {repo_id}"))
+    })?;
+    // Repo selection does not disambiguate duplicate names within that repo.
+    // A missing/indexing member can also hide callers of an otherwise current
+    // seed, so federation readiness matters as well as the seed's file.
+    let stale = !fed.load_errors().is_empty()
+        || fed
+            .list_repos()
+            .iter()
+            .any(|(_, health)| *health != crate::federation::health::RepoHealth::Ready)
+        || fed.get_repo(&rid).is_some_and(|repo| {
+            crate::server::tools::answer_scope::is_stale(repo.db(), repo.local_path(), &seed.path)
+        });
+    let mut dynamic = false;
+    for edge_type in [
+        crate::schema::EdgeType::DynamicDispatch,
+        crate::schema::EdgeType::BusTopic,
+        crate::schema::EdgeType::RouteMatches,
+    ] {
+        if !fed.backend().edges_from(&seed.id, edge_type)?.is_empty() {
+            dynamic = true;
+            break;
+        }
+    }
+    let scope =
+        crate::server::tools::answer_scope::reason_for(candidates.len() > 1, stale, dynamic);
     // PR 4 (§5.2): rebuilt on `traverse_impact` so the impact table
     // (§5.2 propagation rules) is the single source of truth for which
     // edges contribute to a blast-radius walk. In PR 4 only `Calls`
@@ -371,11 +397,10 @@ pub fn get_cross_repo_blast_radius_for_repo(
         by_repo,
         total_count: total,
         truncated,
-        answer_scope: truncated.then(|| {
-            crate::server::tools::answer_scope::IncompleteReason::Truncated
-                .wire_label()
-                .to_string()
-        }),
+        answer_scope: scope
+            .or(truncated
+                .then_some(crate::server::tools::answer_scope::IncompleteReason::Truncated))
+            .map(|reason| reason.wire_label().to_string()),
     })
 }
 
@@ -595,6 +620,119 @@ mod tests {
         );
         assert_eq!(result.total_count, 0);
         assert!(!result.truncated);
+    }
+
+    #[tokio::test]
+    async fn cross_repo_blast_radius_scopes_duplicate_names_within_a_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        for path in ["src/a.rs", "src/b.rs"] {
+            fed.backend()
+                .upsert_node_global(
+                    &format!("repo-a:Function:{path}:shared:0"),
+                    crate::schema::NodeType::Function,
+                    path,
+                    "shared",
+                )
+                .unwrap();
+        }
+        let result = get_cross_repo_blast_radius_for_repo(&fed, "repo-a", "shared", 1..3).unwrap();
+        assert_eq!(result.total_count, 0);
+        assert_eq!(result.answer_scope.as_deref(), Some("ambiguous_target"));
+    }
+
+    #[tokio::test]
+    async fn cross_repo_blast_radius_scopes_runtime_dispatch_without_static_callers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        let seed = "repo-a:Function:src/a.rs:shared:0";
+        let target = "repo-a:Function:src/b.rs:handler:0";
+        for (id, name) in [(seed, "shared"), (target, "handler")] {
+            fed.backend()
+                .upsert_node_global(id, crate::schema::NodeType::Function, "src/a.rs", name)
+                .unwrap();
+        }
+        for kind in [
+            crate::schema::EdgeType::DynamicDispatch,
+            crate::schema::EdgeType::BusTopic,
+            crate::schema::EdgeType::RouteMatches,
+        ] {
+            let edge = crate::schema::GraphEdge::new(kind, seed.into(), target.into());
+            fed.backend().upsert_edge(edge.clone()).unwrap();
+            let result =
+                get_cross_repo_blast_radius_for_repo(&fed, "repo-a", "shared", 1..3).unwrap();
+            assert_eq!(result.total_count, 0);
+            assert_eq!(result.answer_scope.as_deref(), Some("dynamic_target"));
+            fed.backend().remove_edges(&[edge]).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn cross_repo_blast_radius_scopes_unindexed_files_and_missing_members() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        let src_dir = tempfile::tempdir().unwrap();
+        git2::Repository::init(src_dir.path()).unwrap();
+        let rid = RepoId::new("repo-a").unwrap();
+        let source = WorkspaceDirSource::new(rid.clone(), src_dir.path().to_path_buf()).unwrap();
+        fed.add_repo(Box::new(source), tmp.path()).await.unwrap();
+        fed.get_repo(&rid).unwrap().set_health(RepoHealth::Ready);
+        fed.backend()
+            .upsert_node_global(
+                "repo-a:Function:src/a.rs:shared:0",
+                crate::schema::NodeType::Function,
+                "src/a.rs",
+                "shared",
+            )
+            .unwrap();
+        let result = get_cross_repo_blast_radius_for_repo(&fed, "repo-a", "shared", 1..3).unwrap();
+        assert_eq!(result.total_count, 0);
+        assert_eq!(result.answer_scope.as_deref(), Some("stale_or_unindexed"));
+
+        std::fs::create_dir(src_dir.path().join("src")).unwrap();
+        std::fs::write(src_dir.path().join("src/a.rs"), "fn shared() {}\n").unwrap();
+        let mut node = crate::schema::GraphNode::new(
+            crate::schema::NodeType::Function,
+            "shared".into(),
+            "src/a.rs".into(),
+        );
+        // A deliberately old scan is stale without a timing-dependent sleep.
+        node.last_lsp_sync = Some(1);
+        let repo = fed.get_repo(&rid).unwrap();
+        repo.db().upsert_node(node.clone()).unwrap();
+        let result = get_cross_repo_blast_radius_for_repo(&fed, "repo-a", "shared", 1..3).unwrap();
+        assert_eq!(result.answer_scope.as_deref(), Some("stale_or_unindexed"));
+        node.last_lsp_sync = Some(crate::server::time::now_unix());
+        repo.db().upsert_node(node).unwrap();
+        let result = get_cross_repo_blast_radius_for_repo(&fed, "repo-a", "shared", 1..3).unwrap();
+        assert_eq!(result.answer_scope, None);
+
+        for health in [
+            RepoHealth::Indexing,
+            RepoHealth::Degraded,
+            RepoHealth::Unavailable,
+            RepoHealth::Missing,
+        ] {
+            repo.set_health(health);
+            let result =
+                get_cross_repo_blast_radius_for_repo(&fed, "repo-a", "shared", 1..3).unwrap();
+            assert_eq!(result.answer_scope.as_deref(), Some("stale_or_unindexed"));
+        }
+        repo.set_health(RepoHealth::Ready);
+
+        // Even a current seed cannot prove no callers in a member that failed
+        // to load. Use a backend-only seed so only the load error is at issue.
+        fed.backend()
+            .upsert_node_global(
+                "repo-b:Function:src/b.rs:other:0",
+                crate::schema::NodeType::Function,
+                "src/b.rs",
+                "other",
+            )
+            .unwrap();
+        fed.record_load_error("missing-consumer", "checkout unavailable".into());
+        let result = get_cross_repo_blast_radius_for_repo(&fed, "repo-b", "other", 1..3).unwrap();
+        assert_eq!(result.answer_scope.as_deref(), Some("stale_or_unindexed"));
     }
 
     #[tokio::test]

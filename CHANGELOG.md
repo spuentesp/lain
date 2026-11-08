@@ -7,13 +7,15 @@ All notable changes to LAIN are documented here. Versions follow
 
 - Say why an answer may be incomplete. `get_call_sites`, `get_blast_radius`,
   `assess_change`, `explain_dispatch` and `get_cross_repo_blast_radius` report an
-  `answer_scope` field: `null` when the answer is complete — including an empty
+  `answer_scope` field: `null` (omitted for cross-repo blast radius) when the answer is complete — including an empty
   answer that is a confirmed absence — and otherwise one of `unresolved_name`,
   `ambiguous_target`, `dynamic_target`, `stale_or_unindexed` or `truncated`. A
   runtime-selected path in the contract tools is now reported as `dynamic_target`
   instead of `no_route_in_service`, which claimed a service had been checked
   when no service was involved. No numeric confidence is added: the reasons name
-  what the analyzer could not see. See `docs/quickstart-tools.md`.
+  what the analyzer could not see. Cross-repo answers also flag duplicate names
+  within the selected repo, runtime-dispatch edges, stale seed files, and
+  unfinished or unavailable federation members. See `docs/quickstart-tools.md`.
 
 - Resolve repository-local JavaScript URL constants, named imports, CommonJS destructuring, object members, and simple zero-argument helpers with bounded syntax evaluation, and bound GraphQL call extraction to its own string literal so SQL documents no longer parse as GraphQL operations. Preserve URL-constructor replacement semantics, lexical scope, and uncertain environment defaults; reject ignored or escaping import inputs and stop rendering opaque URLs as root requests. Honor request-option overwrite order and keep unknown methods uncertain. Stop emitting WebSocket server providers from client callbacks, recognize FastAPI keyword route registrations through configurable queries, keep WebSocket, topic, and table suggestions within their protocol, and show captured HTTP source expressions and hosts in unresolved results. Advance the contract analyzer revision to 10 to invalidate older snapshot analysis; graph serialization is unchanged. NVIDIA HTTP smoke checks now distinguish test traffic from non-test source bindings and offer `NAT_REQUIRE_NON_TEST_HTTP_BINDINGS=1` for a strict source-coverage gate.
 
