@@ -296,16 +296,22 @@ pub fn get_cross_repo_blast_radius_for_repo(
     depth: Range<u32>,
 ) -> Result<CrossRepoBlastRadius, LainError> {
     let rid = RepoId::new(repo_id)?;
+    let (qualifier, name) = symbol
+        .rsplit_once("::")
+        .map_or((None, symbol), |(qualifier, name)| (Some(qualifier), name));
     // Look up the actual node by name + repo so we traverse from a real
     // global id. `backend.find_nodes_by_name` covers both repos added
     // through `add_repo` / `project_repo` and nodes inserted directly
     // into the backend (same fallback pattern `resolve_symbol` uses).
     let seed = fed
         .backend()
-        .find_nodes_by_name(symbol)?
+        .find_nodes_by_name(name)?
         .into_iter()
         .find(|n| match GlobalId::parse(&n.id) {
-            Ok(g) => g.repo_id() == rid.as_str(),
+            Ok(g) => {
+                g.repo_id() == rid.as_str()
+                    && qualifier.is_none_or(|q| n.container.as_deref() == Some(q))
+            }
             Err(_) => false,
         })
         .ok_or_else(|| {
@@ -772,6 +778,50 @@ mod tests {
             .by_repo
             .values()
             .any(|v| v.iter().any(|id| id.contains("caller_of_shared"))));
+    }
+
+    #[tokio::test]
+    async fn cross_repo_blast_radius_accepts_a_type_qualified_symbol() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        let backend = fed.backend();
+        let mut bytes_method = crate::schema::GraphNode::new(
+            crate::schema::NodeType::Method,
+            "from_static".into(),
+            "src/bytes.rs".into(),
+        );
+        bytes_method.id = "bytes:Method:src/bytes.rs:from_static:10".into();
+        bytes_method.container = Some("Bytes".into());
+        backend.upsert_node(bytes_method).unwrap();
+        let mut other_method = crate::schema::GraphNode::new(
+            crate::schema::NodeType::Method,
+            "from_static".into(),
+            "src/buf/uninit_slice.rs".into(),
+        );
+        other_method.id = "bytes:Method:src/buf/uninit_slice.rs:from_static:20".into();
+        other_method.container = Some("UninitSlice".into());
+        backend.upsert_node(other_method).unwrap();
+        backend
+            .upsert_node_global(
+                "tokio:Function:examples/connect_udp.rs:send:1",
+                crate::schema::NodeType::Function,
+                "examples/connect_udp.rs",
+                "send",
+            )
+            .unwrap();
+        backend
+            .upsert_edge(crate::schema::GraphEdge::new(
+                crate::schema::EdgeType::Calls,
+                "tokio:Function:examples/connect_udp.rs:send:1".into(),
+                "bytes:Method:src/bytes.rs:from_static:10".into(),
+            ))
+            .unwrap();
+
+        let result =
+            get_cross_repo_blast_radius_for_repo(&fed, "bytes", "Bytes::from_static", 1..2)
+                .unwrap();
+        assert_eq!(result.by_repo.get("tokio").map(Vec::len), Some(1));
+        assert_eq!(result.total_count, 1);
     }
 
     #[tokio::test]

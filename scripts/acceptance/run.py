@@ -308,11 +308,16 @@ def _multi_repo_flow(args, env, d, lain, port):
         f.write(repos)
     record("repos add + workspaces create keep both repos", "id: bytes" in repos and "id: tokio" in repos
            and os.path.exists(os.path.join(d, "workspaces.yaml")), (r1.stdout + r2.stdout + r3.stdout).strip().replace("\n", " | "))
-    server_log_path = os.path.join(d, "server.log")
-    server_log = open(server_log_path, "w")
-    server_env = {**env, "RUST_LOG": "info"}
+    # Assert the fixture setup actually pinned both revisions; an unpinned
+    # ref would silently track upstream master and change what this claim
+    # means.
+    record("repos.yaml pins bytes and tokio revisions",
+           "ref: 62207901b65e4fc51459b2d558fad8aa882f5d33" in repos
+           and "ref: c0c77a7a204be4ea60d4da45e1a346ce06ffa7d3" in repos,
+           "pins present exactly once each: "
+           f"bytes={open(repos_path).read().count('ref: 62207901')} tokio={open(repos_path).read().count('ref: c0c77a7a')}")
     srv = subprocess.Popen([lain, "server", "--config", "./repos.yaml", "--transport", "http", "--port", str(port)],
-                           cwd=d, env=server_env, stdout=subprocess.DEVNULL, stderr=server_log)
+                           cwd=d, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         url = f"http://127.0.0.1:{port}"
         for _ in range(900):
@@ -334,14 +339,17 @@ def _multi_repo_flow(args, env, d, lain, port):
             time.sleep(2)
         code = urllib.request.urlopen(url + "/", timeout=10).status
         record("Command Center serves", code == 200, f"GET / -> {code}")
-        # Tokio's put_slice calls target its own ReadBuf/BufMut APIs, not
-        # bytes::BufMut. The Tokio UDP example directly calls
-        # bytes::Bytes::copy_from_slice; the type qualifier disambiguates it
-        # from the same-named UninitSlice method in bytes.
-        t = call("get_cross_repo_blast_radius_for_repo", {"repo_id": "bytes", "symbol": "copy_from_slice", "depth": "1..2"})
+        # Tokio's UDP example directly calls bytes::Bytes::copy_from_slice.
+        # The type qualifier disambiguates it from UninitSlice's method.
+        t = call("get_cross_repo_blast_radius_for_repo", {"repo_id": "bytes", "symbol": "Bytes::copy_from_slice", "depth": "1..2"})
         by = json.loads(t).get("by_repo", {}) if t.startswith("{") else {}
-        record("cross-repo blast radius: tokio callers of bytes::Bytes::copy_from_slice", len(by.get("tokio", [])) > 0,
-               f"by repo: { {k: len(v) for k, v in by.items()} }")
+        tokio_ids = by.get("tokio", [])
+        # Nonempty is not enough: another Tokio caller of a same-named symbol
+        # would satisfy it. The pinned Tokio revision proves the edge from
+        # examples/connect-udp.rs specifically.
+        record("cross-repo blast radius: tokio callers of bytes::Bytes::copy_from_slice",
+               any("examples/connect-udp.rs" in i for i in tokio_ids),
+               f"by repo: { {k: len(v) for k, v in by.items()} }; tokio ids: {tokio_ids[:5]}")
         t = call("search_org", {"query": "put_slice", "limit": 10})
         record("search_org finds same-name symbols across repos", "bytes" in t and "tokio" in t, t[:160])
         t = call("get_health", {})
@@ -349,11 +357,6 @@ def _multi_repo_flow(args, env, d, lain, port):
     finally:
         srv.terminate()
         srv.wait(timeout=30)
-        server_log.close()
-        with open(server_log_path) as log:
-            for line in log:
-                if "linked " in line or "cross-repo link" in line:
-                    print(f"SERVER  {line.strip()}", flush=True)
 
 
 # Plain-English questions about psf/requests whose answers do not share
