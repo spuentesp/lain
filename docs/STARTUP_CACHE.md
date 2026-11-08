@@ -51,11 +51,11 @@ No new warm-start target is set and no optimization was started for this reconci
 
 The remaining warm work is already identified by the phase breakdown above, and is the first place to look if an optimization is ever requested: metadata restoration takes 2.154 s for OpenShell and 0.608 s for Toolkit, of which contract-index reconstruction takes 1.823 s and 0.049 s, and service-reference scanning 0.290 s and 0.551 s. Those phase durations identify work available to optimize; they do not predict the net saving after adding metadata persistence and validation.
 
-## Repeat measurement on the current tree — 2026-11-08
+## Repeat measurement on `e5087e4c` — 2026-11-08
 
-The reconciliation was closed by re-running the same benchmark against the tree as it stands now, with the same six repository revisions, the same settings (release build, LSP disabled, one repo indexer, three cold/warm pairs per federation, graph digest enabled).
+The repeat benchmark measured checkout `e5087e4c` with executable `c9764a93…` (embedded stamp `e5087e4c-dirty`), the same six repository revisions, and the same settings (release build, LSP disabled, one repo indexer, three cold/warm pairs per federation, graph digest enabled). It records that build rather than later verification commits.
 
-| | Pre-cache baseline (2026-11-06) | Post-cache datasets (2026-11-06) | This tree (2026-11-08) |
+| | Pre-cache baseline (2026-11-06) | Post-cache datasets (2026-11-06) | Repeat build (2026-11-08) |
 | --- | --- | --- | --- |
 | Executable SHA-256 | `f183b1e4…` | `ec647fc3…` / `c94c7708…` | `c9764a93…` |
 | Embedded build stamp | `dfd10bf7-dirty` | `4b877781-dirty` | `e5087e4c-dirty` |
@@ -70,10 +70,10 @@ The reconciliation was closed by re-running the same benchmark against the tree 
 
 All 12 launches passed the readiness and MCP checks, all 6 warm launches confirmed a completed-cache hit, and every launch within a federation produced the same graph digest and the same node and edge counts.
 
-Two readings of this run, and neither is a speed comparison:
+The results establish cache repeatability within this build, with limits on comparisons across builds:
 
-- **The cold times are not comparable.** The host carried roughly twice the load of the 2026-11-06 runs (13.53 against 4.96–7.53 on a 12-CPU box), and cold startup is CPU- and I/O-bound. The OpenShell cold median of 187.92 s against the recorded 94.93 s is a property of the busier host, not evidence of a regression. The warm medians — 5.45 s for OpenShell, 1.93 s for Toolkit — sit in the same band as the recorded post-cache runs despite the heavier load, which is the meaningful reading: the completed-cache path still restores in single-digit seconds.
-- **The graph differs, and that difference is not this branch's doing.** The digests and counts changed since 2026-11-06 (OpenShell 101,118 → 101,038 nodes, `321ec807…` → `cf7130b1…`; Toolkit 25,026 → 25,034 nodes, `61cc7fba…` → `52ed179d…`) because the analyzer gained work in the commits between those two dates — the revision-10 JavaScript URL resolution and the NAT detector corrections. The changes made for this reconciliation add no graph facts: the diff adds no production node or edge writes (every graph write it introduces is inside a `#[cfg(test)]` module), and it changes only how answers are read and rendered. The digests are therefore the evidence that the *current* tree is stable across cold and warm runs, not that it matches the November datasets.
+- **Timing changes are not isolated.** Host load was higher (13.53 against 4.96–7.53 on a 12-CPU box), and the binary and analyzer tree also differed. OpenShell's cold median rose from 94.93 s to 187.92 s. Warm medians remained below six seconds, but Toolkit's 1.93 s exceeded the earlier 1.11–1.21 s medians; OpenShell measured 5.45 s against 3.62–5.35 s. This comparison cannot attribute the increases to host load alone or establish that no regression occurred. The owner kept the existing targets; no optimization was requested.
+- **Graph fingerprints agree within each measured build, not across dates.** Counts and digests changed (OpenShell 101,118 → 101,038 nodes, `321ec807…` → `cf7130b1…`; Toolkit 25,026 → 25,034 nodes, `61cc7fba…` → `52ed179d…`). The differing analyzer trees include URL-resolution and detector changes, but these runs do not isolate which changes caused those differences. An absence of new explicit graph-write calls does not rule out changes in facts produced through existing helpers. The matching cold/warm digests establish repeatability for this build, rather than equality with the November 6 datasets.
 
 Raw evidence: [nvidia-startup-objective-gap-2026-11-08.json](benchmarks/nvidia-startup-objective-gap-2026-11-08.json).
 
