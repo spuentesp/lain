@@ -301,6 +301,44 @@ else
   echo "MISS the proxy is not attributed to the nat service"; fail=1
 fi
 
+echo "--- HTTP_PROXY_PATH sites stay unresolved without service attribution ---"
+# The four nat-ui sites that build their URL from the HTTP_PROXY_PATH const
+# (constants/index.js: process.env.HTTP_PUBLIC_PATH || '/api'). The `||`
+# fallback is a convention-based default and the proxy routes per path
+# (proxy/server.js routes /update-data-stream to the Next.js server, other
+# paths to the nat backend), so static analysis cannot name a service.
+# Evidence-backed outcome: unresolved, no target_service, no invented bind.
+if printf '%s' "$(items_of "$UNRES")" | python3 -c '
+import json, sys
+items = json.load(sys.stdin)
+sites = [i for i in items if i.get("host") == "HTTP_PROXY_PATH"]
+expect = {
+    "components/DataStreamDisplay/DataStreamDisplay.tsx": {62, 82},
+    "components/DataStreamDisplay/DataStreamManager.tsx": {88},
+    "pages/database-updates.tsx": {109},
+    "components/Chat/Chat.tsx": {1165},
+}
+found = {}
+for i in sites:
+    path = i["consumer"]["path"]
+    line = i["consumer"].get("line")
+    if i.get("target_service") is not None:
+        sys.exit(f"FAIL {path}:{line} invented target_service {i.get('target_service')}")
+    if i.get("reason") not in {"no_match", "no_route_in_service", "unnormalized"}:
+        sys.exit(f"FAIL {path}:{line} unexpected reason {i.get('reason')}")
+    if i.get("candidates"):
+        sys.exit(f"FAIL {path}:{line} has candidates despite no service attribution")
+    found.setdefault(path, set()).add(line)
+for path, lines in expect.items():
+    if not lines <= found.get(path, set()):
+        sys.exit(f"FAIL {path}: expected lines {lines}, found {found.get(path, set())}")
+print(f"OK   {len(sites)} HTTP_PROXY_PATH sites unresolved, service-free, candidate-free")
+'; then
+  :
+else
+  echo "FAIL HTTP_PROXY_PATH classification"; fail=1
+fi
+
 if [[ "$fail" -ne 0 ]]; then
   echo "FAIL: one or more expectations missed" >&2
   exit 1

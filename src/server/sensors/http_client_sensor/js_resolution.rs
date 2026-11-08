@@ -875,6 +875,39 @@ mod tests {
     }
 
     #[test]
+    fn env_default_const_resolves_to_its_literal_fallback() {
+        // The nat-ui pattern: `const HTTP_PROXY_PATH = process.env.X || '/api'`.
+        // The env branch is runtime-selected, but the `||` fallback is a
+        // convention-based default the analyzer may report as the host.
+        let found = calls(
+            r#"const HTTP_PROXY_PATH = process.env.HTTP_PUBLIC_PATH || '/api';
+               const UPDATE_DATA_STREAM = '/update-data-stream';
+               const target = `${HTTP_PROXY_PATH}${UPDATE_DATA_STREAM}`;
+               fetch(target);"#,
+        );
+        assert_eq!(found.len(), 1);
+        assert_eq!(
+            found[0].url.host,
+            HostPart::Expr("HTTP_PROXY_PATH".into())
+        );
+        assert_eq!(found[0].url.template.as_deref(), Some("/update-data-stream"));
+    }
+
+    #[test]
+    fn env_default_with_dynamic_suffix_stays_dynamic() {
+        let found = calls(
+            r#"const HTTP_PROXY_PATH = process.env.HTTP_PUBLIC_PATH || '/api';
+               fetch(`${HTTP_PROXY_PATH}${httpEndpointPath}`, { method: 'POST' });"#,
+        );
+        assert_eq!(found.len(), 1);
+        assert_eq!(
+            found[0].url.host,
+            HostPart::Expr("HTTP_PROXY_PATH".into())
+        );
+        assert_eq!(found[0].url.template, None);
+    }
+
+    #[test]
     fn imports_follow_declared_aliases_exports_and_helpers() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
