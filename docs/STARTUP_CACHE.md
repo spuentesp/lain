@@ -21,6 +21,62 @@ Median HTTP availability was 1.01 s cold / 4.95 s warm for OpenShell and 0.40 s 
 
 Raw evidence: [baseline JSON](benchmarks/nvidia-startup-2026-11-06.json) and [cache implementation JSON](benchmarks/nvidia-startup-cache-2026-11-06.json). The reports include executable hashes, repository revisions, per-launch load, counts, and timings; the new report also includes fingerprints and cache-hit evidence.
 
+## Reconciling the pre-cache and post-cache runs
+
+The warm OpenShell readiness in [NVIDIA_STARTUP_BENCHMARK.md](NVIDIA_STARTUP_BENCHMARK.md) (about 165 s) and the warm readiness reported here (5.35 s, and 3.62 s in the concurrency experiment) are two different measurements. They must not be read as one series, and the difference between them is not attributable to the startup cache alone.
+
+| | Pre-cache baseline | Cache implementation | Concurrency experiment |
+| --- | --- | --- | --- |
+| Artifact | [nvidia-startup-2026-11-06.json](benchmarks/nvidia-startup-2026-11-06.json) | [nvidia-startup-cache-2026-11-06.json](benchmarks/nvidia-startup-cache-2026-11-06.json) | [nvidia-startup-concurrency-1-2026-11-06.json](benchmarks/nvidia-startup-concurrency-1-2026-11-06.json), […-2…](benchmarks/nvidia-startup-concurrency-2-2026-11-06.json) |
+| Executable SHA-256 | `f183b1e4…` | `ec647fc3…` | `c94c7708…` (both) |
+| Embedded build stamp | `dfd10bf7-dirty` | `4b877781-dirty` | `4b877781-dirty` |
+| Source checkout at measurement time | `4b877781fdca…` | `4b877781fdca…` | `4b877781fdca…` |
+| Repository revisions | the same six | the same six | the same six |
+| Startup path, warm run | no completed-federation cache existed; the warm run reused the data directory and re-ran every startup phase | restores a completed federation checkpoint (6 of 6 warm launches record a cache hit) | same checkpoint restore, at one and at two repo indexers |
+| Graph fingerprint | none — the harness had no fingerprint yet | `blake3-tagged-record-multiset-v1`, one value per federation across all six launches | identical digests to the cache run |
+| OpenShell warm readiness (median) | 165.23 s | 5.35 s | 3.72 s (1 indexer) / 3.62 s (2 indexers) |
+| NeMo Agent Toolkit warm readiness (median) | 23.88 s | 1.21 s | 1.11 s |
+
+Verified against the artifacts on 2026-11-07: the six repository revisions are identical in all four files (`openshell d4e32263`, `nemo-fabric 4fdf65a4`, `nemoclaw 37f1e4cb`, `nat 2fdf56a4`, `nat-ui 41cb8cf8`, `nat-examples eadbb757`); the four `source_commit` values are the same checkout `4b877781fdca8ef6ec1690693b12dabfa729202e`; the post-cache runs report one graph digest per federation (`openshell 321ec807…`, `nat 61cc7fba…`) across all six launches of each experiment, and the same two digests in both concurrency experiments; and every post-cache launch reports 101,118 nodes / 318,168 edges (OpenShell) and 25,026 nodes / 67,845 edges (Toolkit).
+
+Three consequences follow, and they are the reason the two documents are kept separate:
+
+1. **The executables differ.** The baseline ran a binary whose embedded build stamp was `dfd10bf7-dirty` — an older build that Cargo's build-script cache retained while the checkout had already moved to `4b877781`. That binary cannot contain the completed-federation cache implementation, because it predates it. The warm-start difference is therefore the combined effect of the tree change and the new startup path, not the cache in isolation.
+2. **The startup paths differ.** A baseline warm run re-runs startup work; a post-cache warm run restores a checkpoint. The comparison is "before the cache existed" against "with a reusable checkpoint", not a controlled A/B of one change.
+3. **The graphs differ.** The baseline's OpenShell edge count varied across its six launches (318,027 / 318,184 / 318,362 / 318,519 / 321,212 / 321,369) with no fingerprint to compare, while every post-cache launch produces one edge count and one digest. The two datasets' graphs are not interchangeable, so the speed-up is not evidence that the analyzer's output was preserved across the tree change — the fingerprints establish that within the post-cache datasets, not between them.
+
+### Target status
+
+No new warm-start target is set and no optimization was started for this reconciliation. The measured post-cache state is the reference: OpenShell warm readiness 5.35 s on the cache build and 3.62–3.72 s in the concurrency experiment, Toolkit warm readiness 1.11–1.21 s, with identical graph fingerprints across every launch.
+
+The remaining warm work is already identified by the phase breakdown above, and is the first place to look if an optimization is ever requested: metadata restoration takes 2.154 s for OpenShell and 0.608 s for Toolkit, of which contract-index reconstruction takes 1.823 s and 0.049 s, and service-reference scanning 0.290 s and 0.551 s. Those phase durations identify work available to optimize; they do not predict the net saving after adding metadata persistence and validation.
+
+## Repeat measurement on the current tree — 2026-11-08
+
+The reconciliation was closed by re-running the same benchmark against the tree as it stands now, with the same six repository revisions, the same settings (release build, LSP disabled, one repo indexer, three cold/warm pairs per federation, graph digest enabled).
+
+| | Pre-cache baseline (2026-11-06) | Post-cache datasets (2026-11-06) | This tree (2026-11-08) |
+| --- | --- | --- | --- |
+| Executable SHA-256 | `f183b1e4…` | `ec647fc3…` / `c94c7708…` | `c9764a93…` |
+| Embedded build stamp | `dfd10bf7-dirty` | `4b877781-dirty` | `e5087e4c-dirty` |
+| Source checkout | `4b877781fdca…` | `4b877781fdca…` | `e5087e4ca96b…` |
+| Host load average at launch (12 CPUs) | 4.96 median | 6.35–7.53 median | 13.53 median |
+| OpenShell cold (median) | 276.19 s | 94.93 s | 187.92 s |
+| OpenShell warm (median) | 165.23 s | 5.35 s / 3.62–3.72 s | 5.45 s |
+| Toolkit cold (median) | 40.85 s | 19.03 s / 15.97–17.15 s | 22.89 s |
+| Toolkit warm (median) | 23.88 s | 1.21 s / 1.11 s | 1.93 s |
+| OpenShell graph | 101,118 nodes, edge count varied 318,027–321,369, no digest | 101,118 nodes / 318,168 edges, digest `321ec807…` | 101,038 nodes / 317,240 edges, digest `cf7130b1…` |
+| Toolkit graph | 25,026 nodes / 67,842–67,846 edges, no digest | 25,026 nodes / 67,845 edges, digest `61cc7fba…` | 25,034 nodes / 67,857 edges, digest `52ed179d…` |
+
+All 12 launches passed the readiness and MCP checks, all 6 warm launches confirmed a completed-cache hit, and every launch within a federation produced the same graph digest and the same node and edge counts.
+
+Two readings of this run, and neither is a speed comparison:
+
+- **The cold times are not comparable.** The host carried roughly twice the load of the 2026-11-06 runs (13.53 against 4.96–7.53 on a 12-CPU box), and cold startup is CPU- and I/O-bound. The OpenShell cold median of 187.92 s against the recorded 94.93 s is a property of the busier host, not evidence of a regression. The warm medians — 5.45 s for OpenShell, 1.93 s for Toolkit — sit in the same band as the recorded post-cache runs despite the heavier load, which is the meaningful reading: the completed-cache path still restores in single-digit seconds.
+- **The graph differs, and that difference is not this branch's doing.** The digests and counts changed since 2026-11-06 (OpenShell 101,118 → 101,038 nodes, `321ec807…` → `cf7130b1…`; Toolkit 25,026 → 25,034 nodes, `61cc7fba…` → `52ed179d…`) because the analyzer gained work in the commits between those two dates — the revision-10 JavaScript URL resolution and the NAT detector corrections. The changes made for this reconciliation add no graph facts: the diff adds no production node or edge writes (every graph write it introduces is inside a `#[cfg(test)]` module), and it changes only how answers are read and rendered. The digests are therefore the evidence that the *current* tree is stable across cold and warm runs, not that it matches the November datasets.
+
+Raw evidence: [nvidia-startup-objective-gap-2026-11-08.json](benchmarks/nvidia-startup-objective-gap-2026-11-08.json).
+
 Further cold-start work should target the remaining measured sensors. In the first new NemoClaw pass, ORM took 13.3 s, frontend values 10.6 s, HTTP clients 9.8 s, and field access 6.2 s. Its total local pass took 55.9 s, compared with 99.8 s in the original first run. Concurrent indexing is available through the existing configuration and benchmark flag, but these measurements keep concurrency at one to preserve the comparison.
 
 To prewarm, start the normal server and wait for `/health/index-status` to return HTTP 200. That endpoint reports readiness only after indexing, linking, the contract join, and checkpoint publication have been attempted. Publication errors are logged; ordinary startup can still serve its completed in-memory graph.

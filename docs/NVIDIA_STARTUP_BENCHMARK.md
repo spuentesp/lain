@@ -2,6 +2,8 @@
 
 The completed cache implementation and its before/after measurements are documented in [STARTUP_CACHE.md](STARTUP_CACHE.md). The results below retain the original baseline.
 
+**These are not the same measurement as the one in STARTUP_CACHE.md.** This baseline ran the executable with SHA-256 `f183b1e4…` (embedded build stamp `dfd10bf7-dirty`, an older build that Cargo's build-script cache retained) against the checkout `4b877781fdca8ef6ec1690693b12dabfa729202e`. It had no completed-federation cache: a "warm" run reused the data directory and re-ran every startup phase. The later runs used different executables (`ec647fc3…`, `c94c7708…`) and a checkpoint-restore startup path, so the two sets of numbers are not one series and the difference between them is not attributable to the cache alone. [STARTUP_CACHE.md § Reconciling the pre-cache and post-cache runs](STARTUP_CACHE.md#reconciling-the-pre-cache-and-post-cache-runs) has the side-by-side table and what each comparison does and does not establish.
+
 Build the release executables, then run the benchmark against existing NVIDIA clones:
 
 ```bash
@@ -46,5 +48,7 @@ Release build, LSP disabled, one repo indexer, three cold/warm pairs per federat
 | nat | warm | 23.9 s | 23.7–28.2 s | 1.11 s | 484.4 MiB |
 
 Graph-count findings: every OpenShell run had 101,118 nodes, but cold-run edge counts varied (318,362; 321,212; 318,027), and each warm run added 157 edges relative to its preceding cold run. NeMo Agent Toolkit retained 25,026 nodes, with 67,842 edges on every cold run and 67,846 on every warm run. These measurements establish readiness latency and nonempty output, not canonical graph equivalence. Edge-count variation needs investigation before using this workload to prove equivalent analyzer output.
+
+The RSS column is the **maximum** sampled parent RSS across the three runs of that cell, not the median; the readiness column is the median. The six OpenShell launches in this baseline produced six different edge counts (318,027 / 318,184 / 318,362 / 318,519 / 321,212 / 321,369) and no graph fingerprint, so this dataset cannot show that the analyzer produced the same graph from run to run. The post-cache runs in [STARTUP_CACHE.md](STARTUP_CACHE.md) do: one digest per federation across all six launches.
 
 The first OpenShell cold run’s logs showed a 62.1-second NemoClaw ORM scan, a 6.3-second field-access scan, and a 99.8-second complete local NemoClaw pass. Its full federation readiness was 276.2 seconds. Warm readiness remained around 165 seconds despite reused per-repo indexes, showing substantial startup work after local cache reuse.
