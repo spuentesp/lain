@@ -4,8 +4,8 @@
 # authority on what may appear here).
 #
 # Timeouts are deliberately NOT set here: the schema has no absolute
-# timeout keys (only multipliers, which need a measured baseline), and
-# both users run `--baseline skip`. `scripts/mutation-gate.sh` passes
+# timeout keys (only multipliers, which need a measured baseline).
+# `scripts/mutation-gate.sh` checks each copied-tree baseline and passes
 # `--timeout 300 --build-timeout 600` on the command line; `make
 # mutants` passes its own `--timeout 120`.
 #

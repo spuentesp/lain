@@ -724,7 +724,8 @@
     "contract_scope_harness_tests": "3 passed",
     "module_resolution": "passed",
     "mutation_score_floor": "passed",
-    "tool_doc_arguments": "passed"
+    "tool_doc_arguments": "passed",
+    "mutation_gate_regressions": "3 passed; both broken-baseline cases reproduced against the old script"
   },
   "acceptance": {
     "exit_code": 0,
@@ -2434,10 +2435,146 @@
     "candidate_count": 608,
     "base_ref": "origin/dev",
     "base_commit": "da9ce61289feb35b40d9b8a5df66f23a77786cd2",
-    "command": "TMPDIR=<owned scratch> CARGO_BUILD_JOBS=1 scripts/mutation-gate.sh origin/dev",
+    "command": "TMPDIR=<short owned scratch> RUSTC_WRAPPER= CARGO_BUILD_JOBS=1 scripts/mutation-gate.sh origin/dev",
     "runtime_state": "/data/agents/tmp-lain-tests/objective-gap-final-evidence-2026-11-08/mutation-state.json",
     "raw_log": "/data/agents/tmp-lain-tests/objective-gap-final-evidence-2026-11-08/mutation.log",
-    "note": "This committed checkpoint does not claim a full mutation pass. The runtime state file records the subsequent execution."
+    "note": "This committed checkpoint does not claim a full mutation pass. The runtime state file records the subsequent execution.",
+    "baseline_policy": "Both phases validate the unmutated copied tree before judging mutants.",
+    "invalid_attempts": [
+      {
+        "result": "608 unviable, zero viable mutants, exit 0",
+        "accepted": false
+      },
+      {
+        "result": "Long temporary paths caused 13 unmutated socket tests to fail",
+        "accepted": false
+      },
+      {
+        "result": "Shared compiler cache retained a removed temporary directory",
+        "accepted": false,
+        "repair": "Directory restored; compile probe passed. Long run bypasses this shared cache."
+      }
+    ],
+    "validated_preflight": {
+      "status": "passed",
+      "baseline_tests": {
+        "passed": 2927,
+        "failed": 0,
+        "ignored": 8
+      },
+      "outcomes": [
+        {
+          "scenario": "Baseline",
+          "summary": "Success",
+          "log_path": "log/baseline.log",
+          "diff_path": null,
+          "phase_results": [
+            {
+              "phase": "Build",
+              "duration": 117.383314405,
+              "process_status": "Success",
+              "argv": [
+                "/home/spuentesp/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+                "test",
+                "--no-run",
+                "--verbose",
+                "--package=lain@0.13.0",
+                "--lib"
+              ]
+            },
+            {
+              "phase": "Test",
+              "duration": 148.301537139,
+              "process_status": "Success",
+              "argv": [
+                "/home/spuentesp/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+                "test",
+                "--verbose",
+                "--package=lain@0.13.0",
+                "--lib"
+              ]
+            }
+          ]
+        },
+        {
+          "scenario": {
+            "Mutant": {
+              "name": "src/cli/oneshot.rs:67:5: replace shared_daemon_is_usable -> Result<bool> with Ok(true)",
+              "package": "lain",
+              "file": "src/cli/oneshot.rs",
+              "function": {
+                "function_name": "shared_daemon_is_usable",
+                "return_type": "-> Result<bool>",
+                "span": {
+                  "start": {
+                    "line": 56,
+                    "column": 1
+                  },
+                  "end": {
+                    "line": 78,
+                    "column": 2
+                  }
+                }
+              },
+              "span": {
+                "start": {
+                  "line": 67,
+                  "column": 5
+                },
+                "end": {
+                  "line": 77,
+                  "column": 6
+                }
+              },
+              "replacement": "Ok(true)",
+              "genre": "FnValue"
+            }
+          },
+          "summary": "CaughtMutant",
+          "log_path": "log/src__cli__oneshot.rs_line_67_col_5.log",
+          "diff_path": "diff/src__cli__oneshot.rs_line_67_col_5.diff",
+          "phase_results": [
+            {
+              "phase": "Build",
+              "duration": 23.113734392,
+              "process_status": "Success",
+              "argv": [
+                "/home/spuentesp/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+                "test",
+                "--no-run",
+                "--verbose",
+                "--package=lain@0.13.0",
+                "--lib"
+              ]
+            },
+            {
+              "phase": "Test",
+              "duration": 74.229986883,
+              "process_status": {
+                "Failure": 101
+              },
+              "argv": [
+                "/home/spuentesp/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+                "test",
+                "--verbose",
+                "--package=lain@0.13.0",
+                "--lib"
+              ]
+            }
+          ]
+        }
+      ],
+      "environment": "Short TMPDIR; compiler cache bypassed."
+    },
+    "gate_regression_tests": {
+      "command": "python scripts/test_mutation_gate.py",
+      "before": "2 false-green regressions failed against the old script; valid-unviable control passed",
+      "after": {
+        "passed": 3,
+        "failed": 0
+      },
+      "ci_job": "arch-guardrails"
+    }
   },
   "resource_cleanup": {
     "test_executables_reduced": 107,
@@ -2582,6 +2719,18 @@
     "nat-before-followup/websocket-contracts.json": {
       "sha256": "3b5e488e5d8da9dacca9473f8f59c0b01401bfa36c47d499f61516cdede39ccd",
       "bytes": 384
+    },
+    "mutation-gate-regressions-before.log": {
+      "sha256": "b62a4688b809c2f74096fbf05b157cabb5889fa5022cc614a8a408eb6798ac3c",
+      "bytes": 1966
+    },
+    "mutation-gate-regressions-after.log": {
+      "sha256": "77d2ac6412cc793d2abda5ca6058fc5ddea619f093ccabf6fc6468f3b81988b9",
+      "bytes": 101
+    },
+    "mutation-preflight.log": {
+      "sha256": "836f7db312f0e7e48e89f8f1aee40cc4cc7c36cc4f499045abc9d551ab54d78c",
+      "bytes": 109
     }
   }
 }

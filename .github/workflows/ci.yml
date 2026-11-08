@@ -726,6 +726,7 @@ jobs:
           python scripts/test_check_mcp_dispatch_shape.py
           python scripts/test_check_no_mirror_dtos.py
           python scripts/test_check_format_duration_once.py
+          python scripts/test_mutation_gate.py
 
 
   coverage:

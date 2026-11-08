@@ -100,6 +100,8 @@ Checkpoint, 2026-11-08: the local workspace, lint, schema, acceptance, demo,
 and NVIDIA checks passed; the full 608-case incremental mutation gate remains
 required. See the [verification record](../../benchmarks/objective-gap-verification-2026-11-08.json)
 for source and binary identities, results, and runtime evidence. Step 5 is open.
+Both gate phases now validate their unmutated copied-tree baseline; regression
+tests prevent build failures from passing as unviable or caught mutants.
 
 ## Completion checklist
 

@@ -76,12 +76,12 @@
 #   test targets (~5-10 min, warm deps) + ~12 min per candidate here. The
 #   CI job timeout bounds the worst case.
 #
-# Baseline: `--baseline skip` in both phases -- the unmutated tree is known
-# green (CI's `test` job runs the full suite on every PR), so the budget goes
-# to mutants. Implication: if the confirm environment were itself red,
-# candidates would be misjudged caught-on-confirm; the `test` job's green
-# suite is the evidence that it is not. Timeouts are absolute (no measured
-# baseline to multiply from): phase 1 `--timeout 300` vs the measured ~45s
+# Baseline: both phases run the unmutated tree in the copied build directory.
+# A green checkout does not prove this environment works: temporary socket
+# paths or compiler-cache state can differ. Skipping the baseline can classify
+# setup failures as UNVIABLE or CAUGHT and turn a broken run green. Each phase
+# therefore pays for one baseline before judging mutants. Timeouts are absolute:
+# phase 1 `--timeout 300` vs the measured ~45s
 # focused run (~7x headroom), `--build-timeout 600`; phase 2 `--timeout 1800`
 # vs the ~12 min full suite, `--build-timeout 900`. A mutant that hangs past
 # its timeout is reported TIMEOUT and fails the gate (a phase-1 TIMEOUT that
@@ -233,12 +233,12 @@ re_escape() {
 echo "phase 1 (cargo test --lib): census over the diff"
 
 # Sequential (`-j` default 1) keeps one scratch tree and one target on disk.
-# `--baseline skip`: tree known green (see header). Output streams through so
+# The copied-tree baseline must pass (see header). Output streams through so
 # a long CI run is not a dark window; the structured table and summary come
 # after both phases.
 cargo mutants \
   --in-diff "$WORK/diff.patch" \
-  --baseline skip \
+  --baseline run \
   --timeout 300 \
   --build-timeout 600 \
   --cargo-arg=--lib \
@@ -289,7 +289,7 @@ if [[ ${#candidates[@]} -gt 0 ]]; then
   echo "phase 2 (${confirm_cmd}): confirming ${#candidates[@]} candidate(s)"
   cargo mutants \
     --in-diff "$WORK/diff.patch" \
-    --baseline skip \
+    --baseline run \
     --timeout 1800 \
     --build-timeout 900 \
     -e 'src/main.rs' -e 'src/bin/*' \
