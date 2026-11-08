@@ -167,8 +167,6 @@ fn test_get_call_sites_no_callers() {
 // observable answer — none of them may be reported as "nothing calls
 // this".
 
-use crate::graph::Freshness;
-use crate::schema::{EdgeProvenance, RouteMatch};
 use crate::server::tools::answer_scope::IncompleteReason;
 use crate::server::tools::handlers::context::get_call_sites_report_scoped;
 
