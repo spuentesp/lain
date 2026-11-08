@@ -61,6 +61,10 @@ Run the specific regression tests added or changed for the affected sensors and 
 
 ## Step 4: Reconcile startup reports and set a measured target
 
+Owner ruling, 2026-11-08: keep the existing targets. No further startup
+optimization is requested; the validated post-cache measurements remain the
+reference.
+
 1. Compare `docs/NVIDIA_STARTUP_BENCHMARK.md` with the newer post-cache measurements in `docs/STARTUP_CACHE.md`. The older benchmark reports warm OpenShell readiness around 165 seconds; the newer run reports about 3.6 seconds. Preserve both datasets and label their binary, tree, and cache conditions clearly.
 2. Verify the newer numbers and graph fingerprints against the referenced raw benchmark artifacts before changing summary text.
 3. Set an explicit warm-start readiness target with the project owner before starting another optimization.
@@ -94,9 +98,9 @@ Run the specific regression tests added or changed for the affected sensors and 
 
 ## Completion checklist
 
-- [ ] Tokio acceptance proves the expected call site and pinned inputs.
-- [ ] All four `HTTP_PROXY_PATH` cases have evidence-backed outcomes.
-- [ ] Graph tools explain ambiguity, unresolved calls, stale data, and truncation where applicable.
-- [ ] Startup reports state comparable conditions and reflect verified raw data.
+- [x] Tokio acceptance proves the expected call site and pinned inputs.
+- [x] All four `HTTP_PROXY_PATH` cases have evidence-backed outcomes.
+- [x] Graph tools explain ambiguity, unresolved calls, stale data, and truncation where applicable.
+- [x] Startup reports state comparable conditions and reflect verified raw data.
 - [ ] Required and optional checks have recorded results from the final tree.
 - [ ] Documentation matches those results; no open audit item is described as closed without evidence.

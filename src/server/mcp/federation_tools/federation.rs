@@ -720,6 +720,21 @@ mod tests {
         }
         repo.set_health(RepoHealth::Ready);
 
+        // A different member can hide callers while the seed stays fresh.
+        let consumer_id = RepoId::new("consumer").unwrap();
+        let consumer_source =
+            WorkspaceDirSource::new(consumer_id.clone(), src_dir.path().to_path_buf()).unwrap();
+        fed.add_repo(Box::new(consumer_source), tmp.path())
+            .await
+            .unwrap();
+        let result = get_cross_repo_blast_radius_for_repo(&fed, "repo-a", "shared", 1..3).unwrap();
+        assert_eq!(result.answer_scope.as_deref(), Some("stale_or_unindexed"));
+        fed.get_repo(&consumer_id)
+            .unwrap()
+            .set_health(RepoHealth::Ready);
+        let result = get_cross_repo_blast_radius_for_repo(&fed, "repo-a", "shared", 1..3).unwrap();
+        assert_eq!(result.answer_scope, None);
+
         // Even a current seed cannot prove no callers in a member that failed
         // to load. Use a backend-only seed so only the load error is at issue.
         fed.backend()
