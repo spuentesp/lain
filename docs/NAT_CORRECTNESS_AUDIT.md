@@ -48,6 +48,33 @@ NAT-04 is only partly addressed. The bound consumers are `http:GET /mcp/client/t
 
 The measurement used a debug build of the analyzer, because the release build did not finish inside its time budget. Analyzer output does not depend on the build profile. The revision-9 numbers remain the record for the earlier correction; this section supersedes them only for the findings whose status changed [28] [29].
 
+## The four `HTTP_PROXY_PATH` sites (traced 2026-11-07)
+
+The expression is defined once, in `nat-ui:constants/index.js:20` [23]:
+
+```js
+const HTTP_PROXY_PATH = process.env.HTTP_PUBLIC_PATH || '/api';
+```
+
+The `||` fallback is a convention-based default, not a runtime fact: a deployment that sets `HTTP_PUBLIC_PATH` changes every URL built from it. The analyzer therefore reports the host as the alias expression `HTTP_PROXY_PATH` and does not resolve it to a configured service — no `services[].env` or `hosts` entry can claim it, and the smoke's `host_aliases` intentionally does not cover it (an alias would invent a single destination for what is actually per-path routing).
+
+Where the proxy sends these requests is decided per path, at runtime, in `nat-ui:proxy/server.js` [12]: a request under `HTTP_PROXY_PATH` is dispatched by its backend path — core routes (`/chat/stream`, `/chat`, `/generate`, …) proxy to `UPSTREAM_HTTP_ORIGIN` (the `nat` backend, already resolved via `env:NAT_BACKEND_URL`), while `EXTENDED_BACKEND_TARGETS['/update-data-stream'] = 'NEXTJS'` routes `/update-data-stream` to the Next.js server — nat-ui itself, which serves `pages/api/update-data-stream.ts` as `http:ANY /api/update-data-stream`. A single host-level attribution is therefore wrong for at least part of the traffic, and no static evidence distinguishes which path a given call takes at runtime without resolving the path itself.
+
+Per-site outcomes, all verified against the pinned nat-ui revision `41cb8cf8`:
+
+| Site | Path expression | Outcome | Why |
+| --- | --- | --- | --- |
+| `DataStreamDisplay.tsx:62` | `${HTTP_PROXY_PATH}${UPDATE_DATA_STREAM}?stream=…` | Unresolved (`no_match`), no service | Path is statically `/update-data-stream`; the proxy routes it to nat-ui's own Next.js handler (`http:ANY /api/update-data-stream`), not to `nat`. Binding it to `nat` would be false; same-service internal resolution is not evidenced from a cross-component fetch. |
+| `DataStreamDisplay.tsx:82` | `${HTTP_PROXY_PATH}${UPDATE_DATA_STREAM}?type=finalized&stream=…` | Unresolved (`no_match`), no service | Same as above. |
+| `DataStreamManager.tsx:88` | `${HTTP_PROXY_PATH}${UPDATE_DATA_STREAM}` | Unresolved (`no_match`), no service | Same as above. |
+| `database-updates.tsx:109` | `${HTTP_PROXY_PATH}${UPDATE_DATA_STREAM}?type=finalized` | Unresolved (`no_match`), no service | Same as above. |
+| `Chat.tsx:1165` | `${HTTP_PROXY_PATH}${httpEndpointPath}` | Unresolved (`no_route_in_service`-shaped dynamic), no service | The path is a runtime-selected variable; the proxy's per-path dispatch means the destination (nat backend or nat-ui itself) depends on that variable. Runtime selection prevents static resolution — kept unresolved rather than guessed. |
+| `pages/api/mcp/clients.ts:18` | `url` (dynamic) | Unresolved (`no_route_in_service`), no service | Dynamic path; same runtime-selection reason. |
+
+Two of the six sites that carry the expression are not among the four audited: `proxy/server.js:189` and `:213` are the proxy's own routing code, not client calls, so they produce no consumer facts.
+
+Classification rules this analysis pins (and the smoke now asserts): a convention-based match must not be reported as a production binding; the four static-path sites carry `no_match` with no `target_service` and no candidates; the dynamic sites stay uncertain (`unnormalized`/`no_route_in_service` family) rather than being reported as confirmed absences. Regressions: `convention_based_env_default_host_stays_unresolved_without_service_attribution` (joiner), `env_default_const_resolves_to_its_literal_fallback` and `env_default_with_dynamic_suffix_stays_dynamic` (JS URL resolution), and the `HTTP_PROXY_PATH sites stay unresolved` section of `scripts/eval/nat-http-contract-smoke.sh` (live multi-repo check).
+
 ## Baseline findings
 
 | ID | Priority | Finding | Evidence |
@@ -151,7 +178,7 @@ A second process required the completed cache using `LAIN_REQUIRE_STARTUP_CACHE=
 Items 1 and 2 are complete: the SQL, WebSocket-callback, and FastAPI-keyword regressions are in the tree, and revision 10 keeps them passing [29].
 
 1. Strengthen the NVIDIA smoke evaluation to distinguish production bindings from fixture traffic and to report test-only providers separately [1]. Done in revision 9; the positive HTTP binding is no longer test-only at revision 10, but it is a heuristic match rather than a proven production caller [1] [18] [29].
-2. Resolve the four `HTTP_PROXY_PATH` sites to a service, or report them as unresolved for a reason that distinguishes an unresolved local host from a missing route [23] [24] [12]. Their expressions are preserved; their service attribution is still absent [29].
+2. Resolve the four `HTTP_PROXY_PATH` sites to a service, or report them as unresolved for a reason that distinguishes an unresolved local host from a missing route [23] [24] [12]. Their expressions are preserved; their service attribution is still absent [29]. **Closed by source tracing (2026-11-07, see below): the sites stay unresolved, and that is the evidence-backed outcome — the smoke now pins it.**
 3. Preserve uncertain service/route results for genuinely runtime-selected values [6]. The revision-10 measurement keeps the proxy and chat-route cases unresolved rather than guessing [29].
 
 The baseline audit made no analyzer changes. The remediation section above records the subsequent fixes and the remaining open gaps; the original broad pass did not cover these newly identified counterexamples.
