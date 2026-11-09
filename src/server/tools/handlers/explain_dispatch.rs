@@ -436,6 +436,92 @@ mod tests {
         );
     }
 
+    /// The other half of the staleness claim: a file scanned after its
+    /// last write is a complete answer, not a provisional one. Without
+    /// this pin the staleness input is a one-way flag — a fresh index
+    /// could read as provisional and nothing would notice.
+    #[tokio::test]
+    async fn a_fresh_file_is_reported_as_complete() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/t.rs"), "fn target() {}\n").unwrap();
+        let graph = GraphDatabase::new(&dir.path().join("graph.bin")).unwrap();
+        let overlay = VolatileOverlay::new();
+        let ns = RepoNamespace::for_test();
+        let mut n = fn_node("target", "src/t.rs", &ns);
+        // Scanned after the write: the index has seen the current file.
+        n.last_lsp_sync = Some(crate::server::time::unix_secs(std::time::SystemTime::now()) + 60);
+        graph.upsert_node(n).unwrap();
+        let report = explain_dispatch_report_scoped(&graph, &overlay, dir.path(), "target", false)
+            .await
+            .expect("a known name must resolve");
+        assert_eq!(
+            report.report.answer_scope, None,
+            "a fresh file with no dispatch is a complete answer"
+        );
+    }
+
+    /// Historical mode answers from the snapshot, not the working
+    /// tree: the disk being newer than the scan says nothing about a
+    /// past point in time, so a historical report must not pick up the
+    /// staleness label from the working tree.
+    #[tokio::test]
+    async fn a_historical_report_ignores_disk_freshness() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/t.rs"), "fn target() {}\n").unwrap();
+        let graph = GraphDatabase::new(&dir.path().join("graph.bin")).unwrap();
+        let overlay = VolatileOverlay::new();
+        let ns = RepoNamespace::for_test();
+        let mut n = fn_node("target", "src/t.rs", &ns);
+        // Dirty on disk (scanned an hour ago, written just now) — but
+        // the report is historical.
+        n.last_lsp_sync = Some(crate::server::time::unix_secs(std::time::SystemTime::now()) - 3600);
+        graph.upsert_node(n).unwrap();
+        let report = explain_dispatch_report_scoped(&graph, &overlay, dir.path(), "target", true)
+            .await
+            .expect("a known name must resolve");
+        assert_eq!(
+            report.report.answer_scope, None,
+            "a historical report answers from the snapshot, not the working tree"
+        );
+    }
+
+    /// The builder's dynamic-target signal must survive the report's
+    /// ambiguity/freshness re-derivation: the reason the walk can be
+    /// incomplete is the same reason whether or not the file is fresh.
+    #[tokio::test]
+    async fn a_dynamically_reached_symbol_keeps_its_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/t.rs"), "fn target() {}\n").unwrap();
+        let graph = GraphDatabase::new(&dir.path().join("graph.bin")).unwrap();
+        let overlay = VolatileOverlay::new();
+        let ns = RepoNamespace::for_test();
+        let mut n = fn_node("target", "src/t.rs", &ns);
+        n.last_lsp_sync = Some(crate::server::time::unix_secs(std::time::SystemTime::now()) + 60);
+        graph.upsert_node(n.clone()).unwrap();
+        let caller = fn_node("dynamic_caller", "src/caller.rs", &ns);
+        graph.upsert_node(caller.clone()).unwrap();
+        // A heuristic edge pointing at the symbol: the shape the
+        // dispatch sensor produces when it can resolve a receiver.
+        graph
+            .insert_edges_batch(&[GraphEdge::new(
+                EdgeType::DynamicDispatch,
+                caller.id.clone(),
+                n.id.clone(),
+            )])
+            .unwrap();
+        let report = explain_dispatch_report_scoped(&graph, &overlay, dir.path(), "target", false)
+            .await
+            .expect("a known name must resolve");
+        assert_eq!(
+            report.report.answer_scope,
+            Some(crate::server::tools::answer_scope::IncompleteReason::DynamicTarget),
+            "a dynamically-reached symbol's scope must survive the report's re-derivation"
+        );
+    }
+
     #[test]
     fn verdict_is_insufficient_evidence_when_no_signals() {
         let dir = tempfile::tempdir().unwrap();
