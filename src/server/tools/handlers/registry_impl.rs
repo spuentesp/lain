@@ -1357,3 +1357,71 @@ fn run_cwd(ctx: &ToolContext, args: &Map<String, Value>) -> Result<String, LainE
     }
     crate::server::tools::handlers::context::resolve_against_workspace(&ctx.workspace, &cwd)
 }
+
+#[cfg(test)]
+mod delegation_tests {
+    use super::*;
+    use crate::server::tools::create_test_executor_with_graph;
+
+    fn scanned(graph: &crate::graph::GraphDatabase, name: &str, path: &str) {
+        let ns = crate::schema::RepoNamespace::for_test();
+        let mut n = crate::schema::GraphNode::new(
+            crate::schema::NodeType::Function,
+            name.to_string(),
+            path.to_string(),
+        );
+        n.id = crate::schema::GraphNode::generate_id(
+            &crate::schema::NodeType::Function,
+            path,
+            name,
+            None,
+            &ns,
+        );
+        n.last_lsp_sync = Some(crate::server::time::unix_secs(std::time::SystemTime::now()));
+        graph.upsert_node(n).unwrap();
+    }
+
+    /// The handler `call` methods are the trait's text entry point —
+    /// the registry's default `call_with_output` builds its legacy text
+    /// from them, and `explain_dispatch`'s override bypasses its `call`
+    /// on the wire, so only a direct invocation observes it. Either
+    /// must carry the real report; a placeholder return would leave the
+    /// text path lying about what the tool found.
+    #[tokio::test]
+    async fn get_call_chain_handler_call_carries_the_report() {
+        let tmp = tempfile::tempdir().unwrap();
+        let graph = crate::graph::GraphDatabase::new(&tmp.path().join("graph.bin")).unwrap();
+        let exec = create_test_executor_with_graph(graph);
+        scanned(&exec.ctx.graph, "a", "src/a.rs");
+        scanned(&exec.ctx.graph, "b", "src/b.rs");
+        let mut args = Map::new();
+        args.insert("from".into(), Value::String("a".into()));
+        args.insert("to".into(), Value::String("b".into()));
+        let out = GetCallChainHandler
+            .call(&exec.ctx, &args)
+            .await
+            .expect("a call-chain question must answer");
+        assert!(
+            out.contains("No call path found"),
+            "the handler must carry the real report, got:\n{out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn explain_dispatch_handler_call_carries_the_report() {
+        let tmp = tempfile::tempdir().unwrap();
+        let graph = crate::graph::GraphDatabase::new(&tmp.path().join("graph.bin")).unwrap();
+        let exec = create_test_executor_with_graph(graph);
+        scanned(&exec.ctx.graph, "target", "src/t.rs");
+        let mut args = Map::new();
+        args.insert("symbol".into(), Value::String("target".into()));
+        let out = ExplainDispatchHandler
+            .call(&exec.ctx, &args)
+            .await
+            .expect("a dispatch question must answer");
+        assert!(
+            out.contains("Dispatch summary"),
+            "the handler must carry the real report, got:\n{out}"
+        );
+    }
+}

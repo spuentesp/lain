@@ -336,3 +336,86 @@ fn stale_index_reports_the_stale_file() {
     );
     assert!(report.text.contains("stale_or_unindexed"));
 }
+
+/// The two staleness sources are each sufficient on their own, and
+/// only observable when a caller exists: the no-callers branch reads
+/// the target's freshness alone. A target file edited after its scan
+/// must qualify the answer even when every call is located.
+#[test]
+fn stale_target_among_located_calls_reports_the_stale_file() {
+    let dir = std::env::temp_dir().join("lain_test_scope_stale_target");
+    let _ = std::fs::remove_dir_all(&dir);
+    workspace_with_caller(&dir);
+    let db = crate::graph::GraphDatabase::new(&dir.join("graph.bin")).unwrap();
+    let overlay = crate::overlay::VolatileOverlay::new();
+    let ns = crate::schema::RepoNamespace::for_test();
+
+    // The shared file was written after its scan, but still spells the
+    // call — the sites are located and the answer stays provisional.
+    let mut target = scanned_node("call_target", "src/caller.rs", &ns);
+    target.last_lsp_sync =
+        Some(crate::server::time::unix_secs(std::time::SystemTime::now()) - 3600);
+    let mut caller = scanned_node("caller", "src/caller.rs", &ns);
+    caller.last_lsp_sync =
+        Some(crate::server::time::unix_secs(std::time::SystemTime::now()) - 3600);
+    caller.line_start = Some(1);
+    caller.line_end = Some(2);
+    db.upsert_node(target.clone()).unwrap();
+    db.upsert_node(caller.clone()).unwrap();
+    db.insert_edge(&GraphEdge::new(
+        EdgeType::Calls,
+        caller.id.clone(),
+        target.id.clone(),
+    ))
+    .unwrap();
+
+    let report = get_call_sites_report_scoped(&dir, &db, &overlay, "call_target", None).unwrap();
+    assert_eq!(report.total_sites, 1);
+    assert_eq!(
+        report.answer_scope,
+        Some(IncompleteReason::StaleOrUnindexed),
+        "a located call in a file edited after its scan is still provisional"
+    );
+    assert!(report.text.contains("stale_or_unindexed"));
+}
+
+/// The other side of the same claim: an unlocated call whose caller's
+/// file moved on after its scan is provisional for the staleness
+/// reason (a current file that does not spell the name is the dynamic
+/// case, pinned above).
+#[test]
+fn stale_unlocated_caller_reports_the_stale_file() {
+    let dir = std::env::temp_dir().join("lain_test_scope_stale_caller");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/caller.rs"), "fn caller() { dispatch(); }\n").unwrap();
+    let db = crate::graph::GraphDatabase::new(&dir.join("graph.bin")).unwrap();
+    let overlay = crate::overlay::VolatileOverlay::new();
+    let ns = crate::schema::RepoNamespace::for_test();
+
+    let target = scanned_node("call_target", "src/target.rs", &ns);
+    let mut caller = scanned_node("caller", "src/caller.rs", &ns);
+    // The caller's file was written after its scan, and does not spell
+    // the callee's name.
+    caller.last_lsp_sync =
+        Some(crate::server::time::unix_secs(std::time::SystemTime::now()) - 3600);
+    caller.line_start = Some(0);
+    caller.line_end = Some(0);
+    db.upsert_node(target.clone()).unwrap();
+    db.upsert_node(caller.clone()).unwrap();
+    db.insert_edge(&GraphEdge::new(
+        EdgeType::Calls,
+        caller.id.clone(),
+        target.id.clone(),
+    ))
+    .unwrap();
+
+    let report = get_call_sites_report_scoped(&dir, &db, &overlay, "call_target", None).unwrap();
+    assert_eq!(report.total_sites, 0);
+    assert_eq!(
+        report.answer_scope,
+        Some(IncompleteReason::StaleOrUnindexed),
+        "an unlocated call in a file edited after its scan is provisional"
+    );
+    assert!(report.text.contains("stale_or_unindexed"));
+}

@@ -131,3 +131,34 @@ async fn a_doubly_defined_name_makes_the_answer_provisional() {
         "a name with several definitions must qualify the no-path answer, got:\n{out}"
     );
 }
+
+/// The mirror case: ambiguity on the `to` end qualifies the answer the
+/// same way — the path search covers every definition of both names,
+/// so a name picked arbitrarily at either end makes "no path" an
+/// answer about that pick, not about the name.
+#[tokio::test]
+async fn a_doubly_defined_target_makes_the_answer_provisional() {
+    let dir = std::env::temp_dir().join("lain_test_chain_ambiguous_to");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/a.rs"), "fn a() {}\n").unwrap();
+    std::fs::write(dir.join("src/b.rs"), "fn b() {}\n").unwrap();
+    std::fs::write(dir.join("src/b2.rs"), "fn b() {}\n").unwrap();
+    let graph = GraphDatabase::new(&dir.join("graph.bin")).unwrap();
+    let overlay = VolatileOverlay::new();
+    let ns = RepoNamespace::for_test();
+    for (name, path) in [("a", "src/a.rs"), ("b", "src/b.rs"), ("b", "src/b2.rs")] {
+        graph.upsert_node(scanned_node(name, path, &ns)).unwrap();
+    }
+    let out = get_call_chain(&graph, &overlay, &dir, None, "a", "b", None)
+        .await
+        .unwrap();
+    assert!(
+        out.contains("No call path found"),
+        "expected the no-path answer, got:\n{out}"
+    );
+    assert!(
+        out.contains("ambiguous_target"),
+        "a target name with several definitions must qualify the no-path answer, got:\n{out}"
+    );
+}
