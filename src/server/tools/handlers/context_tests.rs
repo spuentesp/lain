@@ -119,7 +119,6 @@ fn test_get_code_snippet_existing() {
     std::fs::remove_file(&tmp).ok();
 }
 
-#[test]
 /// A workspace-relative path must resolve against the workspace the
 /// tool was given, not against the server process's cwd. (Restored after
 /// it was dropped while making room for the answer-scope fixtures; the
