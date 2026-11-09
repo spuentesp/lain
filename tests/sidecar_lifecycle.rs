@@ -10,10 +10,31 @@ use lain::sidecar::SidecarGitSensor;
 use std::path::Path;
 use std::process::Command;
 
+mod common;
+
+/// A repo of its own — the pattern every other git-fixture test in this
+/// battery follows. The sidecar wants a real checkout with a commit,
+/// and the package directory is not one in a copied build tree (the
+/// mutation gate's scratch carries no `.git`, and a test pinned to the
+/// host checkout fails there for reasons that have nothing to do with
+/// the sidecar). `Cargo.toml` is tracked and `target` ignored so the
+/// assertions read a known repo.
+fn fixture_repo() -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        tmp.path().join("Cargo.toml"),
+        "[package]\nname = \"sidecar-fixture\"\nversion = \"0.0.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(tmp.path().join(".gitignore"), "target\n").unwrap();
+    common::git_init_committed(tmp.path());
+    tmp
+}
+
 #[test]
 fn test_sidecar_normal_operations() {
-    let repo_path = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let sensor = SidecarGitSensor::new(repo_path).expect("failed to initialize SidecarGitSensor");
+    let repo = fixture_repo();
+    let sensor = SidecarGitSensor::new(repo.path()).expect("failed to initialize SidecarGitSensor");
 
     assert!(sensor.is_valid(), "sensor should be valid for current repo");
 
@@ -59,8 +80,8 @@ fn test_sidecar_normal_operations() {
 
 #[test]
 fn test_sidecar_auto_recovery_on_kill() {
-    let repo_path = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let sensor = SidecarGitSensor::new(repo_path).expect("failed to initialize SidecarGitSensor");
+    let repo = fixture_repo();
+    let sensor = SidecarGitSensor::new(repo.path()).expect("failed to initialize SidecarGitSensor");
 
     let initial_health = sensor.health();
     let initial_pid = initial_health
@@ -95,8 +116,8 @@ fn test_sidecar_auto_recovery_on_kill() {
 
 #[test]
 fn test_sidecar_respawn_budget_exhaustion() {
-    let repo_path = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let sensor = SidecarGitSensor::new(repo_path).expect("failed to initialize SidecarGitSensor");
+    let repo = fixture_repo();
+    let sensor = SidecarGitSensor::new(repo.path()).expect("failed to initialize SidecarGitSensor");
 
     // Repeatedly kill the child process in rapid succession to exhaust the 3-in-30s budget
     for i in 0..4 {
