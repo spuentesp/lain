@@ -37,7 +37,6 @@ use crate::graph::GraphDatabase;
 use crate::overlay::VolatileOverlay;
 use crate::schema::{EdgeProvenance, EdgeType, GraphEdge, GraphNode};
 use crate::server::runtime_trace::RuntimeTraceStore;
-use crate::server::tools::utils::resolve_node;
 use serde::Serialize;
 use std::collections::HashSet;
 
