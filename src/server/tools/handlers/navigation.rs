@@ -101,6 +101,7 @@ pub fn trace_dependency_report(
 pub async fn get_call_chain(
     graph: &GraphDatabase,
     overlay: &VolatileOverlay,
+    workspace: &std::path::Path,
     federation: Option<&FederatedIndex>,
     from: &str,
     to: &str,
@@ -221,9 +222,10 @@ pub async fn get_call_chain(
 
     let Some(end_id) = found else {
         // "No path" is only conclusive when the answer could have found
-        // one: neither end is reached through a dispatcher and neither
-        // end's file moved on after its scan. Otherwise the path may
-        // exist and the static graph cannot see it.
+        // one: neither end is reached through a dispatcher, neither
+        // end's file moved on after its scan, and neither name matched
+        // several definitions. Otherwise the path may exist and the
+        // static graph cannot see it.
         let dynamic = starts
             .iter()
             .any(|n| crate::server::tools::answer_scope::dispatches_dynamically(graph, n))
@@ -232,9 +234,17 @@ pub async fn get_call_chain(
                     crate::server::tools::answer_scope::dispatches_dynamically(graph, &n)
                 })
             });
+        let stale = starts
+            .iter()
+            .any(|n| crate::server::tools::answer_scope::is_stale(graph, workspace, &n.path))
+            || ends.iter().any(|id| {
+                graph.get_node(id).ok().flatten().is_some_and(|n| {
+                    crate::server::tools::answer_scope::is_stale(graph, workspace, &n.path)
+                })
+            });
         let scope = crate::server::tools::answer_scope::reason_for(
             from_defs > 1 || to_defs > 1,
-            false,
+            stale,
             dynamic,
         );
         let note = match scope {

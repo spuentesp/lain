@@ -321,12 +321,7 @@ pub fn get_call_sites_report_scoped(
         // symbol dispatched dynamically has callers the static graph cannot
         // see. These read identically to a caller acting on the answer, so
         // distinguish them.
-        // A snapshot has no disk to compare against, so it is never stale.
-        let stale = match freshness.as_ref() {
-            Some(crate::graph::Freshness::Fresh) => false,
-            Some(_) => true,
-            None => false,
-        };
+        let stale = crate::server::tools::answer_scope::freshness_says_stale(freshness.as_ref());
         let scope = crate::server::tools::answer_scope::reason_for(
             !other_defs.is_empty(),
             stale,
@@ -388,18 +383,19 @@ pub fn get_call_sites_report_scoped(
             // A file that is current on disk but does not spell the
             // callee's name means the call is not statically locatable —
             // an alias, a trait object, a macro. A file that moved on
-            // after its scan means the index is behind the code.
-            let caller_fresh = snapshot.is_none()
-                && matches!(
-                    graph.freshness(workspace, &caller.path),
-                    crate::graph::Freshness::Fresh
-                );
-            if caller_fresh {
-                unlocated_caller_dynamic = true;
-            } else if snapshot.is_none() {
-                unlocated_caller_stale = true;
-            } else {
-                unlocated_caller_dynamic = true;
+            // after its scan means the index is behind the code. A
+            // snapshot has no disk to compare against, so it cannot
+            // establish staleness: report what it cannot locate.
+            match snapshot {
+                None => {
+                    if crate::server::tools::answer_scope::is_stale(graph, workspace, &caller.path)
+                    {
+                        unlocated_caller_stale = true;
+                    } else {
+                        unlocated_caller_dynamic = true;
+                    }
+                }
+                Some(_) => unlocated_caller_dynamic = true,
             }
         }
         total_sites += sites.len();
@@ -410,11 +406,7 @@ pub fn get_call_sites_report_scoped(
     // is answered "about one of them"; a stale target file makes the
     // whole answer provisional; a symbol dispatched dynamically has
     // callers the static graph cannot see.
-    let stale_target = match freshness.as_ref() {
-        Some(crate::graph::Freshness::Fresh) => false,
-        Some(_) => true,
-        None => false,
-    };
+    let stale_target = crate::server::tools::answer_scope::freshness_says_stale(freshness.as_ref());
     let answer_scope = crate::server::tools::answer_scope::reason_for(
         !other_defs.is_empty(),
         stale_target || unlocated_caller_stale,

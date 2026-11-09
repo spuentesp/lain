@@ -39,6 +39,8 @@ mod gitops_tests;
 #[cfg(test)]
 mod metrics_tests;
 #[cfg(test)]
+mod navigation_tests;
+#[cfg(test)]
 mod query_tests;
 #[cfg(test)]
 mod search_tests;

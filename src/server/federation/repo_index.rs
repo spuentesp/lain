@@ -517,6 +517,27 @@ impl RepoIndex {
         !self.overlay_paths.lock().is_empty()
     }
 
+    /// Whether the repository has commits the indexer has not seen.
+    ///
+    /// The canonical "caught up with HEAD" signal is
+    /// `db.last_commit == git HEAD` (see the note in
+    /// [`Self::sync_overlay`]); anything else means the graph may
+    /// predate code the repository already has, so an answer about that
+    /// member is provisional. A repository with no HEAD at all counts as
+    /// behind: the indexer has never had a commit to catch up with.
+    pub fn index_is_behind_head(&self) -> bool {
+        let Ok((head, _)) = self.git.get_latest_commit_info() else {
+            return true;
+        };
+        match self.db.get_last_commit() {
+            Ok(Some(last)) => last != head,
+            // No last commit recorded: the graph has never been indexed
+            // against a known revision.
+            Ok(None) => true,
+            Err(_) => true,
+        }
+    }
+
     pub fn nodes(&self) -> Vec<GraphNode> {
         self.db.all_nodes()
     }

@@ -14,11 +14,11 @@
 
 use crate::graph::{Freshness, GraphDatabase};
 use crate::schema::{EdgeType, GraphNode};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 /// Why an answer is incomplete, or `None` when it is complete.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IncompleteReason {
     /// The name did not resolve to a node in the graph.
@@ -110,27 +110,62 @@ pub fn reason_for(ambiguous: bool, stale: bool, dynamic: bool) -> Option<Incompl
 /// carries a scan timestamp" — in both cases the index cannot prove it
 /// saw the current file, so an answer about that file is provisional.
 pub fn is_stale(graph: &GraphDatabase, workspace: &Path, path: &str) -> bool {
-    matches!(
-        graph.freshness(workspace, path),
-        Freshness::Dirty { .. } | Freshness::Absent
-    )
+    let freshness = graph.freshness(workspace, path);
+    freshness_says_stale(Some(&freshness))
 }
 
-/// Whether `node` dispatches dynamically — it publishes to a bus,
-/// resolves through a container, or is routed by a router.
+/// Whether a freshness reading means the answer may predate the code.
 ///
-/// Such a symbol is reached by calls the static graph cannot see, so an
-/// answer that reports no dependents is answering a narrower question
-/// than "nothing calls this".
+/// One policy, stated once: a snapshot (`None` — no disk to compare
+/// against) and a current file both mean "the index is current";
+/// anything else means the answer is provisional. Callers that already
+/// hold a reading use this rather than re-deriving the policy.
+pub fn freshness_says_stale(freshness: Option<&Freshness>) -> bool {
+    !matches!(freshness, None | Some(Freshness::Fresh))
+}
+
+/// Whether the static graph may be missing callers of `node` because
+/// of dynamic dispatch.
+///
+/// Two shapes cover what the graph actually holds:
+///
+/// - A heuristic edge (`DynamicDispatch` / `BusTopic` / `RouteMatches`)
+///   pointing **at** the symbol. The dispatch sensor emits these when
+///   it can resolve the receiver, and then the symbol is reached by
+///   calls the static graph cannot follow.
+/// - The symbol's **file** carrying a dispatch site. The sensor cannot
+///   resolve a receiver it cannot type, so it emits `File -> Hub:<detector>`
+///   instead: the file publishes to a bus or resolves through a
+///   container, and whatever is reached that way is invisible to the
+///   call graph. A symbol in such a file may be one of those targets,
+///   so an answer that reports no callers is answering a narrower
+///   question than "nothing calls this".
+///
+/// The direction matters: a symbol that *emits* a heuristic edge is a
+/// dispatcher, not a dynamically-reached target. Only the incoming
+/// edge and the file's dispatch site say "callers of this may be
+/// invisible".
 pub fn dispatches_dynamically(graph: &GraphDatabase, node: &GraphNode) -> bool {
-    match graph.get_edges_from(&node.id) {
-        Ok(edges) => edges.iter().any(|e| {
-            matches!(
-                e.edge_type,
-                EdgeType::DynamicDispatch | EdgeType::BusTopic | EdgeType::RouteMatches
-            )
-        }),
-        Err(_) => false,
+    let is_heuristic = |e: &crate::schema::GraphEdge| {
+        matches!(
+            e.edge_type,
+            EdgeType::DynamicDispatch | EdgeType::BusTopic | EdgeType::RouteMatches
+        )
+    };
+    // The resolved-receiver form: a heuristic edge points at the symbol.
+    if let Ok(edges) = graph.get_edges_to(&node.id) {
+        if edges.iter().any(is_heuristic) {
+            return true;
+        }
+    }
+    // The unresolved-receiver form: the symbol's file dispatches
+    // dynamically, so the graph cannot see what that dispatch reaches.
+    match graph.get_file_node(&node.path) {
+        Some(file) => match graph.get_edges_from(&file.id) {
+            Ok(edges) => edges.iter().any(is_heuristic),
+            Err(_) => false,
+        },
+        None => false,
     }
 }
 
@@ -150,6 +185,7 @@ pub fn scope_value(reason: Option<IncompleteReason>) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::schema::GraphEdge;
 
     #[test]
     fn wire_labels_are_stable() {
@@ -199,5 +235,163 @@ mod tests {
             Some(IncompleteReason::DynamicTarget)
         );
         assert_eq!(reason_for(false, false, false), None);
+    }
+
+    /// Each explanation names the gap it covers. A reader acts on this
+    /// text, so a mutant that swaps it for a placeholder must fail.
+    #[test]
+    fn each_explanation_names_the_gap_it_covers() {
+        let (reason, needle) = (IncompleteReason::UnresolvedName, "resolve");
+        assert!(
+            reason.explanation().contains(needle),
+            "{:?} explanation must mention '{}', got {:?}",
+            reason,
+            needle,
+            reason.explanation()
+        );
+        assert!(
+            IncompleteReason::AmbiguousTarget
+                .explanation()
+                .contains("more than one definition"),
+            "ambiguity must say several definitions share the name"
+        );
+        assert!(
+            IncompleteReason::DynamicTarget
+                .explanation()
+                .contains("runtime"),
+            "a runtime-selected target must say the choice happens at runtime"
+        );
+        assert!(
+            IncompleteReason::StaleOrUnindexed
+                .explanation()
+                .contains("indexed"),
+            "a stale index must say the index is behind the code"
+        );
+        assert!(
+            IncompleteReason::Truncated.explanation().contains("cap"),
+            "a truncated traversal must say the walk stopped early"
+        );
+    }
+
+    /// The dynamic signal must come from the graph's real shape. The
+    /// dispatch sensor emits `File -> Hub:<detector>` edges (it cannot
+    /// resolve the receiver), so a symbol in a file that dispatches
+    /// dynamically has callers the static graph cannot see — even though
+    /// no edge points at the symbol itself.
+    ///
+    /// A hand-built `Function -> Function` heuristic edge would not
+    /// catch this: the sensor never produces one. This fixture runs the
+    /// real sensor.
+    #[test]
+    fn a_symbol_in_a_file_that_dispatches_dynamically_is_not_a_confirmed_leaf() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("dispatcher.rs"),
+            "trait Handler { fn handle(&self, req: Request); }\n\
+             fn run(h: Box<dyn Handler>) { h.handle(req); }\n",
+        )
+        .unwrap();
+        let graph = GraphDatabase::new(&dir.path().join("graph.bin")).unwrap();
+        let ns = crate::schema::RepoNamespace::for_test();
+        crate::server::sensors::dynamic_dispatch_sensor::scan_workspace_dispatch(
+            &graph,
+            dir.path(),
+            &ns,
+        )
+        .unwrap();
+
+        let mut handler = GraphNode::new(
+            crate::schema::NodeType::Function,
+            "handle".into(),
+            "dispatcher.rs".into(),
+        );
+        handler.id = GraphNode::generate_id(
+            &crate::schema::NodeType::Function,
+            "dispatcher.rs",
+            "handle",
+            None,
+            &ns,
+        );
+        graph.upsert_node(handler.clone()).unwrap();
+
+        assert!(
+            dispatches_dynamically(&graph, &handler),
+            "a symbol in a file with a dynamic dispatch site is reached by calls \
+             the static graph cannot see"
+        );
+    }
+
+    /// The opposite direction must not fire: a symbol in a file with no
+    /// dispatch site is a plain leaf, whatever else the graph holds.
+    #[test]
+    fn a_symbol_in_a_plain_file_is_not_dynamic() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("plain.rs"), "fn plain() {}\n").unwrap();
+        let graph = GraphDatabase::new(&dir.path().join("graph.bin")).unwrap();
+        let ns = crate::schema::RepoNamespace::for_test();
+        let mut plain = GraphNode::new(
+            crate::schema::NodeType::Function,
+            "plain".into(),
+            "plain.rs".into(),
+        );
+        plain.id = GraphNode::generate_id(
+            &crate::schema::NodeType::Function,
+            "plain.rs",
+            "plain",
+            None,
+            &ns,
+        );
+        graph.upsert_node(plain.clone()).unwrap();
+        assert!(!dispatches_dynamically(&graph, &plain));
+    }
+
+    /// A heuristic edge that points *at* the symbol is the resolved-
+    /// receiver form. It must fire on the symbol, not on the file.
+    #[test]
+    fn an_incoming_heuristic_edge_marks_the_target_dynamic() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = GraphDatabase::new(&dir.path().join("graph.bin")).unwrap();
+        let ns = crate::schema::RepoNamespace::for_test();
+        let mut target = GraphNode::new(
+            crate::schema::NodeType::Function,
+            "handler".into(),
+            "handler.rs".into(),
+        );
+        target.id = GraphNode::generate_id(
+            &crate::schema::NodeType::Function,
+            "handler.rs",
+            "handler",
+            None,
+            &ns,
+        );
+        let mut publisher = GraphNode::new(
+            crate::schema::NodeType::Function,
+            "publish".into(),
+            "publisher.rs".into(),
+        );
+        publisher.id = GraphNode::generate_id(
+            &crate::schema::NodeType::Function,
+            "publisher.rs",
+            "publish",
+            None,
+            &ns,
+        );
+        graph.upsert_node(target.clone()).unwrap();
+        graph.upsert_node(publisher.clone()).unwrap();
+        graph
+            .upsert_edge(GraphEdge::new(
+                EdgeType::DynamicDispatch,
+                publisher.id.clone(),
+                target.id.clone(),
+            ))
+            .unwrap();
+        assert!(
+            dispatches_dynamically(&graph, &target),
+            "a heuristic edge pointing at the symbol marks it as dynamically reached"
+        );
+        assert!(
+            !dispatches_dynamically(&graph, &publisher),
+            "the publisher is not itself a dynamic target"
+        );
     }
 }

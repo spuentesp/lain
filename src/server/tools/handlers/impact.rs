@@ -379,6 +379,15 @@ pub async fn get_blast_radius_report_scoped(
         }
         // Don't show total count when there are no names to show
     } else {
+        // A partial answer says so before the list, so a reader does not
+        // have to infer it from what is missing.
+        if let Some(reason) = scope {
+            output.push_str(&format!(
+                "\nNote: {} — {}.",
+                reason.wire_label(),
+                reason.explanation()
+            ));
+        }
         // Direct callers and transitive reach answer different questions and
         // must not collapse into one number. Reverse closure through a
         // central dispatcher is huge and still correct: this helper has

@@ -120,6 +120,7 @@ impl ToolHandler for ExplainDispatchHandler {
         handlers::explain_dispatch::explain_dispatch_scoped(
             &ctx.graph,
             &ctx.overlay,
+            &ctx.workspace,
             &symbol,
             ctx.snapshot.is_some(),
         )
@@ -278,6 +279,7 @@ impl ToolHandler for GetCallChainHandler {
         handlers::navigation::get_call_chain(
             &ctx.graph,
             &ctx.overlay,
+            &ctx.workspace,
             ctx.federation.as_deref(),
             &from,
             &to,

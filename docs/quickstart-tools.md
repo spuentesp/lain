@@ -418,17 +418,17 @@ A few tools are easy to over-trust. What they actually mean:
 
 ### `answer_scope`: why an answer may not be complete
 
-`get_call_sites`, `get_blast_radius`, `assess_change`, `explain_dispatch` and
-`get_cross_repo_blast_radius` all report an `answer_scope` field (in the
-structured output; the text responses say the same thing in words). It is
-`null` when the answer is complete — **including an empty answer that is
-a confirmed absence**: the name matched one definition, the index is
-current for that file, and the graph holds no caller. A non-null value
-names the specific gap:
+`get_call_sites`, `assess_change`, `explain_dispatch` and
+`get_cross_repo_blast_radius` report an `answer_scope` field in their
+structured output; `get_blast_radius` and `get_call_chain` say the same
+thing in their text. It is `null` when the answer is complete —
+**including an empty answer that is a confirmed absence**: the name
+matched one definition, the index is current for that file, and the
+graph holds no caller. A non-null value names the specific gap:
 
 | `answer_scope` | What the answer could not cover |
 |----------------|-------------------------------|
-| `unresolved_name` | The name did not resolve to a symbol in the graph. |
+| `unresolved_name` | The name did not resolve to a symbol in the graph. **Reserved**: today a name that does not resolve is reported as a `not found` *error* rather than an empty answer, so this value does not appear in successful responses. |
 | `ambiguous_target` | The name matches more than one definition, so the answer covers one of them. |
 | `dynamic_target` | The target is chosen at runtime — a bus, a container, a router, or a call spelled differently from the symbol's name — so callers the static graph cannot see are not counted. |
 | `stale_or_unindexed` | The file changed after it was last indexed (or was never indexed), so recent changes are missing. |

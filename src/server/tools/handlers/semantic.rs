@@ -1960,6 +1960,7 @@ mod m6_tests {
         let explain_out = crate::server::tools::handlers::explain_dispatch::explain_dispatch(
             &graph,
             &overlay,
+            std::path::Path::new(""),
             "fire_handler",
         )
         .await

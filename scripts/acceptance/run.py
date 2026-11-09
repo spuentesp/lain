@@ -310,14 +310,22 @@ def _multi_repo_flow(args, env, d, lain, port):
            and os.path.exists(os.path.join(d, "workspaces.yaml")), (r1.stdout + r2.stdout + r3.stdout).strip().replace("\n", " | "))
     # Assert the fixture setup actually pinned both revisions; an unpinned
     # ref would silently track upstream master and change what this claim
-    # means.
+    # means. Each pin must appear exactly once — a second occurrence would
+    # mean the file grew a duplicate entry.
+    pinned = open(repos_path).read()
+    bytes_pins = pinned.count("ref: 62207901b65e4fc51459b2d558fad8aa882f5d33")
+    tokio_pins = pinned.count("ref: c0c77a7a204be4ea60d4da45e1a346ce06ffa7d3")
     record("repos.yaml pins bytes and tokio revisions",
-           "ref: 62207901b65e4fc51459b2d558fad8aa882f5d33" in repos
-           and "ref: c0c77a7a204be4ea60d4da45e1a346ce06ffa7d3" in repos,
-           "pins present exactly once each: "
-           f"bytes={open(repos_path).read().count('ref: 62207901')} tokio={open(repos_path).read().count('ref: c0c77a7a')}")
+           bytes_pins == 1 and tokio_pins == 1,
+           f"pins present exactly once each: bytes={bytes_pins} tokio={tokio_pins}")
+    # Keep the server's own log: a failed run needs the server's reasons,
+    # and stderr is where they are. RUST_LOG=info is the level the other
+    # acceptance flows use.
+    server_log_path = os.path.join(d, "server.log")
+    server_log = open(server_log_path, "w")
+    server_env = {**env, "RUST_LOG": "info"}
     srv = subprocess.Popen([lain, "server", "--config", "./repos.yaml", "--transport", "http", "--port", str(port)],
-                           cwd=d, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                           cwd=d, env=server_env, stdout=subprocess.DEVNULL, stderr=server_log)
     try:
         url = f"http://127.0.0.1:{port}"
         for _ in range(900):
@@ -357,6 +365,12 @@ def _multi_repo_flow(args, env, d, lain, port):
     finally:
         srv.terminate()
         srv.wait(timeout=30)
+        server_log.close()
+        # Surface the lines that explain a failure: linking and readiness.
+        with open(server_log_path) as log:
+            for line in log:
+                if "linked " in line or "cross-repo link" in line:
+                    print(f"SERVER  {line.strip()}", flush=True)
 
 
 # Plain-English questions about psf/requests whose answers do not share

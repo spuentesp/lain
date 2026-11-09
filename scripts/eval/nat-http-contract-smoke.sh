@@ -317,6 +317,7 @@ expect = {
     "components/DataStreamDisplay/DataStreamManager.tsx": {88},
     "pages/database-updates.tsx": {109},
     "components/Chat/Chat.tsx": {1165},
+    "pages/api/mcp/clients.ts": {18},
 }
 found = {}
 for i in sites:
@@ -336,11 +337,18 @@ for i in sites:
 static_paths = {"components/DataStreamDisplay/DataStreamDisplay.tsx",
                 "components/DataStreamDisplay/DataStreamManager.tsx",
                 "pages/database-updates.tsx"}
+# The two runtime-selected paths must carry the dynamic reason, not the
+# missing-route reason: a path the analyzer cannot read was never looked
+# up in a service, so "the service has no such route" would claim more
+# than the analyzer knows.
+dynamic_paths = {"components/Chat/Chat.tsx", "pages/api/mcp/clients.ts"}
 for i in sites:
     path = i["consumer"]["path"]
     line = i["consumer"].get("line")
     if path in static_paths and i.get("reason") != "no_match":
         sys.exit(f"FAIL {path}:{line} expected no_match for a static path, got {i.get('reason')}")
+    if path in dynamic_paths and i.get("reason") != "dynamic_target":
+        sys.exit(f"FAIL {path}:{line} expected dynamic_target for a runtime-selected path, got {i.get('reason')}")
 for path, lines in expect.items():
     if not lines <= found.get(path, set()):
         sys.exit(f"FAIL {path}: expected lines {lines}, found {found.get(path, set())}")

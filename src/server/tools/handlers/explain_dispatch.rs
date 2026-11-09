@@ -79,16 +79,17 @@ pub struct ExplainDispatch {
     /// *evidence*, which is still not proof that nothing calls it. A
     /// reason names what could not be seen (an ambiguous name, a stale
     /// index, a dispatcher the static graph cannot follow).
-    pub answer_scope: Option<&'static str>,
+    pub answer_scope: Option<crate::server::tools::answer_scope::IncompleteReason>,
 }
 
 /// Look up everything we know about `symbol` and render the verdict.
 pub async fn explain_dispatch(
     graph: &GraphDatabase,
     overlay: &VolatileOverlay,
+    workspace: &std::path::Path,
     symbol: &str,
 ) -> Result<String, LainError> {
-    explain_dispatch_scoped(graph, overlay, symbol, false).await
+    explain_dispatch_scoped(graph, overlay, workspace, symbol, false).await
 }
 
 pub struct ExplainDispatchReport {
@@ -99,10 +100,11 @@ pub struct ExplainDispatchReport {
 pub async fn explain_dispatch_scoped(
     graph: &GraphDatabase,
     overlay: &VolatileOverlay,
+    workspace: &std::path::Path,
     symbol: &str,
     historical: bool,
 ) -> Result<String, LainError> {
-    explain_dispatch_report_scoped(graph, overlay, symbol, historical)
+    explain_dispatch_report_scoped(graph, overlay, workspace, symbol, historical)
         .await
         .map(|report| report.text)
 }
@@ -110,10 +112,15 @@ pub async fn explain_dispatch_scoped(
 pub async fn explain_dispatch_report_scoped(
     graph: &GraphDatabase,
     overlay: &VolatileOverlay,
+    workspace: &std::path::Path,
     symbol: &str,
     historical: bool,
 ) -> Result<ExplainDispatchReport, LainError> {
-    let node = resolve_node(graph, overlay, symbol)?;
+    // Resolve the way the sibling tools do: a bare name can name several
+    // definitions, and an answer about one of them must say so rather
+    // than read as a confirmed absence of evidence.
+    let (node, other_defs) =
+        crate::server::tools::utils::resolve_node_ambiguous(graph, overlay, symbol)?;
     let empty_store;
     let store = if historical {
         empty_store = RuntimeTraceStore::new(Default::default());
@@ -121,7 +128,16 @@ pub async fn explain_dispatch_report_scoped(
     } else {
         RuntimeTraceStore::global()
     };
-    let report = build_with_store(graph, overlay, &node, store);
+    let mut report = build_with_store(graph, overlay, &node, store);
+    // The builder knows whether the symbol is reached dynamically; the
+    // ambiguity and the index freshness come from the resolution above
+    // and from the file the symbol lives in.
+    report.answer_scope = crate::server::tools::answer_scope::reason_for(
+        !other_defs.is_empty(),
+        !historical && crate::server::tools::answer_scope::is_stale(graph, workspace, &node.path),
+        report.answer_scope
+            == Some(crate::server::tools::answer_scope::IncompleteReason::DynamicTarget),
+    );
 
     // Human-readable summary at the top, JSON-ish body at the bottom
     // so existing tools that expect prose still get it.
@@ -270,8 +286,7 @@ pub fn build_with_store(
         false,
         false,
         crate::server::tools::answer_scope::dispatches_dynamically(graph, target),
-    )
-    .map(|r| r.wire_label());
+    );
 
     ExplainDispatch {
         symbol: target.name.clone(),
@@ -348,7 +363,13 @@ mod tests {
         let graph = GraphDatabase::new(&dir.path().join("graph.bin")).unwrap();
         let overlay = VolatileOverlay::new();
 
-        let result = explain_dispatch(&graph, &overlay, "definitely_not_a_real_symbol_xyz").await;
+        let result = explain_dispatch(
+            &graph,
+            &overlay,
+            std::path::Path::new(""),
+            "definitely_not_a_real_symbol_xyz",
+        )
+        .await;
 
         match result {
             Err(LainError::NotFound(msg)) => {
@@ -362,6 +383,58 @@ mod tests {
                 other.map(|s| s.lines().next().unwrap_or("").to_string())
             ),
         }
+    }
+
+    /// A name that matches several definitions must not be answered as
+    /// "confirmed absence of evidence": the report says which of the
+    /// candidates it is about.
+    #[tokio::test]
+    async fn an_ambiguous_name_is_reported_as_such() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = GraphDatabase::new(&dir.path().join("graph.bin")).unwrap();
+        let overlay = VolatileOverlay::new();
+        let ns = RepoNamespace::for_test();
+        for path in ["src/a.rs", "src/b.rs"] {
+            let mut n = GraphNode::new(NodeType::Function, "twin".to_string(), path.to_string());
+            n.id = GraphNode::generate_id(&NodeType::Function, path, "twin", None, &ns);
+            graph.upsert_node(n).unwrap();
+        }
+        let report = explain_dispatch_report_scoped(&graph, &overlay, dir.path(), "twin", false)
+            .await
+            .expect("a known name must resolve");
+        assert_eq!(
+            report.report.answer_scope,
+            Some(crate::server::tools::answer_scope::IncompleteReason::AmbiguousTarget),
+            "an ambiguous name must not read as a confirmed absence"
+        );
+    }
+
+    /// A file edited after its scan makes the answer provisional.
+    #[tokio::test]
+    async fn a_dirty_file_is_reported_as_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/t.rs"), "fn target() {}\n").unwrap();
+        let graph = GraphDatabase::new(&dir.path().join("graph.bin")).unwrap();
+        let overlay = VolatileOverlay::new();
+        let ns = RepoNamespace::for_test();
+        let mut n = GraphNode::new(
+            NodeType::Function,
+            "target".to_string(),
+            "src/t.rs".to_string(),
+        );
+        n.id = GraphNode::generate_id(&NodeType::Function, "src/t.rs", "target", None, &ns);
+        // Scanned an hour ago; the file on disk was written just now.
+        n.last_lsp_sync = Some(crate::server::time::unix_secs(std::time::SystemTime::now()) - 3600);
+        graph.upsert_node(n).unwrap();
+        let report = explain_dispatch_report_scoped(&graph, &overlay, dir.path(), "target", false)
+            .await
+            .expect("a known name must resolve");
+        assert_eq!(
+            report.report.answer_scope,
+            Some(crate::server::tools::answer_scope::IncompleteReason::StaleOrUnindexed),
+            "a file edited after its scan makes the answer provisional"
+        );
     }
 
     #[test]

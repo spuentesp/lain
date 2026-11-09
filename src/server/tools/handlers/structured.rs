@@ -462,6 +462,7 @@ pub async fn explain_dispatch_output(
     let report = super::explain_dispatch::explain_dispatch_report_scoped(
         &ctx.graph,
         &ctx.overlay,
+        &ctx.workspace,
         &symbol,
         ctx.snapshot.is_some(),
     )

@@ -120,6 +120,30 @@ fn test_get_code_snippet_existing() {
 }
 
 #[test]
+/// A workspace-relative path must resolve against the workspace the
+/// tool was given, not against the server process's cwd. (Restored after
+/// it was dropped while making room for the answer-scope fixtures; the
+/// end-to-end `tests/use_cases/get_code_snippet_paths.rs` covers the same
+/// behaviour, but this unit pin is what keeps the helper honest.)
+#[test]
+fn test_get_code_snippet_resolves_relative_path_against_workspace() {
+    let (graph, overlay) = make_test_graph();
+
+    let ws = std::env::temp_dir().join("lain_snippet_ws");
+    let _ = std::fs::remove_dir_all(&ws);
+    std::fs::create_dir_all(ws.join("src")).unwrap();
+    std::fs::write(ws.join("src/lib.rs"), "IN_THE_WORKSPACE\nsecond\n").unwrap();
+
+    let result = get_code_snippet(&graph, &overlay, &ws, "src/lib.rs", Some(1), None);
+    let text = result.expect("relative path should resolve inside the workspace");
+    assert!(
+        text.contains("IN_THE_WORKSPACE"),
+        "expected the workspace copy, got: {text}"
+    );
+
+    std::fs::remove_dir_all(&ws).ok();
+}
+
 fn test_get_code_snippet_nonexistent_file() {
     let (graph, overlay) = make_test_graph();
 

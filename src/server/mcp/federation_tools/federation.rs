@@ -327,18 +327,54 @@ pub fn get_cross_repo_blast_radius_for_repo(
             .list_repos()
             .iter()
             .any(|(_, health)| *health != crate::federation::health::RepoHealth::Ready)
+        // A member that reports `Ready` can still have commits the
+        // indexer has not seen; its callers are invisible to the walk.
+        || fed
+            .list_repos()
+            .iter()
+            .any(|(member, _)| fed.get_repo(member).is_some_and(|r| r.index_is_behind_head()))
         || fed.get_repo(&rid).is_some_and(|repo| {
             crate::server::tools::answer_scope::is_stale(repo.db(), repo.local_path(), &seed.path)
         });
+    // A heuristic edge pointing at the seed is the resolved-receiver
+    // form; the seed's file carrying a dispatch site is the unresolved
+    // one (the dispatch sensor emits `File -> Hub`, so a function target
+    // never carries such an edge itself). Either way the static walk
+    // cannot see every caller.
     let mut dynamic = false;
     for edge_type in [
         crate::schema::EdgeType::DynamicDispatch,
         crate::schema::EdgeType::BusTopic,
         crate::schema::EdgeType::RouteMatches,
     ] {
-        if !fed.backend().edges_from(&seed.id, edge_type)?.is_empty() {
+        if !fed.backend().edges_to(&seed.id, edge_type)?.is_empty() {
             dynamic = true;
             break;
+        }
+    }
+    if !dynamic {
+        let file_id = fed
+            .backend()
+            .find_nodes_by_name(
+                std::path::Path::new(&seed.path)
+                    .file_name()
+                    .and_then(|f| f.to_str())
+                    .unwrap_or(&seed.path),
+            )
+            .unwrap_or_default()
+            .into_iter()
+            .find(|n| n.node_type == crate::schema::NodeType::File && n.path == seed.path);
+        if let Some(file) = file_id {
+            for edge_type in [
+                crate::schema::EdgeType::DynamicDispatch,
+                crate::schema::EdgeType::BusTopic,
+                crate::schema::EdgeType::RouteMatches,
+            ] {
+                if !fed.backend().edges_from(&file.id, edge_type)?.is_empty() {
+                    dynamic = true;
+                    break;
+                }
+            }
         }
     }
     let scope =
@@ -399,8 +435,7 @@ pub fn get_cross_repo_blast_radius_for_repo(
         truncated,
         answer_scope: scope
             .or(truncated
-                .then_some(crate::server::tools::answer_scope::IncompleteReason::Truncated))
-            .map(|reason| reason.wire_label().to_string()),
+                .then_some(crate::server::tools::answer_scope::IncompleteReason::Truncated)),
     })
 }
 
@@ -638,7 +673,10 @@ mod tests {
         }
         let result = get_cross_repo_blast_radius_for_repo(&fed, "repo-a", "shared", 1..3).unwrap();
         assert_eq!(result.total_count, 0);
-        assert_eq!(result.answer_scope.as_deref(), Some("ambiguous_target"));
+        assert_eq!(
+            result.answer_scope.map(|s| s.wire_label()),
+            Some("ambiguous_target")
+        );
     }
 
     #[tokio::test]
@@ -657,12 +695,31 @@ mod tests {
             crate::schema::EdgeType::BusTopic,
             crate::schema::EdgeType::RouteMatches,
         ] {
-            let edge = crate::schema::GraphEdge::new(kind, seed.into(), target.into());
+            // The seed is the dynamically-reached target: the heuristic
+            // edge points at it, which is the shape the dispatch sensor
+            // produces when it can resolve a receiver.
+            // Whether the walk lists the heuristic caller depends on the
+            // impact table: `BusTopic` / `RouteMatches` propagate
+            // `Incoming`, `DynamicDispatch` stops.
+            let kind_label = format!("{:?}", kind);
+            let expected_callers = match kind {
+                crate::schema::EdgeType::DynamicDispatch => 0,
+                _ => 1,
+            };
+            let edge = crate::schema::GraphEdge::new(kind, target.into(), seed.into());
             fed.backend().upsert_edge(edge.clone()).unwrap();
             let result =
                 get_cross_repo_blast_radius_for_repo(&fed, "repo-a", "shared", 1..3).unwrap();
-            assert_eq!(result.total_count, 0);
-            assert_eq!(result.answer_scope.as_deref(), Some("dynamic_target"));
+            // Either way the answer must say the graph cannot see every
+            // caller rather than call the symbol a leaf.
+            assert_eq!(
+                result.total_count, expected_callers,
+                "{kind_label}: the impact table decides whether the heuristic caller is listed"
+            );
+            assert_eq!(
+                result.answer_scope.map(|s| s.wire_label()),
+                Some("dynamic_target")
+            );
             fed.backend().remove_edges(&[edge]).unwrap();
         }
     }
@@ -672,7 +729,23 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
         let src_dir = tempfile::tempdir().unwrap();
-        git2::Repository::init(src_dir.path()).unwrap();
+        let src_repo = git2::Repository::init(src_dir.path()).unwrap();
+        // A real commit: "caught up with HEAD" is then a real comparison
+        // between the indexed commit and the repository's, not a test of
+        // an unborn repository.
+        std::fs::create_dir(src_dir.path().join("src")).unwrap();
+        std::fs::write(src_dir.path().join("src/a.rs"), "fn shared() {}\n").unwrap();
+        {
+            let mut idx = src_repo.index().unwrap();
+            idx.add_path(std::path::Path::new("src/a.rs")).unwrap();
+            let tree_id = idx.write_tree().unwrap();
+            let sig = git2::Signature::now("t", "t@e").unwrap();
+            let tree = src_repo.find_tree(tree_id).unwrap();
+            src_repo
+                .commit(Some("HEAD"), &sig, &sig, "fixture", &tree, &[])
+                .unwrap();
+        }
+        let head = src_repo.head().unwrap().target().unwrap().to_string();
         let rid = RepoId::new("repo-a").unwrap();
         let source = WorkspaceDirSource::new(rid.clone(), src_dir.path().to_path_buf()).unwrap();
         fed.add_repo(Box::new(source), tmp.path()).await.unwrap();
@@ -687,9 +760,11 @@ mod tests {
             .unwrap();
         let result = get_cross_repo_blast_radius_for_repo(&fed, "repo-a", "shared", 1..3).unwrap();
         assert_eq!(result.total_count, 0);
-        assert_eq!(result.answer_scope.as_deref(), Some("stale_or_unindexed"));
+        assert_eq!(
+            result.answer_scope.map(|s| s.wire_label()),
+            Some("stale_or_unindexed")
+        );
 
-        std::fs::create_dir(src_dir.path().join("src")).unwrap();
         std::fs::write(src_dir.path().join("src/a.rs"), "fn shared() {}\n").unwrap();
         let mut node = crate::schema::GraphNode::new(
             crate::schema::NodeType::Function,
@@ -701,9 +776,14 @@ mod tests {
         let repo = fed.get_repo(&rid).unwrap();
         repo.db().upsert_node(node.clone()).unwrap();
         let result = get_cross_repo_blast_radius_for_repo(&fed, "repo-a", "shared", 1..3).unwrap();
-        assert_eq!(result.answer_scope.as_deref(), Some("stale_or_unindexed"));
+        assert_eq!(
+            result.answer_scope.map(|s| s.wire_label()),
+            Some("stale_or_unindexed")
+        );
         node.last_lsp_sync = Some(crate::server::time::now_unix());
         repo.db().upsert_node(node).unwrap();
+        // repo-a's own index caught up with its HEAD.
+        repo.db().set_last_commit(head.clone()).unwrap();
         let result = get_cross_repo_blast_radius_for_repo(&fed, "repo-a", "shared", 1..3).unwrap();
         assert_eq!(result.answer_scope, None);
 
@@ -716,7 +796,10 @@ mod tests {
             repo.set_health(health);
             let result =
                 get_cross_repo_blast_radius_for_repo(&fed, "repo-a", "shared", 1..3).unwrap();
-            assert_eq!(result.answer_scope.as_deref(), Some("stale_or_unindexed"));
+            assert_eq!(
+                result.answer_scope.map(|s| s.wire_label()),
+                Some("stale_or_unindexed")
+            );
         }
         repo.set_health(RepoHealth::Ready);
 
@@ -728,12 +811,37 @@ mod tests {
             .await
             .unwrap();
         let result = get_cross_repo_blast_radius_for_repo(&fed, "repo-a", "shared", 1..3).unwrap();
-        assert_eq!(result.answer_scope.as_deref(), Some("stale_or_unindexed"));
-        fed.get_repo(&consumer_id)
-            .unwrap()
-            .set_health(RepoHealth::Ready);
+        assert_eq!(
+            result.answer_scope.map(|s| s.wire_label()),
+            Some("stale_or_unindexed")
+        );
+        let consumer_repo = fed.get_repo(&consumer_id).unwrap();
+        consumer_repo.set_health(RepoHealth::Ready);
+        // The consumer's index also caught up with its HEAD, so the
+        // answer is complete rather than provisional.
+        consumer_repo.db().set_last_commit(head.clone()).unwrap();
         let result = get_cross_repo_blast_radius_for_repo(&fed, "repo-a", "shared", 1..3).unwrap();
         assert_eq!(result.answer_scope, None);
+
+        // A member that reports `Ready` but whose index never caught up
+        // with its HEAD can still hide callers. Health alone says the
+        // member is serving, not that the graph saw the code it has.
+        consumer_repo
+            .db()
+            .set_last_commit("0000000000000000000000000000000000000000".into())
+            .unwrap();
+        let result = get_cross_repo_blast_radius_for_repo(&fed, "repo-a", "shared", 1..3).unwrap();
+        assert_eq!(
+            result.answer_scope.map(|s| s.wire_label()),
+            Some("stale_or_unindexed"),
+            "a member whose index is behind HEAD must qualify the answer"
+        );
+        consumer_repo.db().set_last_commit(head).unwrap();
+        let result = get_cross_repo_blast_radius_for_repo(&fed, "repo-a", "shared", 1..3).unwrap();
+        assert_eq!(
+            result.answer_scope, None,
+            "a member whose index caught up with HEAD no longer qualifies the answer"
+        );
 
         // Even a current seed cannot prove no callers in a member that failed
         // to load. Use a backend-only seed so only the load error is at issue.
@@ -747,7 +855,10 @@ mod tests {
             .unwrap();
         fed.record_load_error("missing-consumer", "checkout unavailable".into());
         let result = get_cross_repo_blast_radius_for_repo(&fed, "repo-b", "other", 1..3).unwrap();
-        assert_eq!(result.answer_scope.as_deref(), Some("stale_or_unindexed"));
+        assert_eq!(
+            result.answer_scope.map(|s| s.wire_label()),
+            Some("stale_or_unindexed")
+        );
     }
 
     #[tokio::test]
@@ -796,7 +907,7 @@ mod tests {
             "a walk that stops at the depth limit must say so"
         );
         assert_eq!(
-            result.answer_scope.as_deref(),
+            result.answer_scope.map(|s| s.wire_label()),
             Some("truncated"),
             "a truncated walk is an incomplete answer, and must name itself"
         );
