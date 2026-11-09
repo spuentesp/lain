@@ -75,6 +75,22 @@ The proxy's own references at `proxy/server.js:189` and `:213` are routing code 
 
 Classification rules this analysis pins (and the smoke now asserts): a convention-based match must not be reported as a production binding; the four static-path sites carry `no_match` with no `target_service` and no candidates; the dynamic sites carry `dynamic_target` — a runtime-selected path is its own reason, not "the service has no such route" — and are never reported as confirmed absences. Regressions: `convention_based_env_default_host_stays_unresolved_without_service_attribution` (joiner), `env_default_const_resolves_to_its_literal_fallback` and `env_default_with_dynamic_suffix_stays_dynamic` (JS URL resolution), and the `HTTP_PROXY_PATH sites stay unresolved` section of `scripts/eval/nat-http-contract-smoke.sh` (live multi-repo check).
 
+### Final-tree re-verification — 2026-11-09
+
+The smoke was re-run against the tree as it stands, on the same three revisions (`nat` `2fdf56a4`, `nat-examples` `eadbb757`, `nat-ui` `41cb8cf8`), with LSP disabled. The federation reached `ready ready ready` with the same 22 HTTP endpoints and two bound consumers, and every assertion above still holds: no MySQL-to-GraphQL consumers, no `/async` provider, both literal FastAPI GET routes present, no `ANY` garbage routes, and the proxy still attributed to `nat`.
+
+The unresolved breakdown is now 40 entries: 32 `no_match`, 4 `no_route_in_service`, 2 `dynamic_target`, 2 `env_unmapped`. The two `dynamic_target` entries are the runtime-selected paths from the table above; before the label was split they were reported as `no_route_in_service`, which claimed a service had been checked for a route when no service was involved. The revision-10 counts and wording above are the historical record of that measurement and are left unchanged.
+
+Identity of this run:
+
+| | |
+| --- | --- |
+| Tree | `eec965c4` (rustfmt) plus the final test-import cleanup; working tree clean at the run |
+| Analyzer binary | `target/debug/lain`, rebuilt from that tree |
+| Toolchain | rustc 1.98.1 (48a229cea 2026-09-01), cargo 1.98.1 (797e8a9bc 2026-08-05) |
+| Platform | Linux 7.2.6, 12 CPUs, shared host |
+| Repository revisions | `nat` `2fdf56a4`, `nat-examples` `eadbb757`, `nat-ui` `41cb8cf8` |
+
 ## Release-build verification — 2026-11-08
 
 The default NVIDIA smoke passed on release build `b0956095` (`lain` SHA-256 `c694a4002ce7…`, Git sidecar `e5906b9c58d5…`), using the same clean pins: nat `2fdf56a4`, nat-ui `41cb8cf8`, and nat-examples `eadbb757`. It found 22 HTTP endpoints, two bound consumers, and 40 unresolved consumers: 32 `no_match`, two `dynamic_target`, four `no_route_in_service`, and two `env_unmapped`. All six `HTTP_PROXY_PATH` consumers remained service-free and candidate-free; the four static-path cases retained `no_match`, while the two runtime-selected paths retained `dynamic_target`.
