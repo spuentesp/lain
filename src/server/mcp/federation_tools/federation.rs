@@ -722,6 +722,102 @@ mod tests {
             );
             fed.backend().remove_edges(&[edge]).unwrap();
         }
+        // All three heuristic kinds at once. The per-kind loop above
+        // hides an inverted emptiness check: the kinds without an edge
+        // cover for it (their `edges_to` probe is empty either way).
+        // Only every kind present at once makes each probe observably
+        // non-empty.
+        let edges: Vec<crate::schema::GraphEdge> = [
+            crate::schema::EdgeType::DynamicDispatch,
+            crate::schema::EdgeType::BusTopic,
+            crate::schema::EdgeType::RouteMatches,
+        ]
+        .into_iter()
+        .map(|kind| crate::schema::GraphEdge::new(kind, target.into(), seed.into()))
+        .collect();
+        for edge in &edges {
+            fed.backend().upsert_edge(edge.clone()).unwrap();
+        }
+        let result = get_cross_repo_blast_radius_for_repo(&fed, "repo-a", "shared", 1..3).unwrap();
+        assert_eq!(result.total_count, 1);
+        assert_eq!(
+            result.answer_scope.map(|s| s.wire_label()),
+            Some("dynamic_target")
+        );
+        fed.backend().remove_edges(&edges).unwrap();
+    }
+
+    #[tokio::test]
+    async fn cross_repo_blast_radius_scopes_dispatch_declared_on_the_seed_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        let seed = "repo-a:Function:src/a.rs:shared:0";
+        fed.backend()
+            .upsert_node_global(
+                seed,
+                crate::schema::NodeType::Function,
+                "src/a.rs",
+                "shared",
+            )
+            .unwrap();
+        // The dispatch sensor emits `File -> Hub:<detector>` with the
+        // file node named after the file, so the probe finds the seed's
+        // file by name and then has to pick the right node. Decoys that
+        // share the file name but not the file's identity must not stand
+        // in for it: `find_all_nodes_by_name` orders by (path, id), so
+        // these decoys sort before the real file node and a predicate
+        // that matches the wrong node selects one of them.
+        let file = "repo-a:File:src/a.rs:a.rs:0";
+        // GlobalId encodes `:` as `%3A` in the name segment, so the
+        // sensor's `Hub:<detector>` name lands as `Hub%3A<detector>`
+        // in the id while the node's name keeps the literal colon.
+        let hub = "repo-a:Synthetic:__hub__:Hub%3Adynamic_dispatch_sensor:0";
+        for (id, node_type, path, name) in [
+            (
+                "repo-a:File:src/_decoy.rs:a.rs:0",
+                crate::schema::NodeType::File,
+                "src/_decoy.rs",
+                "a.rs",
+            ),
+            (file, crate::schema::NodeType::File, "src/a.rs", "a.rs"),
+            (
+                "repo-a:Function:src/a.rs:a.rs:0",
+                crate::schema::NodeType::Function,
+                "src/a.rs",
+                "a.rs",
+            ),
+            (
+                hub,
+                crate::schema::NodeType::Synthetic,
+                "",
+                "Hub:dynamic_dispatch_sensor",
+            ),
+        ] {
+            fed.backend()
+                .upsert_node_global(id, node_type, path, name)
+                .unwrap();
+        }
+        // Outgoing dispatch edges from the real file node only, all
+        // three kinds: an inverted emptiness check on any one of them is
+        // masked by the other two unless every kind is present.
+        for kind in [
+            crate::schema::EdgeType::DynamicDispatch,
+            crate::schema::EdgeType::BusTopic,
+            crate::schema::EdgeType::RouteMatches,
+        ] {
+            fed.backend()
+                .upsert_edge(crate::schema::GraphEdge::new(kind, file.into(), hub.into()))
+                .unwrap();
+        }
+        // No static caller, but the seed's file declares dynamic
+        // dispatch: the answer must say the graph cannot see every
+        // caller rather than call the symbol a leaf.
+        let result = get_cross_repo_blast_radius_for_repo(&fed, "repo-a", "shared", 1..3).unwrap();
+        assert_eq!(result.total_count, 0);
+        assert_eq!(
+            result.answer_scope.map(|s| s.wire_label()),
+            Some("dynamic_target")
+        );
     }
 
     #[tokio::test]
