@@ -101,3 +101,33 @@ async fn a_dynamic_end_makes_the_answer_provisional() {
         "a dynamically-reached symbol is not a conclusive no-path, got:\n{out}"
     );
 }
+
+/// A name that matches several definitions makes "no path" an answer
+/// about one of them, picked by list order: the report must name the
+/// ambiguity rather than read as a confirmed absence about all of them.
+#[tokio::test]
+async fn a_doubly_defined_name_makes_the_answer_provisional() {
+    let dir = std::env::temp_dir().join("lain_test_chain_ambiguous");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/a.rs"), "fn a() {}\n").unwrap();
+    std::fs::write(dir.join("src/a2.rs"), "fn a() {}\n").unwrap();
+    std::fs::write(dir.join("src/b.rs"), "fn b() {}\n").unwrap();
+    let graph = GraphDatabase::new(&dir.join("graph.bin")).unwrap();
+    let overlay = VolatileOverlay::new();
+    let ns = RepoNamespace::for_test();
+    for (name, path) in [("a", "src/a.rs"), ("a", "src/a2.rs"), ("b", "src/b.rs")] {
+        graph.upsert_node(scanned_node(name, path, &ns)).unwrap();
+    }
+    let out = get_call_chain(&graph, &overlay, &dir, None, "a", "b", None)
+        .await
+        .unwrap();
+    assert!(
+        out.contains("No call path found"),
+        "expected the no-path answer, got:\n{out}"
+    );
+    assert!(
+        out.contains("ambiguous_target"),
+        "a name with several definitions must qualify the no-path answer, got:\n{out}"
+    );
+}
