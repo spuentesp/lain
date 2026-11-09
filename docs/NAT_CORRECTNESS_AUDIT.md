@@ -85,7 +85,7 @@ Identity of this run:
 
 | | |
 | --- | --- |
-| Tree | `eec965c4` (rustfmt) plus the final test-import cleanup; working tree clean at the run |
+| Tree | `d1072cde`; working tree clean at the run |
 | Analyzer binary | `target/debug/lain`, rebuilt from that tree |
 | Toolchain | rustc 1.98.1 (48a229cea 2026-09-01), cargo 1.98.1 (797e8a9bc 2026-08-05) |
 | Platform | Linux 7.2.6, 12 CPUs, shared host |
