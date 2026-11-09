@@ -143,6 +143,7 @@ fn test_get_code_snippet_resolves_relative_path_against_workspace() {
     std::fs::remove_dir_all(&ws).ok();
 }
 
+#[test]
 fn test_get_code_snippet_nonexistent_file() {
     let (graph, overlay) = make_test_graph();
 
