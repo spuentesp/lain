@@ -22,6 +22,11 @@ warn() {
     echo -e "${YELLOW}[WARN]${NC} $1"
 }
 
+# The Formula fill writes into the repo, so resolve paths from the
+# script's own location rather than the caller's working directory.
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+FILL_SCRIPT="$REPO_ROOT/scripts/fill-formula-sha256.py"
+
 echo "=========================================="
 echo "  LAIN Post-Flight Release Checks"
 echo "=========================================="
@@ -43,9 +48,11 @@ fi
 
 # Check 2: All expected binaries are present
 echo "Check 2: Checking expected binaries..."
+# Only the targets release.yml actually builds. The macOS ARM64 target
+# was dropped in v0.14.0 (an unresolvable ONNX Runtime linker error)
+# and has not returned, so expecting it here would fail every release.
 EXPECTED_BINARIES=(
     "lain-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
-    "lain-${VERSION}-aarch64-apple-darwin.tar.gz"
     "lain-${VERSION}-x86_64-pc-windows-msvc.tar.gz"
 )
 
@@ -91,61 +98,47 @@ done
 echo ""
 echo "Check 4: Extracting and verifying binaries..."
 
-# Check macOS ARM binary
-if [ "$(uname -s)" = "Darwin" ] && [ "$(uname -m)" = "arm64" ]; then
-    MACOS_BINARY="lain-${VERSION}-aarch64-apple-darwin.tar.gz"
-    echo "  Extracting $MACOS_BINARY..."
-    cd "$TEMP_DIR"
-    tar xzf "$MACOS_BINARY"
+# The release publishes Linux and Windows binaries only. Extract and
+# run the one this machine can execute, if any.
+VERIFY_BINARY=""
+case "$(uname -s)" in
+    Linux*)  VERIFY_BINARY="lain-${VERSION}-x86_64-unknown-linux-gnu.tar.gz" ;;
+    Darwin*) VERIFY_BINARY="" ;;  # no macOS build since v0.14.0
+    MINGW*|MSYS*|CYGWIN*) VERIFY_BINARY="lain-${VERSION}-x86_64-pc-windows-msvc.tar.gz" ;;
+esac
 
-    if [ -f "lain" ]; then
-        chmod +x lain
-        if ./lain --version >/dev/null 2>&1; then
-            pass "macOS ARM binary is executable"
+if [ -n "$VERIFY_BINARY" ]; then
+    echo "  Extracting $VERIFY_BINARY..."
+    ( cd "$TEMP_DIR" && tar xzf "$VERIFY_BINARY" )
+
+    if [ -f "$TEMP_DIR/lain" ]; then
+        chmod +x "$TEMP_DIR/lain"
+        if "$TEMP_DIR/lain" --version >/dev/null 2>&1; then
+            pass "$VERIFY_BINARY is executable"
         else
-            fail "macOS ARM binary is not executable"
+            fail "$VERIFY_BINARY is not executable"
         fi
     else
-        fail "macOS ARM binary not found in archive"
+        fail "lain binary not found in $VERIFY_BINARY"
     fi
-    cd - >/dev/null
 else
-    warn "Skipping binary verification (not on macOS ARM)"
+    warn "Skipping binary verification (no native build for this platform)"
 fi
 
-# Check 5: Generate Homebrew formula update instructions
+# Check 5: Fill and verify the Homebrew formula checksums
 echo ""
-echo "Check 5: Generating Homebrew formula update..."
-cat <<EOF
-==========================================
-  Homebrew Formula Update Instructions
-==========================================
+echo "Check 5: Filling Formula/lain.rb checksums..."
+if python3 "$FILL_SCRIPT" --tag "v$VERSION"; then
+    pass "Formula/lain.rb sha256 values filled from the published SHA256SUMS"
+else
+    fail "Could not fill Formula/lain.rb sha256 values"
+fi
 
-Update Formula/lain.rb with the following SHA256 hashes:
-
-EOF
-
-for binary in "${EXPECTED_BINARIES[@]}"; do
-    SHA256=$(grep "^${binary}|" "$SHA256_FILE" | cut -d'|' -f2)
-    if [ -z "$SHA256" ]; then
-        warn "No SHA256 recorded for $binary; skipping formula line."
-        continue
-    fi
-    case "$binary" in
-        *aarch64-apple-darwin*)
-            echo "  macOS ARM (aarch64-apple-darwin):"
-            echo "    sha256 \"$SHA256\" => :aarch64_darwin"
-            ;;
-        *x86_64-unknown-linux-gnu*)
-            echo "  Linux x86_64 (x86_64-unknown-linux-gnu):"
-            echo "    sha256 \"$SHA256\" => :x86_64_linux"
-            ;;
-        *x86_64-pc-windows-msvc*)
-            echo "  Windows x86_64 (x86_64-pc-windows-msvc):"
-            echo "    sha256 \"$SHA256\" => :x86_64_windows"
-            ;;
-    esac
-done
+if python3 "$FILL_SCRIPT" --tag "v$VERSION" --check; then
+    pass "Formula/lain.rb sha256 values match the published artifacts"
+else
+    fail "Formula/lain.rb sha256 values do not match the published artifacts"
+fi
 
 echo ""
 echo "=========================================="
@@ -153,12 +146,13 @@ echo -e "${GREEN}✅ All post-flight checks passed!${NC}"
 echo "=========================================="
 echo ""
 echo "Next steps:"
-echo "  1. Update Formula/lain.rb with the SHA256 hashes above"
+echo "  1. Bump the health-badge default to the new release:"
+echo "     .github/actions/lain-health-badge/action.yml  (lain-version: 'v$VERSION')"
 echo "  2. Test the formula locally:"
 echo "     brew install --build-from-source ./Formula/lain.rb"
 echo "  3. Commit and push the formula:"
-echo "     git add Formula/lain.rb"
-echo "     git commit -m \"chore: update formula for v$VERSION\""
+echo "     git add Formula/lain.rb .github/actions/lain-health-badge/action.yml"
+echo "     git commit -m \"chore: post-release v$VERSION — formula checksums and badge default\""
 echo "     git push origin main"
 echo "  4. Test the release:"
 echo "     curl -fsSL https://raw.githubusercontent.com/spuentesp/lain/main/install.sh | bash"

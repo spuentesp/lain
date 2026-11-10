@@ -5,7 +5,23 @@ All notable changes to LAIN are documented here. Versions follow
 
 ## Unreleased
 
+## [0.15.0] - 2026-11-10
 
+- **Distribution: publish only what the release actually builds.** The
+  release workflow builds Linux and Windows; the macOS ARM64 target was
+  dropped in v0.14.0 (an unresolvable ONNX Runtime linker error) and has
+  not returned. `Formula/lain.rb` no longer carries an `on_macos` stanza,
+  and `server.json` no longer advertises a `macos-aarch64` binary — both
+  pointed at assets that are never published. macOS users install with
+  `cargo install --git https://github.com/spuentesp/lain.git` or the npm
+  launcher until the target comes back.
+- **Distribution: fill the Homebrew checksums from the published
+  `SHA256SUMS`.** v0.14.0 shipped a Formula whose `sha256` values did
+  not match the published artifacts (the post-publish step was skipped),
+  so `brew install lain` failed checksum verification. `scripts/fill-formula-sha256.py`
+  fills the hashes from a published release's `SHA256SUMS` and
+  `--check` verifies them; `scripts/test_fill_formula_sha256.py` pins
+  the behaviour in CI.
 - Say why an answer may be incomplete. `get_call_sites`, `assess_change`,
   `explain_dispatch` and `get_cross_repo_blast_radius` report an
   `answer_scope` field — `get_blast_radius` and `get_call_chain` state the same

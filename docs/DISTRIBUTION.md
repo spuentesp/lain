@@ -73,13 +73,15 @@ These run automatically as part of the release workflow
 (`.github/workflows/release.yml`), but the human who cuts the tag
 should verify each completed step before announcing the release.
 
-- [ ] **`build-{linux,macos-arm64,windows}` green.** Three
-      per-target binaries, each with its own SBOM, signed
-      provenance, and cosign keyless signature.
+- [ ] **`build-{linux,windows}` green.** Two per-target binaries, each
+      with its own SBOM, signed provenance, and cosign keyless
+      signature. There is no macOS build job: the macOS ARM64 target
+      was dropped in v0.14.0 (an unresolvable ONNX Runtime linker
+      error) and has not returned.
 - [ ] **`sha256sums` job green.** A single `SHA256SUMS` file
       attached to the release, containing one line per binary.
       `gh release view v0.x.y --json assets` should list
-      `SHA256SUMS` alongside the three tarballs.
+      `SHA256SUMS` alongside the two tarballs.
 - [ ] **`publish-server-json` green.** `server.json` on the
       release is regenerated from `docs/METADATA.toml` and the
       release tag; every `"version":` field (top-level AND
@@ -98,6 +100,18 @@ should verify each completed step before announcing the release.
 
 ## After the release lands
 
+- [ ] **Fill the Formula checksums.** The artifacts are not
+      bit-reproducible, so their hashes cannot be known before the
+      tag is published; the release PR ships placeholders. Run
+      `python3 scripts/fill-formula-sha256.py --tag v<tag>` and
+      commit the result. Verify with
+      `python3 scripts/fill-formula-sha256.py --tag v<tag> --check`.
+      v0.14.0 skipped this step, so `brew install lain` failed
+      checksum verification — do not skip it again.
+- [ ] **Bump the health-badge default.** Set `lain-version` in
+      `.github/actions/lain-health-badge/action.yml` to the new tag.
+      The `version-drift` job compares it against the latest GitHub
+      release, so it must point at a release that exists.
 - [ ] **`npx @spuentesp/lain-mcp@<tag> --version`** on a clean
       machine prints `lain <version>`. This is what
       `runtime.js::verifyBinary` already does; the smoke is a

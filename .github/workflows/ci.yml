@@ -871,6 +871,12 @@ jobs:
       # ignores (description / homepage / keywords / repository.url).
       - name: Canonical metadata sync gate
         run: python scripts/test_sync_metadata.py
+      # The post-publish Formula checksum fill (AGENTS.md step 6).
+      # v0.14.0 shipped with hashes that did not match the published
+      # artifacts because this step was skipped; the tests pin it so
+      # the fill cannot be skipped silently again.
+      - name: Formula checksum fill regression tests
+        run: python scripts/test_fill_formula_sha256.py
       # Fast, network-free unit tests for the Milestone 9 clean-room
       # check script (reader-thread timeout handling, protocol-violation
       # detection) against a fake in-process server. The real live-network
