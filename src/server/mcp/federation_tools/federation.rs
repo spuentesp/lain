@@ -363,7 +363,14 @@ pub fn get_cross_repo_blast_radius_for_repo(
             )
             .unwrap_or_default()
             .into_iter()
-            .find(|n| n.node_type == crate::schema::NodeType::File && n.path == seed.path);
+            // The seed's own file only: paths are repo-relative, so a
+            // same-path file in another repo must not stand in for it
+            // (or lend it a dispatch site it does not have).
+            .find(|n| {
+                n.node_type == crate::schema::NodeType::File
+                    && n.path == seed.path
+                    && GlobalId::parse(&n.id).is_ok_and(|g| g.repo_id() == rid.as_str())
+            });
         if let Some(file) = file_id {
             for edge_type in [
                 crate::schema::EdgeType::DynamicDispatch,
@@ -817,6 +824,127 @@ mod tests {
         assert_eq!(
             result.answer_scope.map(|s| s.wire_label()),
             Some("dynamic_target")
+        );
+    }
+
+    /// The dispatch probe must read the seed's OWN file. Paths are
+    /// repo-relative, so two members can hold `src/a.rs` with the same
+    /// file name; a name-only lookup then picks whichever sorts first —
+    /// the other repo's file. Here the seed's file declares dispatch and
+    /// the same-path file in `alpha` (which sorts first) does not, so a
+    /// probe that reads the wrong file claims completeness it cannot
+    /// prove.
+    #[tokio::test]
+    async fn cross_repo_blast_radius_scopes_dispatch_from_the_seeds_own_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        let seed = "zeta:Function:src/a.rs:shared:0";
+        let zeta_file = "zeta:File:src/a.rs:a.rs:0";
+        let alpha_file = "alpha:File:src/a.rs:a.rs:0";
+        let hub = "zeta:Synthetic:__hub__:Hub%3Adynamic_dispatch_sensor:0";
+        for (id, node_type, path, name) in [
+            (
+                seed,
+                crate::schema::NodeType::Function,
+                "src/a.rs",
+                "shared",
+            ),
+            (zeta_file, crate::schema::NodeType::File, "src/a.rs", "a.rs"),
+            (
+                alpha_file,
+                crate::schema::NodeType::File,
+                "src/a.rs",
+                "a.rs",
+            ),
+            (
+                hub,
+                crate::schema::NodeType::Synthetic,
+                "",
+                "Hub:dynamic_dispatch_sensor",
+            ),
+        ] {
+            fed.backend()
+                .upsert_node_global(id, node_type, path, name)
+                .unwrap();
+        }
+        for kind in [
+            crate::schema::EdgeType::DynamicDispatch,
+            crate::schema::EdgeType::BusTopic,
+            crate::schema::EdgeType::RouteMatches,
+        ] {
+            fed.backend()
+                .upsert_edge(crate::schema::GraphEdge::new(
+                    kind,
+                    zeta_file.into(),
+                    hub.into(),
+                ))
+                .unwrap();
+        }
+        let result = get_cross_repo_blast_radius_for_repo(&fed, "zeta", "shared", 1..3).unwrap();
+        assert_eq!(result.total_count, 0);
+        assert_eq!(
+            result.answer_scope.map(|s| s.wire_label()),
+            Some("dynamic_target"),
+            "the seed's own file declares dispatch; another repo's \
+             same-path file must not stand in for it"
+        );
+    }
+
+    /// The mirror failure: the other repo's same-path file declares
+    /// dispatch and the seed's does not. The seed's answer is complete,
+    /// and the other repo's dispatch site must not leak into it.
+    #[tokio::test]
+    async fn cross_repo_blast_radius_ignores_dispatch_on_another_repos_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        let seed = "zeta:Function:src/a.rs:shared:0";
+        let zeta_file = "zeta:File:src/a.rs:a.rs:0";
+        let alpha_file = "alpha:File:src/a.rs:a.rs:0";
+        let hub = "alpha:Synthetic:__hub__:Hub%3Adynamic_dispatch_sensor:0";
+        for (id, node_type, path, name) in [
+            (
+                seed,
+                crate::schema::NodeType::Function,
+                "src/a.rs",
+                "shared",
+            ),
+            (zeta_file, crate::schema::NodeType::File, "src/a.rs", "a.rs"),
+            (
+                alpha_file,
+                crate::schema::NodeType::File,
+                "src/a.rs",
+                "a.rs",
+            ),
+            (
+                hub,
+                crate::schema::NodeType::Synthetic,
+                "",
+                "Hub:dynamic_dispatch_sensor",
+            ),
+        ] {
+            fed.backend()
+                .upsert_node_global(id, node_type, path, name)
+                .unwrap();
+        }
+        for kind in [
+            crate::schema::EdgeType::DynamicDispatch,
+            crate::schema::EdgeType::BusTopic,
+            crate::schema::EdgeType::RouteMatches,
+        ] {
+            fed.backend()
+                .upsert_edge(crate::schema::GraphEdge::new(
+                    kind,
+                    alpha_file.into(),
+                    hub.into(),
+                ))
+                .unwrap();
+        }
+        let result = get_cross_repo_blast_radius_for_repo(&fed, "zeta", "shared", 1..3).unwrap();
+        assert_eq!(result.total_count, 0);
+        assert_eq!(
+            result.answer_scope.map(|s| s.wire_label()),
+            None,
+            "another repo's dispatch site must not make the seed's answer provisional"
         );
     }
 

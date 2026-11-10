@@ -102,11 +102,13 @@ async fn a_dynamic_end_makes_the_answer_provisional() {
     );
 }
 
-/// A name that matches several definitions makes "no path" an answer
-/// about one of them, picked by list order: the report must name the
-/// ambiguity rather than read as a confirmed absence about all of them.
+/// Several definitions at either end are not a gap for this tool: the
+/// BFS queues every definition of both names, so a "no path" answer is
+/// a negative over all of them, and the answer says how many it
+/// covered. (The single-target tools' ambiguity label — "this answer
+/// covers one of them" — would contradict that sentence.)
 #[tokio::test]
-async fn a_doubly_defined_name_makes_the_answer_provisional() {
+async fn a_doubly_defined_name_is_searched_exhaustively() {
     let dir = std::env::temp_dir().join("lain_test_chain_ambiguous");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("src")).unwrap();
@@ -127,17 +129,20 @@ async fn a_doubly_defined_name_makes_the_answer_provisional() {
         "expected the no-path answer, got:\n{out}"
     );
     assert!(
-        out.contains("ambiguous_target"),
-        "a name with several definitions must qualify the no-path answer, got:\n{out}"
+        out.contains("covered every definition of both names (2 for 'a', 1 for 'b')"),
+        "the answer must state the exhaustive coverage, got:\n{out}"
+    );
+    assert!(
+        !out.contains("ambiguous_target"),
+        "an exhaustive negative must not claim it covers one definition, got:\n{out}"
     );
 }
 
-/// The mirror case: ambiguity on the `to` end qualifies the answer the
-/// same way — the path search covers every definition of both names,
-/// so a name picked arbitrarily at either end makes "no path" an
-/// answer about that pick, not about the name.
+/// The mirror case: several definitions on the `to` end are covered
+/// the same exhaustively, and the answer must say so rather than claim
+/// it answered about one pick.
 #[tokio::test]
-async fn a_doubly_defined_target_makes_the_answer_provisional() {
+async fn a_doubly_defined_target_is_searched_exhaustively() {
     let dir = std::env::temp_dir().join("lain_test_chain_ambiguous_to");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("src")).unwrap();
@@ -158,7 +163,11 @@ async fn a_doubly_defined_target_makes_the_answer_provisional() {
         "expected the no-path answer, got:\n{out}"
     );
     assert!(
-        out.contains("ambiguous_target"),
-        "a target name with several definitions must qualify the no-path answer, got:\n{out}"
+        out.contains("covered every definition of both names (1 for 'a', 2 for 'b')"),
+        "the answer must state the exhaustive coverage, got:\n{out}"
+    );
+    assert!(
+        !out.contains("ambiguous_target"),
+        "an exhaustive negative must not claim it covers one definition, got:\n{out}"
     );
 }

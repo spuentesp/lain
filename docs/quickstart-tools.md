@@ -442,6 +442,14 @@ callers*. The second is not a safe change. The same field appears in
 and `risk: "low"` with a scope is an answer the analyzer could not
 complete.
 
+Two tools carry this vocabulary with their own shape. For
+`explain_dispatch`, a `null` scope next to verdict `insufficient_evidence`
+means *the graph holds no signal about this symbol* — not "nothing calls
+it"; the verdict, not the scope, is what says which. And `get_call_chain`
+never reports `ambiguous_target`: its search queues every definition of
+both names, so several definitions are not a gap for it — the answer
+itself says how many it covered.
+
 Cross-repository blast radius also checks for duplicate names within the
 selected repo, runtime-dispatch edges, and missing or unfinished federation
 members. Selecting `repo_id` alone does not disambiguate two definitions in

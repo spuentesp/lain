@@ -153,6 +153,8 @@ async fn freshness_reflects_the_last_update_not_construction() {
     // these nodes carry no scan timestamp at all, so the index cannot
     // prove it saw the file, and the answer says so in the shared
     // vocabulary — `stale_or_unindexed` covers "or was never indexed".
+    // The marker's own sentences are the pin — not "after it was last
+    // indexed", which the scope note's explanation legitimately shares.
     assert!(
         !out.contains("was modified") && !out.contains("is not in the graph"),
         "a just-touched overlay over unchanged files must not print the freshness marker: {out}"

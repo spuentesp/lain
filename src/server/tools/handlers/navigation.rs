@@ -242,11 +242,12 @@ pub async fn get_call_chain(
                     crate::server::tools::answer_scope::is_stale(graph, workspace, &n.path)
                 })
             });
-        let scope = crate::server::tools::answer_scope::reason_for(
-            from_defs > 1 || to_defs > 1,
-            stale,
-            dynamic,
-        );
+        // Not ambiguity: the BFS queued every definition of both names,
+        // so this negative covers all of them — the single-target
+        // tools' `AmbiguousTarget` ("this answer covers one of them")
+        // would contradict the coverage sentence below. Several
+        // definitions are stated there as the fact they are.
+        let scope = crate::server::tools::answer_scope::reason_for(false, stale, dynamic);
         let note = match scope {
             Some(reason) => format!(" — {}: {}", reason.wire_label(), reason.explanation()),
             None => String::new(),

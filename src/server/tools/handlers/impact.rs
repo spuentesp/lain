@@ -374,7 +374,7 @@ pub async fn get_blast_radius_report_scoped(
                 reason.explanation()
             )),
             None => output.push_str(
-                "\n  (no dependents found — the index is current for this file and nothing in it calls the symbol)",
+                "\n  (no dependents found — the index is current for this file and no caller in the graph reaches the symbol)",
             ),
         }
         // Don't show total count when there are no names to show

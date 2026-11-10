@@ -5,14 +5,22 @@ All notable changes to LAIN are documented here. Versions follow
 
 ## Unreleased
 
-- Say why an answer may be incomplete. `get_call_sites`, `get_blast_radius`,
-  `assess_change`, `explain_dispatch` and `get_cross_repo_blast_radius` report an
-  `answer_scope` field: `null` (omitted for cross-repo blast radius) when the answer is complete — including an empty
+- Say why an answer may be incomplete. `get_call_sites`, `assess_change`,
+  `explain_dispatch` and `get_cross_repo_blast_radius` report an
+  `answer_scope` field — `get_blast_radius` and `get_call_chain` state the same
+  reason in their text (they have no structured output): `null` (omitted for
+  cross-repo blast radius)
+  when the answer is complete — including an empty
   answer that is a confirmed absence — and otherwise one of `unresolved_name`,
   `ambiguous_target`, `dynamic_target`, `stale_or_unindexed` or `truncated`. A
   runtime-selected path in the contract tools is now reported as `dynamic_target`
   instead of `no_route_in_service`, which claimed a service had been checked
-  when no service was involved. No numeric confidence is added: the reasons name
+  when no service was involved. `get_call_chain` searches every definition of
+  both names, so several definitions are not a gap for it — its answer says how
+  many it covered and its `answer_scope` never carries `ambiguous_target`.
+  `explain_dispatch` now resolves ambiguous names the way `find_symbol` does, so
+  the reported target matches the one other tools name. No numeric confidence is
+  added: the reasons name
   what the analyzer could not see. Cross-repo answers also flag duplicate names
   within the selected repo, runtime-dispatch edges, stale seed files, and
   unfinished or unavailable federation members. See `docs/quickstart-tools.md`.

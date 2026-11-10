@@ -327,14 +327,23 @@ pub fn get_call_sites_report_scoped(
             stale,
             crate::server::tools::answer_scope::dispatches_dynamically(graph, &node),
         );
-        let text = match scope {
+        let mut text = amb.clone();
+        // The per-file freshness marker (spuentesp/lain#292: precise
+        // path + age) is what the empty answer needs most — the scope
+        // note below says *why* the answer may be incomplete in the
+        // shared vocabulary, the marker says *which file* moved on.
+        if let Some(note) = freshness.as_ref().and_then(|f| f.note(&node.path)) {
+            text.push_str(&note);
+            text.push('\n');
+        }
+        text.push_str(&match scope {
             Some(reason) => format!(
-                "{amb}No call sites found for '{symbol}' in the graph — {} ({}).",
+                "No call sites found for '{symbol}' in the graph — {} ({}).",
                 reason.explanation(),
                 reason.wire_label()
             ),
-            None => format!("{amb}No call sites found for '{symbol}' ({symbol} is a leaf)"),
-        };
+            None => format!("No call sites found for '{symbol}' ({symbol} is a leaf)"),
+        });
         return Ok(CallSitesReport {
             text,
             target: node,

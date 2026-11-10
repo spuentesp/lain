@@ -472,23 +472,24 @@ pub async fn assess_change_report_scoped(
     // dispatch, reflection, config/framework wiring and repositories
     // outside this index are invisible to it. When the answer also
     // knows *why* it could not be conclusive, it says so specifically
-    // on top of that general limit.
-    let caveat = if risk == "low" {
-        let mut caveat = " No dependents found in the indexed graph; this is detected reach, \
+    // on top of that general limit — for every risk tier, not only the
+    // zero-dependent one: a stale or dynamic answer is provisional
+    // even when dependents were found.
+    let mut caveat = String::new();
+    if risk == "low" {
+        caveat.push_str(
+            " No dependents found in the indexed graph; this is detected reach, \
          not proof of safety (dynamic dispatch, reflection, config wiring and \
-         repos outside this index are not visible)."
-            .to_string();
-        if let Some(reason) = answer_scope {
-            caveat.push_str(&format!(
-                " For this answer: {} — {}.",
-                reason.wire_label(),
-                reason.explanation()
-            ));
-        }
-        caveat
-    } else {
-        String::new()
-    };
+         repos outside this index are not visible).",
+        );
+    }
+    if let Some(reason) = answer_scope {
+        caveat.push_str(&format!(
+            " For this answer: {} — {}.",
+            reason.wire_label(),
+            reason.explanation()
+        ));
+    }
 
     let direct_nodes: Vec<_> = blast
         .nodes
@@ -2011,5 +2012,65 @@ mod m6_tests {
             &tuning,
             args,
         )
+    }
+}
+
+#[cfg(test)]
+mod scope_caveat_tests {
+    use super::*;
+    use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace};
+
+    /// The scope caveat must reach the prose for every risk tier: a
+    /// stale answer is provisional even when dependents were found —
+    /// the zero-dependent prose is only the `low`-tier half of that
+    /// contract, and gating the whole caveat on it hid the reason from
+    /// exactly the answers people act on.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_stale_target_names_the_scope_even_with_dependents() {
+        let dir = std::env::temp_dir().join("test_assess_scope_caveat");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(
+            dir.join("src/proc.rs"),
+            "fn process() {}\nfn main() { process(); }\n",
+        )
+        .unwrap();
+        let graph = GraphDatabase::new(&dir.join("graph.bin")).unwrap();
+        let overlay = VolatileOverlay::new();
+        let ns = RepoNamespace::for_test();
+
+        let mut target = GraphNode::new(NodeType::Function, "process".into(), "src/proc.rs".into());
+        target.id =
+            GraphNode::generate_id(&NodeType::Function, "src/proc.rs", "process", None, &ns);
+        // Scanned an hour ago; the file was written just now.
+        target.last_lsp_sync =
+            Some(crate::server::time::unix_secs(std::time::SystemTime::now()) - 3600);
+        let mut caller = GraphNode::new(NodeType::Function, "main".into(), "src/proc.rs".into());
+        caller.id = GraphNode::generate_id(&NodeType::Function, "src/proc.rs", "main", None, &ns);
+        caller.last_lsp_sync =
+            Some(crate::server::time::unix_secs(std::time::SystemTime::now()) - 3600);
+        graph.upsert_node(target.clone()).unwrap();
+        graph.upsert_node(caller.clone()).unwrap();
+        graph
+            .insert_edge(&GraphEdge::new(
+                EdgeType::Calls,
+                caller.id.clone(),
+                target.id.clone(),
+            ))
+            .unwrap();
+
+        let mut args = Map::new();
+        args.insert("symbol".to_string(), Value::String("process".to_string()));
+        let out = assess_change(&graph, &overlay, &dir, &args, None)
+            .await
+            .expect("assess_change on a known symbol must succeed");
+        assert!(
+            out.contains("verdict: **medium**"),
+            "the fixture needs a dependent so the low-tier prose cannot carry the caveat, got:\n{out}"
+        );
+        assert!(
+            out.contains("For this answer: stale_or_unindexed"),
+            "a stale answer must name its scope even with dependents, got:\n{out}"
+        );
     }
 }

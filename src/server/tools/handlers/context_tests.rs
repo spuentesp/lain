@@ -335,6 +335,11 @@ fn stale_index_reports_the_stale_file() {
         "a file edited after its scan makes the answer provisional"
     );
     assert!(report.text.contains("stale_or_unindexed"));
+    assert!(
+        report.text.contains("was modified"),
+        "the empty answer must keep the per-file freshness marker, got:\n{}",
+        report.text
+    );
 }
 
 /// The two staleness sources are each sufficient on their own, and
