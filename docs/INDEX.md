@@ -55,6 +55,9 @@ single-repository setup, federation, and basic troubleshooting.
   startup medians and their raw artifacts
 - [Follow-ups](FOLLOWUPS.md): work deliberately deferred from merged
   changes
+- [Parallax requirements report](PARALLAX_REQUIREMENTS_REPORT.md):
+  coverage of the external consumer contract, with the upgrade notes
+  past its version pin
 
 - [Vulnerability triage](VULNS.md): current OSV findings and remediation
 - [OpenSSF Scorecard](SCORECARD.md): current external score and process gaps
