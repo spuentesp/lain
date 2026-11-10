@@ -87,6 +87,17 @@ stays on `v0.14.0` until 0.15.0 is published. The Formula `sha256`
 values are placeholders until then and are filled from the published
 `SHA256SUMS` in the post-publish commit.
 
+`main` is merged into the release branch. `dev` and `main` diverged
+after v0.14.0: `main` carries the v0.14.0 release commits (the macOS
+linker work and its `release.yml` changes) that `dev` never received,
+and `dev` carries 148 commits since. Every difference between the two
+trees is a `dev`-side change, so the conflicts resolve to the release
+branch's side. The merge also brings across three changes that were only
+on `main` and belong there: `.gitattributes` plus the
+`core.autocrlf=false` calls in `contracts/mirrors.rs` (Windows
+checkouts must not rewrite blob contents, which would change every blob
+hash), and the path normalization in `contract_tools/evidence.rs`.
+
 Federation schema: `FEDERATION_GRAPH_VERSION` advances from 4 to 5 (ORM
 model/table/column relations). The loader refuses a graph written under
 a different header with `LainError::FederationSchemaMismatch`; the
