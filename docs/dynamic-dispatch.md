@@ -107,7 +107,12 @@ repo's graph looking for the span name and returns the global
 node id when exactly one repo owns the symbol. It honors OTLP
 semconv hints (`code.repo` for repo-narrowed resolution;
 `service.name` as a secondary lookup key) before falling back
-to the global index.
+to the global index. Resource-level attributes are merged into
+the span attributes before the hints are read — an exporter that
+puts `service.name` on the *resource*, as the OTel convention
+prescribes, resolves the same way as one that repeats it per span
+— and the instrumentation scope (`otel.scope.name` /
+`otel.scope.version`) is preserved on the stored trace.
 
 It returns `None` when no repo owns the symbol or when the
 symbol-name lookup is ambiguous across repos — in both cases
@@ -166,9 +171,17 @@ Dispatch summary for 'handle_order' (src/api/handle_order.py):
     { "source_id": "...", "trace_id": "abc123", "last_seen_unix": 1734567890 }
   ],
   "co_change_partners": ["src/api/orders.py", "src/workers/order_worker.py"],
-  "verdict": "runtime_confirmed"
+  "verdict": "runtime_confirmed",
+  "answer_scope": null
 }
 ```
+
+`answer_scope` is `null` when the report covers everything the index
+knows, and otherwise names the gap (`dynamic_target` when the symbol is
+reached through a dispatch the static graph cannot follow, plus
+`ambiguous_target` / `stale_or_unindexed` when the resolution or the
+index cannot back the claim). The vocabulary is shared with the other
+graph tools — see [`quickstart-tools.md`](quickstart-tools.md).
 
 ## The `dynamic-boundaries.md` file
 

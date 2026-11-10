@@ -381,8 +381,17 @@ lain reindex --config ./repos.yaml --workspace backend-team
 `federated_graph.bin`. The result is deterministic in content: two runs on the
 same tree produce the same nodes and edges. The file bytes are not identical
 between runs, because node-index order and the `last_lsp_sync` / `last_git_sync`
-timestamps vary. Compare two graphs by content, not by hash. The on-disk
-format is unchanged, so an existing graph does not need a reindex to load.
+timestamps vary. Compare two graphs by content, not by hash.
+
+The format is versioned precisely because it changes: additive node and
+edge types fold into the current version so old graphs keep loading, but
+a version bump means the on-disk shape changed and an existing graph is
+refused with `FederationSchemaMismatch` until `lain reindex` rebuilds it.
+`FEDERATION_GRAPH_VERSION` is **5** as of v0.15.0 — the ORM
+model/table/column relations advanced it from 4 — so a federation graph
+written by v0.14.0 or earlier needs one `lain reindex` on upgrade. The
+previous bump (3 → 4) shipped in v0.11.0; see `CHANGELOG.md` for the
+full history.
 
 On a 3-repo Saleor federation (about 91k nodes, 232k edges), cold reindex takes
 about 30 s and peaks near 2.7 GB RSS (measured on current `dev`). The optional parse cache (`parse_cache_mb`

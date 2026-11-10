@@ -4,7 +4,7 @@ keys that aren't declared in the tool's input schema.
 
 Run: python3 scripts/check-tool-doc-args.py
 
-The audit at `DOGFOODING_REPORT.md` (2026-10-04, finding B9) is the
+The audit at `docs/DOGFOODING_REPORT.md` (2026-10-04, finding B9) is the
 motivation: a user reading the docs for `get_coupling_radar` saw
 "Files that co-change with this one" and tried
 `{"path": "src/..."}` (the section's heading suggested `path`); the

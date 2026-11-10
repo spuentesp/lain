@@ -32,7 +32,7 @@ reference, tuning options, and day-to-day operating notes.
 | `lain capabilities` | Print readiness of symbols, the call graph, git history and semantic search. Add `--json` for scripts. |
 | `lain status` | Print repository, index, and MCP readiness. Add `--json` for scripts. |
 | `lain schema` | Write the MCP tool schema used by schema-drift CI. |
-| `lain models` | List declared embedding models, install a model with `lain models install [name]`, or print the default model directory with `lain models path`. Installation verifies pinned SHA-256 hashes; the server never downloads models. |
+| `lain models` | List declared embedding models, install a model with `lain models install [name]`, or print the default model directory with `lain models path`. The installers run `lain models install` for the default model; pinned SHA-256 verification and ONNX loading are deferred to first use so startup is not blocked by them. The server never downloads models itself. |
 | `lain reindex` | Rebuild the federated graph from source after a schema bump. Backs up `federated_graph.bin` first. Add `--workspace <name>` to scope the rebuild. |
 
 Run `lain <command> --help` for flags. The generated MCP tool schema lives at
@@ -236,8 +236,14 @@ Tools that are easy to over-trust — what they actually mean:
 | `find_anchors` | Orchestration hubs (called by many, calling many, with a body) | "Most important." Leaf nodes score 0 by design. Deduped by name — read the path. |
 | `explain_symbol` / `get_call_sites` / `get_blast_radius` by **name** | One node that has that name, with a `⚠` line naming others if not unique | "The only node with that name." Pass a node **id** to pick a different one. |
 | `get_coupling_radar` | Files that change together in git history | A static dependency. Temporal correlation, not lexical. |
-| `semantic_search` | Nearest neighbours by embedding | Exact matches. Use `query_graph` for those. **Conditional**: filtered from `tools/list` entirely when no NLP model is loaded (no model → no advertised tool), reappears the moment `--embedding-model` is set. The binary prefers dropping the tool over advertising one that always says "unavailable". |
+| `semantic_search` | Nearest neighbours by embedding | Exact matches. Use `query_graph` for those. **Conditional on model state**: with no model on disk it is filtered from `tools/list` entirely (no advertised tool, not an "unavailable" answer); with the installer's default model it is advertised immediately and reports `warming_up` through `get_capabilities` until the model finishes loading. |
 | `get_cross_repo_blast_radius` | Callers across the federation (**incoming** `Calls`) | What the symbol depends on — that's `trace_dependency`. `depth` is a string range (`"1..3"`). |
+
+Several of these tools also report an `answer_scope` reason
+(`ambiguous_target`, `dynamic_target`, `stale_or_unindexed`,
+`truncated`) when the answer cannot be complete; `null` means the
+answer covers everything the index knows. The vocabulary and the
+per-tool shapes are in [`quickstart-tools.md`](quickstart-tools.md).
 
 When the graph is behind HEAD, `get_health` says so and "not
 found" answers point at it. Treat `Degraded ⚠` silence as "not in
