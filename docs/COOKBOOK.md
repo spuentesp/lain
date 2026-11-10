@@ -537,15 +537,22 @@ Semantic search is opt-in and lazy: lain runs in stub mode (no
 semantic results) until you point it at a model directory. To
 self-host:
 
-1. Download the model files (the same ONNX bi-encoder lain
-   uses, ~120 MB).
-2. Place them at a path the server can read.
+1. Get the model files (the default is
+   granite-embedding-small-english-r2, Apache-2.0, ~195 MB):
+   `lain models install` installs it, and so do the installers
+   unless `LAIN_SKIP_MODEL_INSTALL=1` is set. `lain models list`
+   shows what is declared in `models.toml`; a user file at
+   `~/.config/lain/models.toml` can add models or change the
+   default.
+2. Place them at a path the server can read (`LAIN_MODEL_DIR`
+   changes the install/lookup location).
 3. Pass `--embedding-model <path>` to `lain server` /
    `lain mcp`, or set `LAIN_EMBEDDING_MODEL=<path>`.
 
-The install script's `--download-model` flag does the first two
-steps for you; `install.sh --download-model --yes` is the
-shortest path.
+`install.sh --download-model --yes` is the shortest path for the
+default model. Verification and ONNX loading are deferred to first
+use: a cold start is never blocked by the model, and
+`semantic_search` advertises as `warming_up` until it is ready.
 
 ### Combining modes
 

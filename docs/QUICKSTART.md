@@ -10,12 +10,21 @@ source ~/.zshrc   # or ~/.bashrc
 lain --version
 ```
 
-Optional — semantic search model (~120 MB):
+Optional — semantic search model (granite-embedding-small-english-r2,
+Apache-2.0, ~195 MB). The installers run `lain models install` for it
+unless `LAIN_SKIP_MODEL_INSTALL=1`; you can also run it yourself:
 
 ```bash
+lain models install          # installs the default model
+# or explicitly, through the installer:
 curl -fsSL https://raw.githubusercontent.com/spuentesp/lain/main/install.sh | \
   bash /dev/stdin --download-model --yes
 ```
+
+Checksum verification and ONNX loading are deferred to first use, so
+the model never blocks startup; `semantic_search` reports
+`warming_up` through `get_capabilities` until it is ready.
+`LAIN_MODEL_DIR` changes where models live.
 
 After installation:
 
@@ -48,6 +57,11 @@ with `lain mcp --no-share`, or set `LAIN_MCP_NO_SHARE=1`. A no-share
 instance is never discovered by other clients (nobody attaches to it
 or hands it workspaces) and refuses the `add_workspaces` handoff; a
 no-share client serves privately on the historical per-client path.
+A client also refuses to *attach* to a shared daemon whose
+`version` / `build_commit` / `index_build_id` differs from its own —
+the error names the socket and both identities, and the recovery is to
+restart the daemon or go `--no-share` (details in
+[`USER_MANUAL.md`](USER_MANUAL.md), "Stale daemons are refused").
 
 Multi-repo notes: `--workspace` takes **paths** (repeat the flag once per
 checkout; or set `LAIN_WORKSPACE=/abs/a,/abs/b`). It is not a

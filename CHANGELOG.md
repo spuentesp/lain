@@ -1370,7 +1370,7 @@ The 13 read-only contract tools live in the new `contracts`
 package — opt in with `LAIN_TOOL_PROFILE=contracts` or
 `load_package("contracts")`. The full design is in
 `docs/superpowers/specs/2026-10-02-contract-coverage-and-protocols-design.md`
-(supersedes the earlier `docs/CONTRACT_FEDERATION.md` design
+(supersedes the earlier `docs/CONTRACT_FEDERATION.md` design (since removed; see Git history)
 and its 15-PR tracker, both removed in this release).
 
 Sensors in each repo find routes, client calls, schema fields,
@@ -1775,7 +1775,7 @@ that touches the joiner, sensors, or fixture must keep
   (the shared `(string)` query does not match Rust's `string_literal`).
 
 - **Intent & observability layer** (PRs 1–6 of
-  `docs/archive/INTENT_AND_OBSERVABILITY_PLAN.md`). Two new MCP tools:
+  `docs/archive/INTENT_AND_OBSERVABILITY_PLAN.md` — since removed from the tree; see Git history). Two new MCP tools:
   `lain_intent` (declare / update per-agent goal + scopes) and
   `list_active_intents` (per-agent activity feed). New
   `POST /hook` endpoint that ingests tool-call observations from
@@ -2238,7 +2238,7 @@ that touches the joiner, sensors, or fixture must keep
   "unavailable" answer. `README.md` flips the mermaid agent label from
   Cursor to Agy/Codex (Cursor has no full hook script in `hooks/`) and
   rewords the `lain ask` row. `docs/hot-reload.md` polls every 2 s (was
-  every second). `docs/wish-list.md` refreshes the `61 / 63 / 64` tool
+  every second). `docs/wish-list.md` (since removed; see Git history) refreshes the `61 / 63 / 64` tool
   counts to match the canonical 67. `index.html`/`theme.css`/etc. were
   not touched; no code changes shipped.
 
