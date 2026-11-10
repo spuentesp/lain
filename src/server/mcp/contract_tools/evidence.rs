@@ -728,7 +728,10 @@ fn snapshot_blob_text(
     let oid = git2::Oid::from_str(commit).map_err(|_| ())?;
     let commit_obj = repo_git.find_commit(oid).map_err(|_| ())?;
     let tree = commit_obj.tree().map_err(|_| ())?;
-    let entry = tree.get_path(std::path::Path::new(path)).map_err(|_| ())?;
+    let normalized_path = path.replace('\\', "/");
+    let entry = tree
+        .get_path(std::path::Path::new(&normalized_path))
+        .map_err(|_| ())?;
     let blob = repo_git.find_blob(entry.id()).map_err(|_| ())?;
     let text = String::from_utf8_lossy(blob.content()).to_string();
     let lines = text.lines().count() as u64;
@@ -784,7 +787,8 @@ fn snapshot_blob_at(
     let oid = git2::Oid::from_str(commit).ok()?;
     let commit_obj = repo_git.find_commit(oid).ok()?;
     let tree = commit_obj.tree().ok()?;
-    let entry = tree.get_path(Path::new(path)).ok()?;
+    let normalized_path = path.replace('\\', "/");
+    let entry = tree.get_path(Path::new(&normalized_path)).ok()?;
     let blob = repo_git.find_blob(entry.id()).ok()?;
     Some(String::from_utf8_lossy(blob.content()).into_owned())
 }
@@ -908,11 +912,11 @@ fn is_binary(bytes: &[u8]) -> bool {
 }
 
 fn is_within_root(file: &Path, root: &Path) -> bool {
-    let file = match file.canonicalize() {
+    let file = match dunce::canonicalize(file) {
         Ok(p) => p,
         Err(_) => return false,
     };
-    let root = match root.canonicalize() {
+    let root = match dunce::canonicalize(root) {
         Ok(p) => p,
         Err(_) => return false,
     };

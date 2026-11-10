@@ -433,6 +433,8 @@ pub fn worktree_add(data_dir: &Path, repo: &str, sha: &str) -> Result<PathBuf, M
     let status = std::process::Command::new("git")
         .current_dir(&mirror)
         .args([
+            "-c",
+            "core.autocrlf=false",
             "worktree",
             "add",
             "--detach",
@@ -545,6 +547,8 @@ pub fn ensure_mirror(data_dir: &Path, repo: &str, source: &str) -> Result<PathBu
     }
     let status = std::process::Command::new("git")
         .args([
+            "-c",
+            "core.autocrlf=false",
             "clone",
             "--mirror",
             source,
