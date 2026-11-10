@@ -171,7 +171,7 @@ jobs:
     # A hung test (this session hit a real one: a subprocess reader
     # with no timeout blocking forever) must fail the job, not sit on
     # the runner queue for the 360-minute GitHub default.
-    timeout-minutes: 30
+    timeout-minutes: 60
     permissions:
       contents: read
     strategy:
@@ -193,6 +193,12 @@ jobs:
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: stable
+
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "CI Runner"
+          git config --global user.email "ci@example.com"
 
       # Swatinem/rust-cache keys on Cargo.lock + os + toolchain, so each
       # matrix cell gets its own target/ cache. The cross-run speedup

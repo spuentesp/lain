@@ -5,6 +5,7 @@ All notable changes to LAIN are documented here. Versions follow
 
 ## Unreleased
 
+
 - Say why an answer may be incomplete. `get_call_sites`, `assess_change`,
   `explain_dispatch` and `get_cross_repo_blast_radius` report an
   `answer_scope` field — `get_blast_radius` and `get_call_chain` state the same
@@ -30,19 +31,30 @@ All notable changes to LAIN are documented here. Versions follow
 - Reuse validated completed federation checkpoints on unchanged startup, retain live watchers after cache hits, and support `LAIN_REQUIRE_STARTUP_CACHE=1` for prepared-cache-only launches. Share checksum-validated static reference artifacts within a bounded disk cache, defer cross-repo projection until local indexing completes, retract obsolete derived references without repeating peer matching, prune unselected repo nodes, reuse identical signature matches, and compile TypeScript ORM queries once per scan. Count service-reference lines incrementally instead of rescanning the file per URL. Graph serialization is unchanged. See `docs/STARTUP_CACHE.md`.
 
 - Index Rust gRPC declarations and lexical context once per file, and reuse compiled detection queries across workspace scans, avoiding repeated whole-tree scope searches on large Rust files while preserving identity evidence and ambiguity checks.
+
 - Bind raw graph and code reads to named snapshots, with errors instead of live fallback when a snapshot or repo is unavailable.
+
 - Add schema-valid structured output to raw analysis tools and `search_code`, preserve their text output, and expose `get_contract` provider handlers as `{repo, file, symbol}`.
+
 - Include source locations and provenance in raw graph results, compose chained traversal paths, and add deterministic cursor pagination.
+
 - Add first-class ORM model/table/column relations and migration evidence for Django, SQLAlchemy, Prisma, Drizzle, TypeORM, and Sequelize. `FEDERATION_GRAPH_VERSION` advances from 4 to 5; run `lain reindex` to back up and rebuild older graphs.
+
 - Add operation-scoped topic/GraphQL payload reads and frontend `Renders`, `Stores`, `Forwards`, and `Discards` relations, keeping dynamic or ambiguous lineage explicitly unresolved.
+
 - Preserve OpenTelemetry resource and scope identity, and report relation, emitter, and snapshot readiness through `get_capabilities`.
+
 - Keep MCP cold-start handshakes non-blocking with an installed default embedding model by deferring checksum verification and ONNX initialization until first use; semantic capability reports warming until the model is ready.
+
 - Use syntax-backed ORM extraction and evidence-based frontend dispositions, fail snapshot source reads explicitly, and sort default-capped query results by name and id before truncation.
+
+- Refuse to bridge to a shared daemon whose `version`, `build_commit`, or `index_build_id` differs from the client's. The error names the socket and both identities, and no competing indexer is started beside the stale daemon; restart the daemon or use `--no-share` / `LAIN_MCP_NO_SHARE=1`. `lain oneshot` checks the shared daemon it would reuse the same way and fails the call instead of answering with stale code; `LAIN_ONESHOT_NO_SHARE=1` is its explicit private fallback.
+
+## [0.14.0] - 2026-10-30
 
 - Allow exact consumer `site` selectors in confirmed mappings, so repeated RPC calls within one symbol can target different services. Existing selectors remain supported.
 - Use the existing LSP pool for bounded live Rust RPC method-definition evidence, including closure receivers; snapshots retain revision-pinned syntax inference and explicit coverage gaps. Advance the contract analyzer cache revision to 8; graph persistence is unchanged.
 - Reuse the document the language server already has open for identity requests: a file is opened once and re-announced only when its content changes, instead of being reopened on every probe. After a language server dies and is restarted, the document is opened again — a change notification alone is dropped by a server that never received the matching open.
-- Refuse to bridge to a shared daemon whose `version`, `build_commit`, or `index_build_id` differs from the client's. The error names the socket and both identities, and no competing indexer is started beside the stale daemon; restart the daemon or use `--no-share` / `LAIN_MCP_NO_SHARE=1`. `lain oneshot` checks the shared daemon it would reuse the same way and fails the call instead of answering with stale code; `LAIN_ONESHOT_NO_SHARE=1` is its explicit private fallback.
 
 ### Added
 
@@ -238,6 +250,7 @@ All notable changes to LAIN are documented here. Versions follow
   build script because its watched paths do not exist.
 - Go message producers resolve package-level environment values on Windows.
   Package scope keys now use forward slashes, matching the cross-package lookup.
+
 
 ## 0.13.0 — 2026-10-27
 
@@ -2278,4 +2291,3 @@ that touches the joiner, sensors, or fixture must keep
 
 Initial public release. Federation `lain server` + single-repo `lain mcp` +
 Command Center SPA.
-
