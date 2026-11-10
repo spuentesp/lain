@@ -93,6 +93,16 @@
 # something else in the environment to override. Phase 2 additionally builds
 # every integration-test binary (a few GB even without debuginfo).
 #
+# Build correctness: `CARGO_INCREMENTAL=0` (also overridable). Incremental
+# rebuilds of the MUTATED tree poison rustc's const-eval of `tracing`
+# callsite metadata (rustc 1.98.1: a valid mutant like `delete !` on
+# `if !http_calls.is_empty()` panics `layout_of usize` in
+# `__tracing_stringify`, exit 101). cargo-mutants classifies the ICE as
+# UNVIABLE — a mutant that never got judged, which on a tracing-heavy diff
+# silently turns a broken build into a green gate. With the cache off each
+# mutant compiles and is judged for real; the cost is one full crate rebuild
+# per mutant (~90s instead of ~10s).
+#
 # Host quirk (this is why the header documents TMPDIR instead of hardcoding
 # one): on the current dev machine `/tmp` is quota-exhausted, and a TMPDIR
 # inside the repo breaks 9 git walk-up tests. Local runs therefore need
@@ -215,6 +225,10 @@ fi
 # Keep each scratch build small; caller may override (see header).
 export CARGO_PROFILE_DEV_DEBUG="${CARGO_PROFILE_DEV_DEBUG:-0}"
 export CARGO_PROFILE_TEST_DEBUG="${CARGO_PROFILE_TEST_DEBUG:-0}"
+# Judge mutants honestly: incremental rebuilds of the mutated tree ICE
+# rustc's tracing-callsite const-eval and the ICE lands in the UNVIABLE
+# bucket (see header, "Build correctness").
+export CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}"
 
 # Escape regex metacharacters so a mutant name can be matched literally.
 re_escape() {
