@@ -679,7 +679,8 @@ fn wait_with_timeout(child: &mut std::process::Child) -> Result<(Vec<u8>, Vec<u8
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
+#[cfg(unix)]
 mod tests {
     use super::*;
 

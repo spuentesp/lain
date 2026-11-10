@@ -708,7 +708,8 @@ mod positional_tests {
 /// The start-race branch: the detached start can hand back a
 /// connection to a daemon that ALREADY owns the socket — an older
 /// build. It must be refused exactly like the existing-socket path.
-#[cfg(all(test, unix))]
+#[cfg(test)]
+#[cfg(unix)]
 mod start_race_tests {
     use super::*;
     use std::io::{BufRead, BufReader, Write};
@@ -728,18 +729,28 @@ mod start_race_tests {
 
     impl StaleDaemon {
         fn start(socket: &Path) -> Self {
+            Self::start_reporting(socket, "stale".into(), "stale".into())
+        }
+
+        /// The same fake daemon reporting a chosen identity: the start
+        /// race can land on a daemon of OUR build, and only the identity
+        /// probe distinguishes "use it" from "refuse it".
+        fn start_reporting(socket: &Path, build_commit: String, index_build_id: String) -> Self {
             let listener = UnixListener::bind(socket).unwrap();
             listener.set_nonblocking(true).unwrap();
             let stop = Arc::new(AtomicBool::new(false));
             let methods = Arc::new(Mutex::new(Vec::new()));
+            let identity = Arc::new((build_commit, index_build_id));
             let handle = {
                 let stop = Arc::clone(&stop);
                 let methods = Arc::clone(&methods);
+                let identity = Arc::clone(&identity);
                 std::thread::spawn(move || {
                     while !stop.load(Ordering::SeqCst) {
                         match listener.accept() {
                             Ok((stream, _)) => {
                                 let methods = Arc::clone(&methods);
+                                let identity = Arc::clone(&identity);
                                 std::thread::spawn(move || {
                                     let mut writer = stream.try_clone().unwrap();
                                     let mut reader = BufReader::new(stream);
@@ -765,8 +776,8 @@ mod start_race_tests {
                                             "lain/daemon_info" => json!({
                                                 "pid": 999,
                                                 "version": crate::server::build_info::VERSION,
-                                                "build_commit": "stale",
-                                                "index_build_id": "stale",
+                                                "build_commit": identity.0.clone(),
+                                                "index_build_id": identity.1.clone(),
                                                 "workspaces": [],
                                                 "open_connections": 0,
                                                 "shared": true,
@@ -864,6 +875,37 @@ mod start_race_tests {
             daemon.methods(),
             vec!["lain/daemon_info".to_string()],
             "the stale daemon must only be probed for its identity, never called"
+        );
+    }
+
+    /// The mirror of the refusal: a start race that lands on a daemon
+    /// of OUR build must be USED. Only the post-start identity check
+    /// distinguishes "use it" from "refuse it", so flipping that check
+    /// must be observable here — not just the stale-daemon error path.
+    #[test]
+    fn a_matching_start_race_winner_is_used() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("lain-mcp-race.sock");
+        let daemon = StaleDaemon::start_reporting(
+            &socket,
+            crate::server::build_info::GIT_SHA.into(),
+            crate::server::build_info::INDEX_BUILD_ID.into(),
+        );
+        let starter: DetachedStarter =
+            |_workspaces, socket_path, _wait| UnixStream::connect(socket_path).ok();
+        let session =
+            match start_shared_daemon_with(starter, dir.path(), &socket, Duration::from_secs(1)) {
+                Ok(session) => session,
+                Err(e) => panic!("a matching race winner must be used, not refused: {e}"),
+            };
+        assert!(
+            session.is_some(),
+            "a matching race winner must yield a session, not fall back to private"
+        );
+        assert_eq!(
+            daemon.methods(),
+            vec!["lain/daemon_info".to_string()],
+            "the matching daemon is probed for its identity and then used"
         );
     }
 }
