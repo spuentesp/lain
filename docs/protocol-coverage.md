@@ -12,7 +12,7 @@ over `ContractKey` makes a new kind fail to compile until its row is
 declared here and there.
 
 The audit was taken 2026-10-18 against source
-(`docs/superpowers/plans/2026-10-18-topic-hub-and-protocol-coverage.md`,
+(`docs/archive/2026-10-18-topic-hub-and-protocol-coverage.md`,
 "Protocol coverage audit") and updated by the work that followed:
 topic hubs became canonical (Task 1), the dashboard view learned to
 show them (Task 2), and `check_binding` / `bindings` grew from
