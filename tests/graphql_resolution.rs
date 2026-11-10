@@ -880,7 +880,7 @@ const query = gql`
 // ─── Task 6 — Fragment spreads, inline fragments, SDL implements/@key
 //
 // These cases are the parser defects called out in
-// `docs/superpowers/plans/2026-10-07-remaining-work.md` Task 6:
+// `docs/archive/2026-10-07-remaining-work.md` Task 6:
 // fragments must not become selected fields, and SDL with
 // `implements` / `@key` directives must still emit Schema/Field
 // nodes. Each test below pins one shape and is expected to be

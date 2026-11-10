@@ -82,7 +82,7 @@ This is the AGENTS.md step-0 evidence, written down.
   file was written; doc-tests phase clean).
 - **Parallax-required expansions verified end-to-end** on the real
   3-repo Saleor fixture (acceptance §7 of
-  `docs/superpowers/plans/2026-10-14-parallax-requirements.md`):
+  `docs/archive/2026-10-14-parallax-requirements.md`):
   0 `graphql_no_op` items for the storefront; `graphql:query:product`
   bound to `saleor-api` with `bound_consumers: 22`; 0 of 499 GraphQL keys
   with >1 provider; 825 GraphQL consumers resolved in total. The

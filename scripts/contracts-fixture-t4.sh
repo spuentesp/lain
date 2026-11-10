@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds the Task 2 four-repo non-HTTP fixture
-# (docs/superpowers/plans/2026-10-07-contract-soundness.md):
+# (docs/archive/2026-10-07-contract-soundness.md):
 #
 #   1. runs `scripts/contracts-fixture.sh <dir>` — the T1 fixture is
 #      produced byte-for-byte unchanged, so every T1 scenario tag,
