@@ -1196,7 +1196,7 @@ No product code changes. Test, CI and documentation only.
   busy indexing or hung. The new default matches
   `LAIN_REINDEX_TIMEOUT`. Override with
   `LAIN_ONESHOT_TIMEOUT=<seconds>` for tighter pipelines. Found by
-  dogfooding Lain on Lain (`DOGFOODING_REPORT.md`, 2026-10-04,
+  dogfooding Lain on Lain (`docs/DOGFOODING_REPORT.md`, 2026-10-04,
   finding B6).
 
 - **`get_coupling_radar` doc clarified** — the section heading
@@ -1207,7 +1207,7 @@ No product code changes. Test, CI and documentation only.
   `scripts/check-tool-doc-args.py` validates every JSON example in
   `docs/quickstart-tools.md` against its tool's input schema, so
   this class of drift can't recur without failing the build. Found
-  by dogfooding Lain on Lain (`DOGFOODING_REPORT.md`, 2026-10-04,
+  by dogfooding Lain on Lain (`docs/DOGFOODING_REPORT.md`, 2026-10-04,
   finding B9).
 
 - **Quickstart now warns about the `head -N` pipe footgun.** A user
@@ -1217,7 +1217,7 @@ No product code changes. Test, CI and documentation only.
   symptom is "no tools/call response from `lain mcp`" plus a
   corrupt on-disk graph; the fix is to pipe to a file or to a tool
   that reads to EOF. The new Quickstart row links the reader to
-  `DOGFOODING_REPORT.md` (B7) for the full trace.
+  `docs/DOGFOODING_REPORT.md` (B7) for the full trace.
 
 - **`get_audit_log` is now advertised by default.** The audit log
   (the durable counterpart to the in-memory presence state) used to
@@ -1228,7 +1228,7 @@ No product code changes. Test, CI and documentation only.
   surface includes it. The 6 other `social` tools
   (`who_am_i`, `list_active_agents`, `list_subagents`,
   `unregister_agent`, `detect_overlap`) stay opt-in. Found by
-  dogfooding Lain on Lain (`DOGFOODING_REPORT.md`, 2026-10-04,
+  dogfooding Lain on Lain (`docs/DOGFOODING_REPORT.md`, 2026-10-04,
   finding B10).
 
 - **`get_health` now reports per-file call-graph coverage.** A new
@@ -1256,7 +1256,7 @@ No product code changes. Test, CI and documentation only.
   same test there. A symlink path *outside* the tree is now
   treated as a published install even when the symlink target
   happens to live in the tree. Found by dogfooding Lain on Lain
-  (`DOGFOODING_REPORT.md`, 2026-10-04, finding B2). Three new
+  (`docs/DOGFOODING_REPORT.md`, 2026-10-04, finding B2). Three new
   tests cover the symlink cases.
 
 - **`find_anchors` now excludes test and script paths by
@@ -1343,7 +1343,7 @@ No product code changes. Test, CI and documentation only.
   `EdgeType::all()` so every variant is reported. A banner line
   is also emitted when `Calls == 0` to make the silent-absence
   mode loud. Surfaced by dogfooding Lain on Lain
-  (`DOGFOODING_REPORT.md`, 2026-10-04, finding B11).
+  (`docs/DOGFOODING_REPORT.md`, 2026-10-04, finding B11).
 
 
 LAIN 0.9 introduces cross-repo contract federation. For every
