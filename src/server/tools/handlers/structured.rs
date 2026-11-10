@@ -230,21 +230,6 @@ pub fn assess_change(ctx: &ToolContext, args: &Map<String, Value>) -> Result<Val
     }))
 }
 
-pub fn explain_dispatch(ctx: &ToolContext, args: &Map<String, Value>) -> Result<Value, LainError> {
-    let symbol = required_str_arg(args, "symbol")?;
-    let target = resolve_node(&ctx.graph, &ctx.overlay, &symbol)?;
-    let empty_store;
-    let store = if ctx.snapshot.is_some() {
-        empty_store = crate::server::runtime_trace::RuntimeTraceStore::new(Default::default());
-        &empty_store
-    } else {
-        crate::server::runtime_trace::RuntimeTraceStore::global()
-    };
-    let report =
-        super::explain_dispatch::build_with_store(&ctx.graph, &ctx.overlay, &target, store);
-    serde_json::to_value(report).map_err(LainError::Json)
-}
-
 pub async fn search_code_output(
     ctx: &ToolContext,
     args: &Map<String, Value>,

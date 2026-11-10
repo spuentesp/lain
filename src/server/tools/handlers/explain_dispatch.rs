@@ -174,16 +174,11 @@ pub async fn explain_dispatch_report_scoped(
     Ok(ExplainDispatchReport { text: out, report })
 }
 
-/// Pure builder. Public so tests can call it without going through the
-/// JSON path. The `explain_dispatch` thin wrapper passes the global
-/// runtime store; tests should call `build_with_store` with a private
-/// `RuntimeTraceStore` so parallel runs don't share state via the
-/// process-global `OnceLock`.
-pub fn build(
-    graph: &GraphDatabase,
-    overlay: &VolatileOverlay,
-    target: &GraphNode,
-) -> ExplainDispatch {
+/// Tests-only seam (module-private): it skips the report layer's
+/// ambiguity/staleness re-derivation, so it must not become anyone's
+/// entry point. Production paths go through
+/// [`explain_dispatch_report_scoped`].
+fn build(graph: &GraphDatabase, overlay: &VolatileOverlay, target: &GraphNode) -> ExplainDispatch {
     build_with_store(graph, overlay, target, RuntimeTraceStore::global())
 }
 

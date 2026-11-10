@@ -226,9 +226,14 @@ pub async fn get_call_chain(
         // end's file moved on after its scan, and neither name matched
         // several definitions. Otherwise the path may exist and the
         // static graph cannot see it.
+        // The from end only cares about dispatch hops out of its own
+        // file — a dynamically-reached `from` means its *callers* are
+        // invisible, which does not bear on paths from it. The to end
+        // keeps both forms: a dynamically-reached `to` may be reachable
+        // through a hop the static graph cannot follow.
         let dynamic = starts
             .iter()
-            .any(|n| crate::server::tools::answer_scope::dispatches_dynamically(graph, n))
+            .any(|n| crate::server::tools::answer_scope::file_dispatches_dynamically(graph, n))
             || ends.iter().any(|id| {
                 graph.get_node(id).ok().flatten().is_some_and(|n| {
                     crate::server::tools::answer_scope::dispatches_dynamically(graph, &n)

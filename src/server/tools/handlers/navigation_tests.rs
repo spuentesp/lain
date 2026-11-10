@@ -5,7 +5,7 @@
 
 use crate::graph::GraphDatabase;
 use crate::overlay::VolatileOverlay;
-use crate::schema::{GraphNode, NodeType, RepoNamespace};
+use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace};
 use crate::server::tools::handlers::navigation::get_call_chain;
 
 fn scanned_node(name: &str, path: &str, ns: &RepoNamespace) -> GraphNode {
@@ -169,5 +169,90 @@ async fn a_doubly_defined_target_is_searched_exhaustively() {
     assert!(
         !out.contains("ambiguous_target"),
         "an exhaustive negative must not claim it covers one definition, got:\n{out}"
+    );
+}
+
+/// A heuristic edge pointing at `from` says callers of `from` are
+/// invisible — that bears on "who calls from", not on "does a path
+/// from → to exist". Only the dispatch hop out of `from`'s own file can
+/// hide a path, so a dynamically-reached start must not add a caveat to
+/// a path question.
+#[tokio::test]
+async fn a_dynamically_reached_start_does_not_qualify_the_path_answer() {
+    let dir = std::env::temp_dir().join("lain_test_chain_dyn_start");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/a.rs"), "fn a() {}\n").unwrap();
+    std::fs::write(dir.join("src/b.rs"), "fn b() {}\n").unwrap();
+    let graph = GraphDatabase::new(&dir.join("graph.bin")).unwrap();
+    let overlay = VolatileOverlay::new();
+    let ns = RepoNamespace::for_test();
+    for (name, path) in [("a", "src/a.rs"), ("b", "src/b.rs")] {
+        graph.upsert_node(scanned_node(name, path, &ns)).unwrap();
+    }
+    // `a` is reached through a dispatch: its callers are invisible.
+    let hub = scanned_node("Hub:dispatch", "src/hub.rs", &ns);
+    graph.upsert_node(hub.clone()).unwrap();
+    graph
+        .insert_edges_batch(&[GraphEdge::new(
+            EdgeType::DynamicDispatch,
+            hub.id.clone(),
+            graph
+                .find_all_nodes_by_name("a")
+                .first()
+                .expect("node a")
+                .id
+                .clone(),
+        )])
+        .unwrap();
+    let out = get_call_chain(&graph, &overlay, &dir, None, "a", "b", None)
+        .await
+        .unwrap();
+    assert!(
+        out.contains("No call path found"),
+        "expected the no-path answer, got:\n{out}"
+    );
+    assert!(
+        !out.contains("dynamic_target"),
+        "an invisible caller of the start is not an invisible path, got:\n{out}"
+    );
+}
+
+/// The form that does bear on the question at the `to` end: `to` is
+/// reached through a dispatch, so a path may exist through a hop the
+/// static graph cannot follow and "no path" is not conclusive.
+#[tokio::test]
+async fn a_dynamically_reached_target_qualifies_the_path_answer() {
+    let dir = std::env::temp_dir().join("lain_test_chain_dyn_target");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/a.rs"), "fn a() {}\n").unwrap();
+    std::fs::write(dir.join("src/b.rs"), "fn b() {}\n").unwrap();
+    let graph = GraphDatabase::new(&dir.join("graph.bin")).unwrap();
+    let overlay = VolatileOverlay::new();
+    let ns = RepoNamespace::for_test();
+    for (name, path) in [("a", "src/a.rs"), ("b", "src/b.rs")] {
+        graph.upsert_node(scanned_node(name, path, &ns)).unwrap();
+    }
+    let hub = scanned_node("Hub:dispatch", "src/hub.rs", &ns);
+    graph.upsert_node(hub.clone()).unwrap();
+    graph
+        .insert_edges_batch(&[GraphEdge::new(
+            EdgeType::DynamicDispatch,
+            hub.id.clone(),
+            graph
+                .find_all_nodes_by_name("b")
+                .first()
+                .expect("node b")
+                .id
+                .clone(),
+        )])
+        .unwrap();
+    let out = get_call_chain(&graph, &overlay, &dir, None, "a", "b", None)
+        .await
+        .unwrap();
+    assert!(
+        out.contains("dynamic_target"),
+        "a dynamically-reached target makes no-path provisional, got:\n{out}"
     );
 }

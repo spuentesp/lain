@@ -158,6 +158,22 @@ pub fn dispatches_dynamically(graph: &GraphDatabase, node: &GraphNode) -> bool {
             return true;
         }
     }
+    file_dispatches_dynamically(graph, node)
+}
+
+/// The file half of [`dispatches_dynamically`]: the symbol's file
+/// carries a dispatch site. For a question about paths *from* the
+/// symbol this is the half that bears on it — the dispatch hop out of
+/// the file is invisible — while the incoming half (the symbol is
+/// reached dynamically) only says its callers are invisible, which
+/// says nothing about where the symbol's own calls go.
+pub fn file_dispatches_dynamically(graph: &GraphDatabase, node: &GraphNode) -> bool {
+    let is_heuristic = |e: &crate::schema::GraphEdge| {
+        matches!(
+            e.edge_type,
+            EdgeType::DynamicDispatch | EdgeType::BusTopic | EdgeType::RouteMatches
+        )
+    };
     // The unresolved-receiver form: the symbol's file dispatches
     // dynamically, so the graph cannot see what that dispatch reaches.
     match graph.get_file_node(&node.path) {
