@@ -115,16 +115,23 @@ pub(crate) fn source_key(
     }
     let mut hash = blake3::Hasher::new();
     hash.update(crate::server::build_info::INDEX_BUILD_ID.as_bytes());
+    // The git sensor canonicalizes its workspace, so the paths it hands back
+    // are canonical while `root` is whatever the config named. Stripping the
+    // prefix from a non-canonical `root` fails wherever the two spell the
+    // same directory differently — macOS `/var` vs `/private/var`, a Windows
+    // short name, a symlinked checkout — and every tracked file then reads as
+    // "outside repository". Canonicalize the root so both sides agree.
+    let canonical_root = dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     let mut files = git.try_get_all_tracked_files()?;
     files.sort();
     for file in files {
         let abs = if file.is_absolute() {
             file
         } else {
-            root.join(file)
+            canonical_root.join(file)
         };
         let rel = abs
-            .strip_prefix(root)
+            .strip_prefix(&canonical_root)
             .map_err(|_| LainError::Other("tracked path outside repository".into()))?;
         hash.update(&(rel.as_os_str().as_encoded_bytes().len() as u64).to_le_bytes());
         hash.update(rel.as_os_str().as_encoded_bytes());
@@ -526,5 +533,48 @@ mod tests {
             .map(|entry| entry.metadata().unwrap().len())
             .sum();
         assert!(bytes <= REFERENCE_BUDGET);
+    }
+
+    /// The git sensor canonicalizes its workspace; `root` comes from the
+    /// config and is not canonical. When the two spell the same directory
+    /// differently — macOS `/var` vs `/private/var`, a symlinked checkout,
+    /// a Windows short name — every tracked file used to read as "tracked
+    /// path outside repository", so the startup cache could never be
+    /// written. This reproduces that through a symlinked root.
+    #[test]
+    fn source_key_accepts_a_root_that_reaches_the_repo_through_a_symlink() {
+        let real = tempfile::tempdir().unwrap();
+        let repo = real.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(repo.join("main.rs"), "fn main() {}\n").unwrap();
+
+        let git_cmd = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?} failed");
+        };
+        git_cmd(&["init", "-q"]);
+        git_cmd(&["config", "user.email", "t@example.com"]);
+        git_cmd(&["config", "user.name", "t"]);
+        git_cmd(&["add", "main.rs"]);
+        git_cmd(&["commit", "-q", "-m", "init"]);
+
+        // A symlinked parent, the way macOS's `/var` reaches `/private/var`.
+        let link_parent = real.path().join("link");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(real.path(), &link_parent).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(real.path(), &link_parent).unwrap();
+
+        let git =
+            crate::git::AnyGitSensor::new(&repo, crate::git::GitSensorMode::InProcess).unwrap();
+        let via_link = link_parent.join("repo");
+
+        // The sensor reports canonical paths; `root` is the symlinked one.
+        let key = source_key(&via_link, &git).unwrap();
+        assert!(key.is_some(), "a clean repo must produce a source key");
     }
 }

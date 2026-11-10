@@ -69,6 +69,24 @@ what the release actually builds. The same correction applies to
 expecting the macOS tarball) and the `docs/DISTRIBUTION.md` post-tag
 checklist.
 
+### 4. The startup cache could never be written on macOS or Windows
+
+The release PR is the first to run `tests/federation_startup_cache.rs`
+on macOS and Windows: `dev`'s fast lane does not run the cross-platform
+matrix, so the startup-cache work landed in `e7503bcb` without ever
+running there. All 13 tests in that file failed on both platforms with
+`Other("tracked path outside repository")`.
+
+Root cause: `GitSensor` canonicalizes its workspace, so the tracked
+paths it reports are canonical, but the repository root came from
+`repos.yaml` unchanged. `source_key` then stripped the prefix of the
+root from each tracked path, and that fails wherever the two spell the
+same directory differently — macOS `/var` vs `/private/var`, a symlinked
+checkout, a Windows short name. The fix canonicalizes the root before
+making the paths relative to it. `source_key_accepts_a_root_that_reaches_the_repo_through_a_symlink`
+reproduces the failure through a symlinked root and fails without the
+fix.
+
 ## Verification (on the exact release tree)
 
 - `cargo test --workspace --no-fail-fast`: see the PR comment for the

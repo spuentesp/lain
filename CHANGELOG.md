@@ -7,6 +7,14 @@ All notable changes to LAIN are documented here. Versions follow
 
 ## [0.15.0] - 2026-11-10
 
+- **Fix the startup cache on a repository reached through a symlink.** The
+  git sensor canonicalizes its workspace, so the tracked paths it reports
+  are canonical, but the repository root came from the configuration
+  unchanged. Where the two spelled the same directory differently — macOS
+  `/var` vs `/private/var`, a symlinked checkout, a Windows short name —
+  every tracked file read as "tracked path outside repository" and the
+  startup cache could never be written. The root is now canonicalized
+  before the tracked paths are made relative to it.
 - **Distribution: publish only what the release actually builds.** The
   release workflow builds Linux and Windows; the macOS ARM64 target was
   dropped in v0.14.0 (an unresolvable ONNX Runtime linker error) and has
