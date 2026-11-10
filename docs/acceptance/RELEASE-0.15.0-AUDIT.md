@@ -73,11 +73,15 @@ checklist.
 
 - `cargo test --workspace --no-fail-fast`: see the PR comment for the
   count on the release commit.
-- `scripts/demo.sh`: see the PR comment.
+- `scripts/demo.sh`: 171 passed, 2 skipped, 0 failed (exit 0). The
+  release PR's `Capability suite (demo.sh)` job reports the same.
 - `scripts/check-release-version.py --tag v0.15.0`: OK.
 - `scripts/test_fill_formula_sha256.py`: 6 passed.
 - `python3 scripts/fill-formula-sha256.py --tag v0.15.0 --check`: fails
   with the placeholder hashes, as it must before the post-publish fill.
+- `cargo build --release`: clean, and the binary reports `lain 0.15.0`.
+- `lain schema dump` matches `docs/tool-schema.json` byte for byte
+  (the release PR's schema-drift job is green).
 
 ## Process
 
