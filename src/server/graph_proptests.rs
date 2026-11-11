@@ -65,11 +65,33 @@ fn build_graph_at(
     g
 }
 
-/// Build a graph at a unique temp path (used by tests that don't care
-/// about persistence).
-fn build_graph(nodes: &[GraphNode], edges: &[(usize, usize)]) -> GraphDatabase {
-    let tmp = std::env::temp_dir().join(format!("lain_proptest_{}", uuid::Uuid::new_v4().simple()));
-    build_graph_at(nodes, edges, &tmp)
+/// Owns the temp directory a throwaway test graph was written to, so the
+/// graph file and its `.wal` are removed when the case ends. Derefs to
+/// the graph, so call sites read exactly as before.
+///
+/// Without this every proptest case leaked two files into
+/// `std::env::temp_dir()` — 256 cases × several tests per run, which is
+/// how a single test machine accumulated 93k `lain_proptest_*.wal` files
+/// and exhausted its `/tmp` quota.
+struct TestGraph {
+    db: GraphDatabase,
+    _dir: tempfile::TempDir,
+}
+
+impl std::ops::Deref for TestGraph {
+    type Target = GraphDatabase;
+    fn deref(&self) -> &GraphDatabase {
+        &self.db
+    }
+}
+
+/// Build a graph in a temp directory that is deleted when the returned
+/// guard drops (used by tests that don't care about persistence).
+fn build_graph(nodes: &[GraphNode], edges: &[(usize, usize)]) -> TestGraph {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("graph");
+    let db = build_graph_at(nodes, edges, &path);
+    TestGraph { db, _dir: dir }
 }
 
 /// Strategy: a vector of `(calls_in, calls_out, line_end)` tuples.
