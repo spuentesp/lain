@@ -574,7 +574,19 @@ mod tests {
         let via_link = link_parent.join("repo");
 
         // The sensor reports canonical paths; `root` is the symlinked one.
-        let key = source_key(&via_link, &git).unwrap();
-        assert!(key.is_some(), "a clean repo must produce a source key");
+        // The property `source_key` exists for is that the key is the same
+        // either way — that is what lets identical checkouts share a cache
+        // entry. Asserting only `is_some` would accept a key that is wrong
+        // or empty, which the prefix-stripping bug produced silently.
+        let via_link_key = source_key(&via_link, &git).unwrap();
+        let canonical_key = source_key(&repo, &git).unwrap();
+        assert!(
+            via_link_key.is_some(),
+            "a clean repo must produce a source key"
+        );
+        assert_eq!(
+            via_link_key, canonical_key,
+            "the source key must not depend on whether the root is reached through a symlink"
+        );
     }
 }
