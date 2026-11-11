@@ -25,14 +25,14 @@ class Lain < Formula
   on_linux do
     on_intel do
       url "https://github.com/spuentesp/lain/releases/download/v0.15.0/lain-0.15.0-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+      sha256 "e5f1da56cdeb44e2d27af7d30690b341abdcb649d6485c099daa599b1ad00b36"
     end
   end
 
   on_windows do
     on_intel do
       url "https://github.com/spuentesp/lain/releases/download/v0.15.0/lain-0.15.0-x86_64-pc-windows-msvc.tar.gz"
-      sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+      sha256 "61ff6b993c96108e2a3e2140ff90b93f524ed1ff648ff51ea9459cfac9d026ed"
     end
   end
 
