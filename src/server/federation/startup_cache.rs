@@ -588,5 +588,21 @@ mod tests {
             via_link_key, canonical_key,
             "the source key must not depend on whether the root is reached through a symlink"
         );
+
+        // The key must also mean something: a constant (or empty) key is
+        // self-consistent across the symlink and so passes the equality
+        // above, but it would make two different checkouts collide on one
+        // cache entry. It must be non-empty and change with the content.
+        let key = via_link_key.clone().expect("source key");
+        assert!(!key.is_empty(), "a source key must not be empty");
+
+        std::fs::write(repo.join("extra.rs"), "fn extra() {}\n").unwrap();
+        git_cmd(&["add", "extra.rs"]);
+        git_cmd(&["commit", "-q", "-m", "different content"]);
+        let changed_key = source_key(&repo, &git).unwrap().expect("source key");
+        assert_ne!(
+            key, changed_key,
+            "the source key must change when the tracked files change"
+        );
     }
 }
