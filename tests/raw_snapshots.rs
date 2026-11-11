@@ -8,12 +8,15 @@ use std::path::Path;
 use std::process::Command;
 
 struct RawSnapshotFixture {
-    _tmp: tempfile::TempDir,
+    // Field order is drop order: `_tmp` must go last so the temp
+    // directory outlives the server and the mirror, or the cleanup
+    // deletes the tree the server still has open.
     root: std::path::PathBuf,
     host: String,
     _server: Option<common::ServerGuard>,
     repos_yaml: std::path::PathBuf,
     snapshot: String,
+    _tmp: tempfile::TempDir,
 }
 
 impl RawSnapshotFixture {
@@ -299,14 +302,45 @@ async fn arbitrary_snapshot_values_never_fall_back_to_live_data() {
 async fn unreadable_snapshot_source_is_an_error_in_structured_and_legacy_tools() {
     let mut fixture = RawSnapshotFixture::new().await;
     let mirror = fixture.root.join("data/mirrors/orders.git");
-    let parked = fixture.root.join("data/mirrors/orders.git.parked");
-    // The running server holds the mirror's worktree registration open.
-    // Windows refuses to rename a directory with an open handle, so the
-    // server is stopped first; the mirror is then unreachable and the
-    // snapshot reads must report the failure rather than fall back to
-    // live data.
+    // Park the object store, not the mirror root: the root holds git's
+    // worktree registration (`worktrees/`), which the server's
+    // `worktree_add` created, and Windows refuses to rename a directory
+    // tree that anything still has a handle in. Without `objects` the
+    // source is just as unreadable — `git2` opens the bare repo but
+    // fails to find the commit — and the tree being renamed carries no
+    // registration of its own.
+    let objects = mirror.join("objects");
+    let parked = mirror.join("objects.parked");
+    // Windows releases a killed process's directory handles
+    // asynchronously, and scanners hold freshly written git objects for
+    // a moment after creation, so a single rename races those and
+    // reports "The process cannot access the file because it is being
+    // used by another process" on a healthy build. Retry until the
+    // handles are actually gone.
     fixture.stop_server();
-    std::fs::rename(&mirror, &parked).unwrap();
+    {
+        let mut last = None;
+        let mut renamed = false;
+        for _ in 0..40 {
+            match std::fs::rename(&objects, &parked) {
+                Ok(()) => {
+                    renamed = true;
+                    break;
+                }
+                Err(e) => {
+                    last = Some(e);
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                }
+            }
+        }
+        if !renamed {
+            panic!(
+                "could not park the snapshot object store {}: {:?}",
+                objects.display(),
+                last
+            );
+        }
+    }
     fixture.restart_server().await;
 
     for (tool, args) in [
