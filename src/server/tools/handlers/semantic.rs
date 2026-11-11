@@ -33,7 +33,7 @@ use crate::server::coordination::CoordinationProxy;
 use crate::server::tools::utils::{required_str_arg, resolve_node_ambiguous, str_arg, usize_arg};
 use crate::tuning::TuningConfig;
 use parking_lot::Mutex;
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -45,14 +45,13 @@ use std::sync::Arc;
 /// straight into the next call. Multiple matches produce a
 /// numbered list and explicitly tell the agent to disambiguate
 /// by `path`.
-pub fn find_symbol(
+pub fn find_symbol_nodes(
     graph: &GraphDatabase,
     overlay: &VolatileOverlay,
     args: &Map<String, Value>,
-) -> Result<String, LainError> {
-    let _ = overlay; // kept for API parity with the other M6 handlers
+) -> Result<Vec<crate::schema::GraphNode>, LainError> {
+    let _ = overlay;
     let name = required_str_arg(args, "name")?;
-    // An empty name matched every nameless node (each File).
     if name.trim().is_empty() {
         return Err(LainError::NotFound(
             "find_symbol needs a non-empty `name`".to_string(),
@@ -71,9 +70,6 @@ pub fn find_symbol(
         hits.retain(|n| n.path.contains(hint));
     }
     if let Some(target) = type_filter {
-        // `method` has no node type of its own in most graphs: a method is
-        // a function defined in a type (`container`). `module` also covers
-        // the Namespace and Package nodes directories and packages get.
         hits.retain(|n| match target {
             NodeType::Method => {
                 n.node_type == NodeType::Method
@@ -86,8 +82,6 @@ pub fn find_symbol(
             _ => n.node_type == target,
         });
     }
-    // Deterministic order: anchor score desc, then path asc, then
-    // name asc as a tiebreaker for the rare dedup tie.
     hits.sort_by(|a, b| {
         b.anchor_score
             .partial_cmp(&a.anchor_score)
@@ -95,13 +89,38 @@ pub fn find_symbol(
             .then_with(|| a.path.cmp(&b.path))
             .then_with(|| a.name.cmp(&b.name))
     });
+    Ok(hits)
+}
 
+pub struct FindSymbolReport {
+    pub text: String,
+    pub hits: Vec<crate::schema::GraphNode>,
+}
+
+pub fn find_symbol(
+    graph: &GraphDatabase,
+    overlay: &VolatileOverlay,
+    args: &Map<String, Value>,
+) -> Result<String, LainError> {
+    find_symbol_report(graph, overlay, args).map(|report| report.text)
+}
+
+pub fn find_symbol_report(
+    graph: &GraphDatabase,
+    overlay: &VolatileOverlay,
+    args: &Map<String, Value>,
+) -> Result<FindSymbolReport, LainError> {
+    let name = required_str_arg(args, "name")?;
+    let hits = find_symbol_nodes(graph, overlay, args)?;
     if hits.is_empty() {
-        return Ok(format!(
-            "## find_symbol: {name}\n\nNo matches.\n\n\
-             Try a broader name, drop `path_hint`, or use `query_graph` \
-             with a `find` op for a structural search."
-        ));
+        return Ok(FindSymbolReport {
+            text: format!(
+                "## find_symbol: {name}\n\nNo matches.\n\n\
+                 Try a broader name, drop `path_hint`, or use `query_graph` \
+                 with a `find` op for a structural search."
+            ),
+            hits,
+        });
     }
 
     let mut out = format!("## find_symbol: {name}\n\n");
@@ -138,7 +157,7 @@ pub fn find_symbol(
             anchor
         ));
     }
-    Ok(out)
+    Ok(FindSymbolReport { text: out, hits })
 }
 
 /// M6 tool 2 of 5: `get_context` ("Explain X")
@@ -154,58 +173,119 @@ pub async fn get_context(
     occupancy: &CoordinationProxy,
     args: &Map<String, Value>,
 ) -> Result<String, LainError> {
+    get_context_scoped(workspace, graph, overlay, occupancy, args, None).await
+}
+
+pub struct GetContextReport {
+    pub text: String,
+    pub structured: Value,
+}
+
+pub async fn get_context_scoped(
+    workspace: &std::path::Path,
+    graph: &GraphDatabase,
+    overlay: &VolatileOverlay,
+    occupancy: &CoordinationProxy,
+    args: &Map<String, Value>,
+    snapshot: Option<(&crate::server::tools::registry::SnapshotToolContext, &str)>,
+) -> Result<String, LainError> {
+    get_context_report_scoped(workspace, graph, overlay, occupancy, args, snapshot)
+        .await
+        .map(|report| report.text)
+}
+
+pub async fn get_context_report_scoped(
+    workspace: &std::path::Path,
+    graph: &GraphDatabase,
+    overlay: &VolatileOverlay,
+    occupancy: &CoordinationProxy,
+    args: &Map<String, Value>,
+    snapshot: Option<(&crate::server::tools::registry::SnapshotToolContext, &str)>,
+) -> Result<GetContextReport, LainError> {
     let symbol = required_str_arg(args, "symbol")?;
     let depth = usize_arg(args, "depth").unwrap_or(1).clamp(0, 3);
 
-    let dossier = crate::server::tools::handlers::metrics::explain_symbol(
-        workspace, graph, overlay, occupancy, &symbol,
+    let dossier = crate::server::tools::handlers::metrics::explain_symbol_report_scoped(
+        workspace, graph, overlay, occupancy, &symbol, snapshot,
     )?;
 
-    let source_section = match resolve_for_snippet(graph, overlay, &symbol) {
-        Ok((Some(ls), Some(_le), Some(ref p))) => {
-            match crate::server::tools::handlers::context::get_code_snippet(
+    let source_repo;
+    let source_snapshot = match snapshot {
+        Some((snapshot, repo)) => {
+            let (node, _) = resolve_node_ambiguous(graph, overlay, &symbol)?;
+            source_repo = snapshot
+                .repo_for_node(&node)
+                .unwrap_or_else(|_| repo.to_string());
+            Some((snapshot, source_repo.as_str()))
+        }
+        None => None,
+    };
+    let source = match resolve_for_snippet(graph, overlay, &symbol) {
+        Ok((Some(ls), Some(_le), Some(ref p))) => Some(
+            crate::server::tools::handlers::context::get_code_snippet_scoped(
                 graph,
                 overlay,
                 workspace,
                 p.to_str().unwrap_or(""),
-                // 1-based line; no extra context: exactly the symbol.
                 Some(ls + 1),
                 None,
-            ) {
-                Ok(s) => format!("\n## Source\n\n{}", trim_for_section(&s, 30)),
-                Err(_) => String::new(),
-            }
-        }
-        _ => String::new(),
+                source_snapshot,
+            )?,
+        ),
+        _ => None,
     };
+    let source_section = source
+        .as_ref()
+        .map(|source| format!("\n## Source\n\n{}", trim_for_section(source, 30)))
+        .unwrap_or_default();
 
-    let caller_section = if depth >= 1 {
-        match crate::server::tools::handlers::context::get_call_sites(
-            workspace, graph, overlay, &symbol,
-        ) {
-            Ok(s) => format!("\n## Callers\n\n{}", trim_for_section(&s, 12)),
-            Err(_) => String::new(),
-        }
+    let callers = if depth >= 1 {
+        Some(
+            crate::server::tools::handlers::context::get_call_sites_report_scoped(
+                workspace, graph, overlay, &symbol, snapshot,
+            )?,
+        )
     } else {
-        String::new()
+        None
     };
-    let callee_section = if depth >= 1 {
-        match crate::server::tools::handlers::navigation::trace_dependency(graph, overlay, &symbol)
-        {
-            Ok(s) => format!("\n## Callees\n\n{}", trim_for_section(&s, 12)),
-            Err(_) => String::new(),
-        }
+    let caller_section = callers
+        .as_ref()
+        .map(|report| format!("\n## Callers\n\n{}", trim_for_section(&report.text, 12)))
+        .unwrap_or_default();
+    let callees = if depth >= 1 {
+        crate::server::tools::handlers::navigation::trace_dependency_report(graph, overlay, &symbol)
+            .ok()
     } else {
-        String::new()
+        None
     };
-
-    Ok(format!(
+    let callee_section = callees
+        .as_ref()
+        .map(|report| format!("\n## Callees\n\n{}", trim_for_section(&report.text, 12)))
+        .unwrap_or_default();
+    let caller_nodes: Vec<Value> = callers
+        .as_ref()
+        .map(|report| report.sites.iter().map(|site| json!(site.caller)).collect())
+        .unwrap_or_default();
+    let callee_nodes: Vec<Value> = callees
+        .as_ref()
+        .map(|report| report.nodes.iter().map(|node| json!(node)).collect())
+        .unwrap_or_default();
+    let text = format!(
         "## get_context: {symbol}\n\n## Definition\n\n{}{}{}{}",
-        trim_for_section(&dossier, 60),
+        trim_for_section(&dossier.text, 60),
         caller_section,
         callee_section,
         source_section,
-    ))
+    );
+    Ok(GetContextReport {
+        text,
+        structured: json!({
+            "definition": dossier.structured,
+            "callers": caller_nodes,
+            "callees": callee_nodes,
+            "source": source,
+        }),
+    })
 }
 
 /// M6 tool 3 of 5: `find_related` ("What is connected to X?")
@@ -301,26 +381,55 @@ pub async fn assess_change(
     args: &Map<String, Value>,
     ui_link: crate::server::tools::UiLink<'_>,
 ) -> Result<String, LainError> {
+    assess_change_scoped(graph, overlay, workspace, args, ui_link, None).await
+}
+
+pub struct AssessChangeReport {
+    pub text: String,
+    pub structured: Value,
+}
+
+pub async fn assess_change_scoped(
+    graph: &GraphDatabase,
+    overlay: &VolatileOverlay,
+    workspace: &std::path::Path,
+    args: &Map<String, Value>,
+    ui_link: crate::server::tools::UiLink<'_>,
+    snapshot: Option<(&crate::server::tools::registry::SnapshotToolContext, &str)>,
+) -> Result<String, LainError> {
+    assess_change_report_scoped(graph, overlay, workspace, args, ui_link, snapshot)
+        .await
+        .map(|report| report.text)
+}
+
+pub async fn assess_change_report_scoped(
+    graph: &GraphDatabase,
+    overlay: &VolatileOverlay,
+    workspace: &std::path::Path,
+    args: &Map<String, Value>,
+    ui_link: crate::server::tools::UiLink<'_>,
+    snapshot: Option<(&crate::server::tools::registry::SnapshotToolContext, &str)>,
+) -> Result<AssessChangeReport, LainError> {
     let symbol = required_str_arg(args, "symbol")?;
     let include_tests = !matches!(
         args.get("include_tests").and_then(Value::as_bool),
         Some(false)
     );
 
-    let blast = crate::server::tools::handlers::impact::get_blast_radius(
-        // `include_weak_edges=true`: the pre-edit risk verdict below
-        // is meaningless if it can't see dynamic-dispatch callers. A
-        // `bus.publish` site with only heuristic callers would
-        // otherwise report `direct=0, transitive=0, risk=low` and the
-        // agent would ship the regression `explain_dispatch` was
-        // built to prevent. Heuristic callers are tagged with `~`
-        // and `[heuristic, conf=X.XX]` so the agent can tell them
-        // apart from type-resolved calls.
-        graph, overlay, workspace, &symbol, true, true, ui_link,
+    let blast = crate::server::tools::handlers::impact::get_blast_radius_report_scoped(
+        graph,
+        overlay,
+        workspace,
+        &symbol,
+        true,
+        true,
+        ui_link,
+        snapshot.is_some(),
     )
     .await?;
-    let callsites =
-        crate::server::tools::handlers::context::get_call_sites(workspace, graph, overlay, &symbol);
+    let callsites = crate::server::tools::handlers::context::get_call_sites_report_scoped(
+        workspace, graph, overlay, &symbol, snapshot,
+    )?;
     // Which tests reach this symbol through calls. This section used to be
     // the repository-wide `find_untested_functions` list — nothing to do
     // with the symbol's dependents.
@@ -331,44 +440,17 @@ pub async fn assess_change(
         Ok(String::new())
     };
 
-    let callsites = callsites.unwrap_or_default();
-    let direct = extract_section(&callsites, "Direct dependents");
-    let transitive = extract_section(&blast, "indirect");
+    let direct = extract_section(&callsites.text, "Direct dependents");
+    let transitive = extract_section(&blast.text, "indirect");
     let untested_section = match untested {
         Ok(s) if !s.is_empty() => format!("\n## Test coverage\n\n{s}\n"),
         _ => String::new(),
     };
 
-    // Counted from the stable lines of the two outputs, not from section
-    // text: one `- **caller**` line per calling function in the call-site
-    // listing, and blast radius's own total. Parsing sections by header
-    // found no "Direct dependents" header in call-site output, so the
-    // direct count was always 0 and the verdict too low.
-    let direct_count = callsites.lines().filter(|l| l.starts_with("- **")).count();
-    let transitive_count = blast
-        .lines()
-        .find_map(|l| {
-            l.trim_start_matches(['-', ' '])
-                .strip_prefix("Total transitively affected nodes: ")
-        })
-        .and_then(|n| n.trim().parse::<usize>().ok())
-        // Heuristic (pattern-matched) callers are reported separately by
-        // the heuristic-only verdict below, not counted as reach.
-        .map(|total| {
-            let heuristic = blast.lines().filter(|l| l.contains("[heuristic,")).count();
-            total.saturating_sub(direct_count).saturating_sub(heuristic)
-        })
-        .unwrap_or_else(|| count_bullets(&transitive));
-    // The blast-radius output carries a separate section ("~ N heuristic
-    // caller(s) included") that the section extractors above don't see.
-    // When the static graph is empty but heuristic evidence exists, the
-    // verdict is NOT actually 'low' — the agent should treat it the
-    // same way it would treat explain_dispatch's
-    // 'insufficient_evidence' (or 'heuristic_only'). Surfacing this in
-    // the risk line is the single change that closes the gap.
-    let heuristic_only = direct_count == 0
-        && transitive_count == 0
-        && blast.contains("heuristic caller(s) included");
+    let direct_count = callsites.sites.len();
+    let static_affected = blast.nodes.iter().filter(|node| !node.is_heuristic).count();
+    let transitive_count = static_affected.saturating_sub(direct_count);
+    let heuristic_only = direct_count == 0 && transitive_count == 0 && blast.heuristic_count > 0;
     let risk = if heuristic_only {
         "low* — heuristic-only (see ~ N heuristic caller(s) below)"
     } else if direct_count == 0 && transitive_count == 0 {
@@ -379,18 +461,76 @@ pub async fn assess_change(
         "high"
     };
 
+    // Why the answer may not cover everything. The blast radius knows
+    // whether the symbol dispatches dynamically and whether its file is
+    // current; the call-site report knows whether the name was ambiguous.
+    // A reason here means "no dependents found" is not a confirmed
+    // absence.
+    let answer_scope = blast.answer_scope.or(callsites.answer_scope);
+
     // Zero is what the index detected, not a safety result: dynamic
     // dispatch, reflection, config/framework wiring and repositories
-    // outside this index are invisible to it.
-    let caveat = if risk == "low" {
-        " No dependents found in the indexed graph; this is detected reach, \
+    // outside this index are invisible to it. When the answer also
+    // knows *why* it could not be conclusive, it says so specifically
+    // on top of that general limit — for every risk tier, not only the
+    // zero-dependent one: a stale or dynamic answer is provisional
+    // even when dependents were found.
+    let mut caveat = String::new();
+    if risk == "low" {
+        caveat.push_str(
+            " No dependents found in the indexed graph; this is detected reach, \
          not proof of safety (dynamic dispatch, reflection, config wiring and \
-         repos outside this index are not visible)."
-    } else {
-        ""
-    };
+         repos outside this index are not visible).",
+        );
+    }
+    if let Some(reason) = answer_scope {
+        caveat.push_str(&format!(
+            " For this answer: {} — {}.",
+            reason.wire_label(),
+            reason.explanation()
+        ));
+    }
 
-    Ok(format!(
+    let direct_nodes: Vec<_> = blast
+        .nodes
+        .iter()
+        .filter(|node| node.is_direct && !node.is_heuristic)
+        .collect();
+    let transitive_nodes: Vec<_> = blast
+        .nodes
+        .iter()
+        .filter(|node| !node.is_direct && !node.is_heuristic)
+        .collect();
+    let heuristic_nodes: Vec<_> = blast
+        .nodes
+        .iter()
+        .filter(|node| node.is_heuristic)
+        .collect();
+    let untested_nodes: Vec<Value> = if include_tests {
+        let tests: Vec<_> = graph
+            .get_all_nodes()
+            .into_iter()
+            .filter(|node| node.label.as_deref() == Some("test"))
+            .collect();
+        let covered = super::testing::reachable_via_calls(graph, &tests);
+        blast
+            .nodes
+            .iter()
+            .filter(|node| !node.is_heuristic)
+            .filter_map(|node| graph.get_node(&node.id).ok().flatten())
+            .filter(|node| node.label.as_deref() != Some("test"))
+            .filter(|node| !covered.contains(&node.id))
+            .map(|node| json!(node))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let coupling: Vec<Value> = blast
+        .co_change_partners
+        .iter()
+        .map(|(path, count)| json!({"path": path, "count": count}))
+        .collect();
+    let text = format!(
         "## assess_change: {symbol}\n\n\
          ## Direct dependents\n\n{}\n\n\
          ## Transitive reach\n\n{}\n\
@@ -398,7 +538,29 @@ pub async fn assess_change(
          ## Risk summary\n\nDirect: {direct_count}; transitive: {transitive_count}; verdict: **{risk}**.{caveat}\n",
         trim_for_section(&direct, 20),
         trim_for_section(&transitive, 12),
-    ))
+    );
+    Ok(AssessChangeReport {
+        text,
+        structured: json!({
+            "target": callsites.target,
+            "risk": risk,
+            "direct_dependents": direct_nodes,
+            "transitive_dependents": transitive_nodes,
+            "heuristic_dependents": heuristic_nodes,
+            "untested_dependents": untested_nodes,
+            "co_change_partners": coupling,
+            "counts": {
+                "direct": direct_count,
+                "transitive": transitive_count,
+                "heuristic": blast.heuristic_count,
+            },
+            // `null` means the answer is complete — including a `low`
+            // risk that is a confirmed absence. A reason names what the
+            // answer cannot cover, so a reader never mistakes "not
+            // detected" for "does not exist".
+            "answer_scope": crate::server::tools::answer_scope::scope_value(answer_scope),
+        }),
+    })
 }
 
 /// Test functions that reach `target` through `Calls` edges, walking
@@ -451,8 +613,15 @@ fn tests_reaching(graph: &GraphDatabase, target: &str, limit: usize) -> String {
 /// `semantic` uses the NLP model; `auto` (default) tries
 /// semantic first and falls back to lexical, recording the
 /// fallback in the response so the agent knows what happened.
+pub struct SearchCodeOutcome {
+    pub text: String,
+    pub effective_mode: String,
+    pub fell_back: bool,
+    pub hits: Vec<crate::server::tools::handlers::search::SearchHit>,
+}
+
 #[allow(clippy::too_many_arguments)]
-pub fn search_code(
+pub fn search_code_detailed(
     workspace: &std::path::Path,
     graph: &GraphDatabase,
     overlay: &VolatileOverlay,
@@ -461,7 +630,7 @@ pub fn search_code(
     embedding_cache: &Arc<Mutex<lru::LruCache<String, Vec<f32>>>>,
     tuning: &TuningConfig,
     args: &Map<String, Value>,
-) -> Result<String, LainError> {
+) -> Result<SearchCodeOutcome, LainError> {
     let query = required_str_arg(args, "query")?;
     if query.trim().is_empty() {
         return Err(LainError::InvalidArgument(
@@ -482,19 +651,23 @@ pub fn search_code(
     let limit = usize_arg(args, "limit").unwrap_or(10);
 
     let mut fell_back = false;
-    let (effective_mode, body) = match mode.as_str() {
-        "lexical" => ("lexical", lexical_search(graph, &query, limit)),
+    let (effective_mode, body, hits) = match mode.as_str() {
+        "lexical" => {
+            let (body, hits) = lexical_search_detailed(graph, &query, limit);
+            ("lexical", body, hits)
+        }
         // No model: the stub embeds everything as zeros, so a semantic
         // search "succeeded" with 0 results. Say so and answer lexically.
         "semantic" if embedder.is_stub() => {
             fell_back = true;
+            let (lexical, hits) = lexical_search_detailed(graph, &query, limit);
             (
                 "lexical",
                 format!(
                     "Semantic search unavailable: no embedding model is configured \
-                     (`lain setup` installs one).\n\nFalling back to lexical:\n\n{}",
-                    lexical_search(graph, &query, limit)
+                     (`lain setup` installs one).\n\nFalling back to lexical:\n\n{lexical}"
                 ),
+                hits,
             )
         }
         "semantic" => match semantic_call(
@@ -508,15 +681,16 @@ pub fn search_code(
             &query,
             limit,
         ) {
-            Ok(s) => ("semantic", s),
+            Ok((body, hits)) => ("semantic", body, hits),
             Err(crate::error::LainError::Unavailable(msg)) => {
                 fell_back = true;
+                let (lexical, hits) = lexical_search_detailed(graph, &query, limit);
                 (
                     "lexical",
                     format!(
-                        "Semantic search unavailable: {msg}\n\nFalling back to lexical:\n\n{}",
-                        lexical_search(graph, &query, limit)
+                        "Semantic search unavailable: {msg}\n\nFalling back to lexical:\n\n{lexical}"
                     ),
+                    hits,
                 )
             }
             Err(e) => return Err(e),
@@ -535,31 +709,63 @@ pub fn search_code(
                     &query,
                     limit,
                 ) {
-                    Ok(s) => ("semantic", s),
+                    Ok((body, hits)) => ("semantic", body, hits),
                     Err(crate::error::LainError::Unavailable(msg)) => {
                         fell_back = true;
+                        let (lexical, hits) = lexical_search_detailed(graph, &query, limit);
                         (
                             "lexical",
                             format!(
-                                "Semantic search unavailable: {msg}\n\nFalling back to lexical:\n\n{}",
-                                lexical_search(graph, &query, limit)
+                                "Semantic search unavailable: {msg}\n\nFalling back to lexical:\n\n{lexical}"
                             ),
+                            hits,
                         )
                     }
                     Err(_) => {
                         fell_back = true;
-                        ("lexical", lexical_search(graph, &query, limit))
+                        let (body, hits) = lexical_search_detailed(graph, &query, limit);
+                        ("lexical", body, hits)
                     }
                 }
             } else {
-                ("lexical", lexical_search(graph, &query, limit))
+                let (body, hits) = lexical_search_detailed(graph, &query, limit);
+                ("lexical", body, hits)
             }
         }
     };
 
-    Ok(format!(
-        "## search_code: {query} (mode={effective_mode}, fell_back={fell_back})\n\n{body}"
-    ))
+    let text =
+        format!("## search_code: {query} (mode={effective_mode}, fell_back={fell_back})\n\n{body}");
+    Ok(SearchCodeOutcome {
+        text,
+        effective_mode: effective_mode.to_string(),
+        fell_back,
+        hits,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn search_code(
+    workspace: &std::path::Path,
+    graph: &GraphDatabase,
+    overlay: &VolatileOverlay,
+    embedder: &NlpEmbedder,
+    cross_encoder: &CrossEncoder,
+    embedding_cache: &Arc<Mutex<lru::LruCache<String, Vec<f32>>>>,
+    tuning: &TuningConfig,
+    args: &Map<String, Value>,
+) -> Result<String, LainError> {
+    search_code_detailed(
+        workspace,
+        graph,
+        overlay,
+        embedder,
+        cross_encoder,
+        embedding_cache,
+        tuning,
+        args,
+    )
+    .map(|outcome| outcome.text)
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -616,6 +822,7 @@ fn node_type_label(nt: &NodeType) -> &'static str {
         // Phase D (spec §7): a database table. Same kebab-case
         // shape as the existing contract-federation labels.
         NodeType::Table => "table",
+        NodeType::Column => "column",
     }
 }
 
@@ -708,32 +915,6 @@ fn extract_section(body: &str, header_marker: &str) -> String {
     }
 }
 
-fn count_bullets(section: &str) -> usize {
-    // F5 — the actual caller-bullet format from `get_call_sites` is
-    // `- **caller_name** (...) calls it at line N`; the blast-radius
-    // body uses `  - depth N: count` for indented bullets. Both start
-    // with `- **` (the caller bullet) or `  - ` (the depth line).
-    // Pre-fix `count_bullets` checked only `  - ` and `- - `, neither
-    // of which matched the real caller output, so the count was
-    // always zero and the risk verdict degenerated to `low` even
-    // when callers existed. Match `- **` (the caller marker) AND
-    // `  - ` (the indented depth marker); exclude header lines like
-    // `- leaf_helper (Function)` and `- Total transitively affected nodes: 5`
-    // that aren't caller bullets.
-    section
-        .lines()
-        .filter(|l| {
-            let t = l.trim_start();
-            if t == "-" || t == "--" || t.starts_with("---") {
-                return false;
-            }
-            // Caller bullets: `- **name**` (get_call_sites) or
-            // `  - depth N: count` (get_blast_radius indented).
-            t.starts_with("- **") || t.starts_with("  - ")
-        })
-        .count()
-}
-
 #[allow(clippy::too_many_arguments)]
 fn semantic_call(
     workspace: &std::path::Path,
@@ -745,8 +926,14 @@ fn semantic_call(
     tuning: &TuningConfig,
     query: &str,
     limit: usize,
-) -> Result<String, LainError> {
-    crate::server::tools::handlers::search::semantic_search(
+) -> Result<
+    (
+        String,
+        Vec<crate::server::tools::handlers::search::SearchHit>,
+    ),
+    LainError,
+> {
+    crate::server::tools::handlers::search::semantic_search_detailed(
         workspace,
         graph,
         overlay,
@@ -820,7 +1007,19 @@ fn query_terms(query: &str) -> Vec<String> {
         .collect()
 }
 
+#[cfg(test)]
 fn lexical_search(graph: &GraphDatabase, query: &str, limit: usize) -> String {
+    lexical_search_detailed(graph, query, limit).0
+}
+
+fn lexical_search_detailed(
+    graph: &GraphDatabase,
+    query: &str,
+    limit: usize,
+) -> (
+    String,
+    Vec<crate::server::tools::handlers::search::SearchHit>,
+) {
     // An exact substring of the name still ranks first; beyond that a
     // symbol scores by how many query words its name (and, weighted
     // lower, its path) contains. Matching the whole query as one
@@ -869,12 +1068,22 @@ fn lexical_search(graph: &GraphDatabase, query: &str, limit: usize) -> String {
             .then_with(|| a.name.cmp(&b.name))
             .then_with(|| a.path.cmp(&b.path))
     });
-    let hits: Vec<GraphNode> = hits.into_iter().map(|(_, n)| n).collect();
+    let hits: Vec<crate::server::tools::handlers::search::SearchHit> = hits
+        .into_iter()
+        .map(
+            |(score, node)| crate::server::tools::handlers::search::SearchHit {
+                node,
+                score: score as f32,
+                score_kind: "lexical".to_string(),
+            },
+        )
+        .collect();
     if hits.is_empty() {
-        return format!("No lexical matches for `{query}`.");
+        return (format!("No lexical matches for `{query}`."), hits);
     }
     let mut out = String::new();
-    for (i, n) in hits.iter().take(limit).enumerate() {
+    for (i, hit) in hits.iter().take(limit).enumerate() {
+        let n = &hit.node;
         let line = n
             .line_start
             .map(|l| format!(":{}", l + 1))
@@ -896,13 +1105,74 @@ fn lexical_search(graph: &GraphDatabase, query: &str, limit: usize) -> String {
             n.id
         ));
     }
-    out
+    (out, hits)
 }
 
 #[cfg(test)]
 mod m6_tests {
     use super::*;
     use crate::schema::{EdgeType, GraphEdge, GraphNode};
+
+    #[tokio::test]
+    async fn assess_change_excludes_test_reachable_dependents() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("lib.rs"), "fn target() {}\n").unwrap();
+        let graph = GraphDatabase::new(&tmp.path().join("graph.bin")).unwrap();
+        let mut nodes = ["target", "covered", "uncovered", "test_covered", "indirect"]
+            .map(|name| GraphNode::new(NodeType::Function, name.into(), "lib.rs".into()));
+        nodes[3].label = Some("test".into());
+        graph.insert_nodes_batch(&nodes).unwrap();
+        for (from, to, kind) in [
+            (1, 0, EdgeType::Calls),
+            (2, 0, EdgeType::Calls),
+            (3, 4, EdgeType::Calls),
+            (4, 1, EdgeType::Calls),
+            (1, 4, EdgeType::Calls), // A cycle must terminate.
+            (3, 2, EdgeType::Uses),  // Non-call edges do not establish coverage.
+        ] {
+            graph
+                .insert_edge(&GraphEdge::new(
+                    kind,
+                    nodes[from].id.clone(),
+                    nodes[to].id.clone(),
+                ))
+                .unwrap();
+        }
+        for include_tests in [true, false] {
+            let args = json!({"symbol":"target", "include_tests":include_tests});
+            let report = assess_change_report_scoped(
+                &graph,
+                &VolatileOverlay::new(),
+                tmp.path(),
+                args.as_object().unwrap(),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+            let untested: Vec<_> = report.structured["untested_dependents"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|node| node["name"].as_str().unwrap())
+                .collect();
+            assert_eq!(
+                untested,
+                if include_tests {
+                    vec!["uncovered"]
+                } else {
+                    vec![]
+                }
+            );
+            if include_tests {
+                assert!(
+                    report.text.contains("1 test(s) reach it"),
+                    "{}",
+                    report.text
+                );
+            }
+        }
+    }
 
     #[test]
     fn tests_reaching_walks_callers_to_tests() {
@@ -1299,6 +1569,28 @@ mod m6_tests {
             out.contains("heuristic-only") || out.contains("heuristic caller(s) included"),
             "expected explicit heuristic marker in the verdict line, got:\n{out}"
         );
+        let report = assess_change_report_scoped(
+            &graph,
+            &overlay,
+            std::path::Path::new("/"),
+            &a,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            report.structured["risk"],
+            "low* — heuristic-only (see ~ N heuristic caller(s) below)"
+        );
+        assert_eq!(report.structured["counts"]["direct"], 0);
+        assert_eq!(report.structured["counts"]["transitive"], 0);
+        assert_eq!(
+            report.structured["heuristic_dependents"]
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
     }
 
     /// Truly-empty blast radius (no static callers AND no heuristic
@@ -1669,6 +1961,7 @@ mod m6_tests {
         let explain_out = crate::server::tools::handlers::explain_dispatch::explain_dispatch(
             &graph,
             &overlay,
+            std::path::Path::new(""),
             "fire_handler",
         )
         .await
@@ -1719,5 +2012,65 @@ mod m6_tests {
             &tuning,
             args,
         )
+    }
+}
+
+#[cfg(test)]
+mod scope_caveat_tests {
+    use super::*;
+    use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace};
+
+    /// The scope caveat must reach the prose for every risk tier: a
+    /// stale answer is provisional even when dependents were found —
+    /// the zero-dependent prose is only the `low`-tier half of that
+    /// contract, and gating the whole caveat on it hid the reason from
+    /// exactly the answers people act on.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_stale_target_names_the_scope_even_with_dependents() {
+        let dir = std::env::temp_dir().join("test_assess_scope_caveat");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(
+            dir.join("src/proc.rs"),
+            "fn process() {}\nfn main() { process(); }\n",
+        )
+        .unwrap();
+        let graph = GraphDatabase::new(&dir.join("graph.bin")).unwrap();
+        let overlay = VolatileOverlay::new();
+        let ns = RepoNamespace::for_test();
+
+        let mut target = GraphNode::new(NodeType::Function, "process".into(), "src/proc.rs".into());
+        target.id =
+            GraphNode::generate_id(&NodeType::Function, "src/proc.rs", "process", None, &ns);
+        // Scanned an hour ago; the file was written just now.
+        target.last_lsp_sync =
+            Some(crate::server::time::unix_secs(std::time::SystemTime::now()) - 3600);
+        let mut caller = GraphNode::new(NodeType::Function, "main".into(), "src/proc.rs".into());
+        caller.id = GraphNode::generate_id(&NodeType::Function, "src/proc.rs", "main", None, &ns);
+        caller.last_lsp_sync =
+            Some(crate::server::time::unix_secs(std::time::SystemTime::now()) - 3600);
+        graph.upsert_node(target.clone()).unwrap();
+        graph.upsert_node(caller.clone()).unwrap();
+        graph
+            .insert_edge(&GraphEdge::new(
+                EdgeType::Calls,
+                caller.id.clone(),
+                target.id.clone(),
+            ))
+            .unwrap();
+
+        let mut args = Map::new();
+        args.insert("symbol".to_string(), Value::String("process".to_string()));
+        let out = assess_change(&graph, &overlay, &dir, &args, None)
+            .await
+            .expect("assess_change on a known symbol must succeed");
+        assert!(
+            out.contains("verdict: **medium**"),
+            "the fixture needs a dependent so the low-tier prose cannot carry the caveat, got:\n{out}"
+        );
+        assert!(
+            out.contains("For this answer: stale_or_unindexed"),
+            "a stale answer must name its scope even with dependents, got:\n{out}"
+        );
     }
 }

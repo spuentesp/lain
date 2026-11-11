@@ -21,7 +21,7 @@ use serde_json::{Map, Value};
 /// The TTL rides along because the handlers have no other route to the
 /// tuning config; it was a literal `600` in two places while
 /// `ingestion.ui_session_ttl_secs` carried the same default and no reader.
-fn ui_link(ctx: &ToolContext) -> crate::server::tools::UiLink<'_> {
+pub(crate) fn ui_link(ctx: &ToolContext) -> crate::server::tools::UiLink<'_> {
     let port = ctx
         .diagnostics_port
         .load(std::sync::atomic::Ordering::Relaxed);
@@ -55,6 +55,14 @@ macro_rules! tool_meta {
         }
         fn capability(&self) -> ToolCapability {
             ToolCapability::$cap
+        }
+    };
+}
+
+macro_rules! structured_tool {
+    ($builder:ident, $schema:literal) => {
+        fn output_schema(&self) -> Option<&'static str> {
+            Some(include_str!(concat!("../schemas/", $schema)))
         }
     };
 }
@@ -102,13 +110,28 @@ impl ToolHandler for ExplainDispatchHandler {
         r#"{"type":"object","properties":{"symbol":{"type":"string"}},"required":["symbol"]}"#,
         ReadOnly
     );
+    structured_tool!(explain_dispatch, "explain_dispatch.out.json");
     async fn call(
         &self,
         ctx: &ToolContext,
         args: &Map<String, Value>,
     ) -> Result<String, LainError> {
         let symbol = required_str_arg(args, "symbol")?;
-        handlers::explain_dispatch::explain_dispatch(&ctx.graph, &ctx.overlay, &symbol).await
+        handlers::explain_dispatch::explain_dispatch_scoped(
+            &ctx.graph,
+            &ctx.overlay,
+            &ctx.workspace,
+            &symbol,
+            ctx.snapshot.is_some(),
+        )
+        .await
+    }
+    async fn call_with_output(
+        &self,
+        ctx: &ToolContext,
+        args: &Map<String, Value>,
+    ) -> Result<crate::server::tools::registry::ToolOutput, LainError> {
+        handlers::structured::explain_dispatch_output(ctx, args).await
     }
 }
 inventory::submit!(ToolHandlerEntry(&ExplainDispatchHandler));
@@ -256,6 +279,7 @@ impl ToolHandler for GetCallChainHandler {
         handlers::navigation::get_call_chain(
             &ctx.graph,
             &ctx.overlay,
+            &ctx.workspace,
             ctx.federation.as_deref(),
             &from,
             &to,
@@ -553,21 +577,30 @@ impl ToolHandler for ExplainSymbolHandler {
         r#"{"type":"object","properties":{"symbol":{"type":"string"}},"required":["symbol"]}"#,
         ReadOnly
     );
+    structured_tool!(explain_symbol, "explain_symbol.out.json");
     async fn call(
         &self,
         ctx: &ToolContext,
         args: &Map<String, Value>,
     ) -> Result<String, LainError> {
         let symbol = required_str_arg(args, "symbol")?;
-        let mut out = handlers::metrics::explain_symbol(
+        let mut out = handlers::metrics::explain_symbol_scoped(
             &ctx.workspace,
             &ctx.graph,
             &ctx.overlay,
             &ctx.occupancy,
             &symbol,
+            ctx.snapshot_scope(args),
         )?;
         out.push_str(&open_annotations_for_symbol(ctx, &symbol));
         Ok(out)
+    }
+    async fn call_with_output(
+        &self,
+        ctx: &ToolContext,
+        args: &Map<String, Value>,
+    ) -> Result<crate::server::tools::registry::ToolOutput, LainError> {
+        handlers::structured::explain_symbol_output(ctx, args).await
     }
 }
 inventory::submit!(ToolHandlerEntry(&ExplainSymbolHandler));
@@ -603,12 +636,13 @@ impl ToolHandler for QueryGraphHandler {
         r#"{"type":"object","properties":{"query":{"type":"object"}},"required":[]}"#,
         ReadOnly
     );
+    structured_tool!(query_graph, "query_graph.out.json");
     async fn call(
         &self,
         ctx: &ToolContext,
         args: &Map<String, Value>,
     ) -> Result<String, LainError> {
-        handlers::query::query_graph(
+        handlers::query::query_graph_scoped(
             &ctx.workspace,
             &ctx.graph,
             &ctx.embedder,
@@ -617,7 +651,15 @@ impl ToolHandler for QueryGraphHandler {
             &ctx.occupancy,
             Some(args),
             ctx.tuning.ingestion.default_query_limit,
+            ctx.snapshot.is_some(),
         )
+    }
+    async fn call_with_output(
+        &self,
+        ctx: &ToolContext,
+        args: &Map<String, Value>,
+    ) -> Result<crate::server::tools::registry::ToolOutput, LainError> {
+        handlers::structured::query_graph_output(ctx, args).await
     }
 }
 inventory::submit!(ToolHandlerEntry(&QueryGraphHandler));
@@ -640,6 +682,10 @@ pub struct GetCrossRuntimeCallersHandler;
 #[async_trait]
 impl ToolHandler for GetCrossRuntimeCallersHandler {
     tool_meta!("get_cross_runtime_callers", "Find all protocol-level callers for a symbol (HTTP routes, gRPC services, GraphQL resolvers)", r#"{"type":"object","properties":{"node_id":{"type":"string"}},"required":["node_id"]}"#, ReadOnly);
+    structured_tool!(
+        get_cross_runtime_callers,
+        "get_cross_runtime_callers.out.json"
+    );
     async fn call(
         &self,
         ctx: &ToolContext,
@@ -647,6 +693,13 @@ impl ToolHandler for GetCrossRuntimeCallersHandler {
     ) -> Result<String, LainError> {
         let node_id = required_str_arg(args, "node_id")?;
         handlers::cross_runtime::get_cross_runtime_callers(&ctx.graph, &ctx.overlay, &node_id)
+    }
+    async fn call_with_output(
+        &self,
+        ctx: &ToolContext,
+        args: &Map<String, Value>,
+    ) -> Result<crate::server::tools::registry::ToolOutput, LainError> {
+        handlers::structured::get_cross_runtime_callers_output(ctx, args).await
     }
 }
 inventory::submit!(ToolHandlerEntry(&GetCrossRuntimeCallersHandler));
@@ -844,13 +897,27 @@ impl ToolHandler for GetCallSitesHandler {
         r#"{"type":"object","properties":{"symbol":{"type":"string"}},"required":["symbol"]}"#,
         ReadOnly
     );
+    structured_tool!(get_call_sites, "get_call_sites.out.json");
     async fn call(
         &self,
         ctx: &ToolContext,
         args: &Map<String, Value>,
     ) -> Result<String, LainError> {
         let symbol = required_str_arg(args, "symbol")?;
-        handlers::context::get_call_sites(&ctx.workspace, &ctx.graph, &ctx.overlay, &symbol)
+        handlers::context::get_call_sites_scoped(
+            &ctx.workspace,
+            &ctx.graph,
+            &ctx.overlay,
+            &symbol,
+            ctx.snapshot_scope(args),
+        )
+    }
+    async fn call_with_output(
+        &self,
+        ctx: &ToolContext,
+        args: &Map<String, Value>,
+    ) -> Result<crate::server::tools::registry::ToolOutput, LainError> {
+        handlers::structured::get_call_sites_output(ctx, args).await
     }
 }
 inventory::submit!(ToolHandlerEntry(&GetCallSitesHandler));
@@ -1008,12 +1075,20 @@ impl ToolHandler for FindSymbolHandler {
         r#"{"type":"object","properties":{"name":{"type":"string"},"path_hint":{"type":"string"},"type_filter":{"type":"string","enum":["function","method","class","struct","interface","trait","enum","module","file"]}},"required":["name"]}"#,
         ReadOnly
     );
+    structured_tool!(find_symbol, "find_symbol.out.json");
     async fn call(
         &self,
         ctx: &ToolContext,
         args: &Map<String, Value>,
     ) -> Result<String, LainError> {
         handlers::semantic::find_symbol(&ctx.graph, &ctx.overlay, args)
+    }
+    async fn call_with_output(
+        &self,
+        ctx: &ToolContext,
+        args: &Map<String, Value>,
+    ) -> Result<crate::server::tools::registry::ToolOutput, LainError> {
+        handlers::structured::find_symbol_output(ctx, args).await
     }
 }
 inventory::submit!(ToolHandlerEntry(&FindSymbolHandler));
@@ -1040,19 +1115,28 @@ impl ToolHandler for GetContextHandler {
         r#"{"type":"object","properties":{"symbol":{"type":"string"},"depth":{"type":"integer","minimum":0,"maximum":3}},"required":["symbol"]}"#,
         ReadOnly
     );
+    structured_tool!(get_context, "get_context.out.json");
     async fn call(
         &self,
         ctx: &ToolContext,
         args: &Map<String, Value>,
     ) -> Result<String, LainError> {
-        handlers::semantic::get_context(
+        handlers::semantic::get_context_scoped(
             &ctx.workspace,
             &ctx.graph,
             &ctx.overlay,
             &ctx.occupancy,
             args,
+            ctx.snapshot_scope(args),
         )
         .await
+    }
+    async fn call_with_output(
+        &self,
+        ctx: &ToolContext,
+        args: &Map<String, Value>,
+    ) -> Result<crate::server::tools::registry::ToolOutput, LainError> {
+        handlers::structured::get_context_output(ctx, args).await
     }
 }
 inventory::submit!(ToolHandlerEntry(&GetContextHandler));
@@ -1119,19 +1203,28 @@ impl ToolHandler for AssessChangeHandler {
         r#"{"type":"object","properties":{"symbol":{"type":"string"},"depth":{"type":"string"},"include_tests":{"type":"boolean"},"limit":{"type":"integer"}},"required":["symbol"]}"#,
         ReadOnly
     );
+    structured_tool!(assess_change, "assess_change.out.json");
     async fn call(
         &self,
         ctx: &ToolContext,
         args: &Map<String, Value>,
     ) -> Result<String, LainError> {
-        handlers::semantic::assess_change(
+        handlers::semantic::assess_change_scoped(
             &ctx.graph,
             &ctx.overlay,
             &ctx.workspace,
             args,
             ui_link(ctx),
+            ctx.snapshot_scope(args),
         )
         .await
+    }
+    async fn call_with_output(
+        &self,
+        ctx: &ToolContext,
+        args: &Map<String, Value>,
+    ) -> Result<crate::server::tools::registry::ToolOutput, LainError> {
+        handlers::structured::assess_change_output(ctx, args).await
     }
 }
 inventory::submit!(ToolHandlerEntry(&AssessChangeHandler));
@@ -1157,6 +1250,7 @@ impl ToolHandler for SearchCodeHandler {
         r#"{"type":"object","properties":{"query":{"type":"string"},"mode":{"type":"string","enum":["lexical","semantic","auto"]},"limit":{"type":"integer"}},"required":["query"]}"#,
         ReadOnly
     );
+    structured_tool!(search_code, "search_code.out.json");
     async fn call(
         &self,
         ctx: &ToolContext,
@@ -1186,6 +1280,13 @@ impl ToolHandler for SearchCodeHandler {
             }
         }
         Ok(text)
+    }
+    async fn call_with_output(
+        &self,
+        ctx: &ToolContext,
+        args: &Map<String, Value>,
+    ) -> Result<crate::server::tools::registry::ToolOutput, LainError> {
+        handlers::structured::search_code_output(ctx, args).await
     }
 }
 inventory::submit!(ToolHandlerEntry(&SearchCodeHandler));
@@ -1217,7 +1318,7 @@ inventory::submit!(ToolHandlerEntry(&SearchCodeHandler));
 /// { "orchestrate" }`. That is intentional — auto-including
 /// annotations on file- or repo-typed targets would change the
 /// semantic of "what is this symbol about" in surprising ways.
-fn open_annotations_for_symbol(ctx: &ToolContext, symbol: &str) -> String {
+pub(crate) fn open_annotations_for_symbol(ctx: &ToolContext, symbol: &str) -> String {
     use crate::federation::repo_id::RepoId;
     use crate::server::annotations::AnnotationTarget;
     use crate::server::mcp::annotation_tools::{
@@ -1255,4 +1356,72 @@ fn run_cwd(ctx: &ToolContext, args: &Map<String, Value>) -> Result<String, LainE
         return Ok(ctx.workspace.to_string_lossy().to_string());
     }
     crate::server::tools::handlers::context::resolve_against_workspace(&ctx.workspace, &cwd)
+}
+
+#[cfg(test)]
+mod delegation_tests {
+    use super::*;
+    use crate::server::tools::create_test_executor_with_graph;
+
+    fn scanned(graph: &crate::graph::GraphDatabase, name: &str, path: &str) {
+        let ns = crate::schema::RepoNamespace::for_test();
+        let mut n = crate::schema::GraphNode::new(
+            crate::schema::NodeType::Function,
+            name.to_string(),
+            path.to_string(),
+        );
+        n.id = crate::schema::GraphNode::generate_id(
+            &crate::schema::NodeType::Function,
+            path,
+            name,
+            None,
+            &ns,
+        );
+        n.last_lsp_sync = Some(crate::server::time::unix_secs(std::time::SystemTime::now()));
+        graph.upsert_node(n).unwrap();
+    }
+
+    /// The handler `call` methods are the trait's text entry point —
+    /// the registry's default `call_with_output` builds its legacy text
+    /// from them, and `explain_dispatch`'s override bypasses its `call`
+    /// on the wire, so only a direct invocation observes it. Either
+    /// must carry the real report; a placeholder return would leave the
+    /// text path lying about what the tool found.
+    #[tokio::test]
+    async fn get_call_chain_handler_call_carries_the_report() {
+        let tmp = tempfile::tempdir().unwrap();
+        let graph = crate::graph::GraphDatabase::new(&tmp.path().join("graph.bin")).unwrap();
+        let exec = create_test_executor_with_graph(graph);
+        scanned(&exec.ctx.graph, "a", "src/a.rs");
+        scanned(&exec.ctx.graph, "b", "src/b.rs");
+        let mut args = Map::new();
+        args.insert("from".into(), Value::String("a".into()));
+        args.insert("to".into(), Value::String("b".into()));
+        let out = GetCallChainHandler
+            .call(&exec.ctx, &args)
+            .await
+            .expect("a call-chain question must answer");
+        assert!(
+            out.contains("No call path found"),
+            "the handler must carry the real report, got:\n{out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn explain_dispatch_handler_call_carries_the_report() {
+        let tmp = tempfile::tempdir().unwrap();
+        let graph = crate::graph::GraphDatabase::new(&tmp.path().join("graph.bin")).unwrap();
+        let exec = create_test_executor_with_graph(graph);
+        scanned(&exec.ctx.graph, "target", "src/t.rs");
+        let mut args = Map::new();
+        args.insert("symbol".into(), Value::String("target".into()));
+        let out = ExplainDispatchHandler
+            .call(&exec.ctx, &args)
+            .await
+            .expect("a dispatch question must answer");
+        assert!(
+            out.contains("Dispatch summary"),
+            "the handler must carry the real report, got:\n{out}"
+        );
+    }
 }

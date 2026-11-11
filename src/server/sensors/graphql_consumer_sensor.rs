@@ -270,16 +270,77 @@ pub fn detect_in_code(content: &str, graph_path: &str) -> Vec<GraphqlConsumerFie
             let start = search_from + rel;
             let body_start = start + tag.len();
             let line_no = (content[..start].chars().filter(|&c| c == '\n').count() as u32) + 1;
-            if let Some(end_rel) = content[body_start..].find("\")") {
-                let body = &content[body_start..body_start + end_rel];
-                out.extend(parse_operation_body(body, graph_path, line_no));
-                search_from = body_start + end_rel + 2;
-            } else {
+            let Some((body, after)) = quoted_literal(content, body_start) else {
                 break;
+            };
+            // `.execute(` is shared with SQL and other drivers, so only a
+            // literal that opens like a GraphQL document counts.
+            if tag == ".execute(\"" && !looks_like_graphql_document(&body) {
+                search_from = after;
+                continue;
             }
+            out.extend(parse_operation_body(&body, graph_path, line_no));
+            search_from = after;
         }
     }
     out
+}
+
+/// The body of the string literal starting at `body_start` (just past
+/// its opening quote), and the index just past its closing quote.
+/// Honors backslash escapes and Python `"""` triple quotes, so a call
+/// argument never extends past its own literal into following code.
+fn quoted_literal(content: &str, body_start: usize) -> Option<(std::borrow::Cow<'_, str>, usize)> {
+    let rest = &content[body_start..];
+    let triple = rest.starts_with("\"\"");
+    let offset = if triple { 2 } else { 0 };
+    let body = &rest[offset..];
+    let bytes = body.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => i += 2,
+            b'"' if !triple || body[i..].starts_with("\"\"\"") => {
+                let after = body_start + offset + i + if triple { 3 } else { 1 };
+                // JSON-compatible host-language escapes include GraphQL line
+                // breaks and quoted argument values. Ordinary literals borrow
+                // their body and avoid allocating; triple-quoted documents
+                // already contain their literal line breaks.
+                let decoded = if !triple && body[..i].contains('\\') {
+                    serde_json::from_str::<String>(&content[body_start - 1..after])
+                        .map(std::borrow::Cow::Owned)
+                        .unwrap_or(std::borrow::Cow::Borrowed(&body[..i]))
+                } else {
+                    std::borrow::Cow::Borrowed(&body[..i])
+                };
+                return Some((decoded, after));
+            }
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// True when the first real line of `body` opens a GraphQL document:
+/// a selection set or an operation/fragment keyword. Comment and blank
+/// lines are skipped. SQL such as `INSERT INTO ...` is rejected.
+fn looks_like_graphql_document(body: &str) -> bool {
+    let cleaned = strip_comments(body);
+    let first = cleaned
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with('#'))
+        .unwrap_or("");
+    if first.starts_with('{') {
+        return true;
+    }
+    ["query", "mutation", "subscription", "fragment"]
+        .iter()
+        .any(|kw| {
+            first.strip_prefix(kw).is_some_and(|tail| {
+                tail.starts_with(|c: char| c.is_whitespace() || c == '{' || c == '(')
+            })
+        })
 }
 
 /// Parse a top-level operation document (one operation per
@@ -1232,6 +1293,57 @@ orders = gql(\"query { orders { id } }\")
         let consumers = detect_in_code(src, "orders.py");
         assert_eq!(consumers.len(), 1);
         assert_eq!(consumers[0].field, "orders");
+    }
+
+    #[test]
+    fn sql_execute_does_not_consume_following_python_as_graphql() {
+        let src = r#"
+await cur.execute("INSERT INTO object_meta (path, size) VALUES (%s, %s)",
+                  (key, len(item.data)))
+raise KeyError(f"MySQL table {self._bucket_name} already has key {key}")
+await cur.execute("SELECT * FROM object_meta WHERE path = %s", (key,))
+"#;
+        assert!(detect_in_code(src, "store.py").is_empty());
+    }
+
+    #[test]
+    fn execute_document_stops_at_its_literal_and_preserves_operations() {
+        let src = r#"
+client.execute("query { orders { id } }", variables={"id": value})
+client.execute("mutation { createOrder(input: {}) { id } }")
+"#;
+        let fields = detect_in_code(src, "client.py");
+        assert_eq!(fields.len(), 2, "{fields:?}");
+        assert_eq!(fields[0].field, "orders");
+        assert_eq!(fields[1].field, "createOrder");
+        assert_eq!(fields[1].op, GraphqlOp::Mutation);
+    }
+
+    #[test]
+    fn sql_json_payload_is_not_a_graphql_shorthand_document() {
+        assert!(detect_in_code(
+            r#"cursor.execute("INSERT INTO data VALUES ('{customer: 1}')")"#,
+            "store.py",
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn execute_documents_preserve_host_escapes_and_python_triple_quotes() {
+        let source = r#"
+client.execute("query {\n orders(filter: \"open\") { id }\n}")
+client.execute("""
+# GraphQL comment
+query {
+  products { id }
+}
+""")
+"#;
+        let fields = detect_in_code(source, "client.py");
+        assert_eq!(
+            fields.iter().map(|f| f.field.as_str()).collect::<Vec<_>>(),
+            vec!["orders", "products"]
+        );
     }
 
     #[test]

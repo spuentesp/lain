@@ -313,12 +313,9 @@ async fn index_federation(fed: Arc<FederatedIndex>) {
     // calls into repos indexed after it are linked by the second pass
     // below. Hold it in `Indexing` until then, or a client that waits for
     // `ready` queries the cross-repo graph before it exists.
-    let multi_repo = fed.list_repos().len() > 1;
-    if multi_repo {
-        for (id, _) in fed.list_repos() {
-            if let Some(repo) = fed.get_repo(&id) {
-                repo.hold_ready(true);
-            }
+    for (id, _) in fed.list_repos() {
+        if let Some(repo) = fed.get_repo(&id) {
+            repo.hold_ready(true);
         }
     }
 
@@ -334,34 +331,49 @@ async fn index_federation(fed: Arc<FederatedIndex>) {
     // up so partial results remain queryable.
     // Index every repo (concurrently, bounded) and link calls across repos
     // at the barrier that `index_all` returns through.
-    fed.index_all().await;
+    let mut cache_complete = true;
+    let recheck_timing =
+        crate::federation::startup_cache::StartupTiming::start("startup_input_recheck");
+    let restored = fed.startup_restored() && fed.startup_inputs_unchanged().unwrap_or(false);
+    drop(recheck_timing);
+    fed.set_startup_restored(restored);
+    if restored {
+        for (id, _) in fed.list_repos() {
+            if let Some(repo) = fed.get_repo(&id) {
+                repo.restore_startup_readiness();
+                if let Err(error) = repo.start_watcher().await {
+                    repo.set_health(crate::federation::health::RepoHealth::Degraded);
+                    tracing::warn!("source watcher unavailable for {id}: {error}");
+                }
+            }
+        }
+    } else {
+        fed.index_all_for_startup().await;
+    }
 
     // Second pass: every repo's symbols are now known, so calls from a
     // repo indexed early into one indexed later can finally resolve.
     let repo_ids: Vec<_> = fed.list_repos().into_iter().map(|(id, _)| id).collect();
-    if repo_ids.len() > 1 {
+    if !restored && repo_ids.len() > 1 {
         for id in &repo_ids {
             let Some(repo) = fed.get_repo(id) else {
                 continue;
             };
-            match repo.relink_cross_repo().await {
+            match fed.relink_repo(id).await {
                 Ok(0) => {}
                 Ok(n) => {
                     info!(
                         "lain server: linked {n} cross-repo edge(s) from '{}'",
                         id.as_str()
                     );
-                    if let Err(e) = fed.project_repo(id).await {
-                        tracing::warn!(
-                            "lain server: project_repo for '{}' after cross-repo link failed: {e}",
-                            id.as_str()
-                        );
-                    }
                 }
-                Err(e) => tracing::warn!(
-                    "lain server: cross-repo link for '{}' failed: {e}",
-                    id.as_str()
-                ),
+                Err(e) => {
+                    repo.set_health(crate::federation::health::RepoHealth::Degraded);
+                    tracing::warn!(
+                        "lain server: cross-repo link for '{}' failed: {e}",
+                        id.as_str()
+                    );
+                }
             }
         }
     }
@@ -374,11 +386,38 @@ async fn index_federation(fed: Arc<FederatedIndex>) {
     // Anchor shapes load through the pattern registry (bundled
     // `anchors.yaml`; each repo layers its own
     // `<root>/.lain/patterns/` overrides on top inside the miner).
-    if let Err(e) =
-        fed.mint_cross_repo_anchors(crate::server::sensors::patterns::AnchorShapes::bundled())
-    {
-        tracing::warn!("lain server: anchor miner failed: {e}");
+    if !restored {
+        if let Err(e) =
+            fed.mint_cross_repo_anchors(crate::server::sensors::patterns::AnchorShapes::bundled())
+        {
+            cache_complete = false;
+            tracing::warn!("lain server: anchor miner failed: {e}");
+        }
     }
+    if let Err(error) = fed.rejoin_contracts_if_dirty() {
+        cache_complete = false;
+        tracing::warn!("startup contract join failed: {error}");
+    }
+    match if cache_complete && !restored {
+        fed.checkpoint_startup_held()
+    } else {
+        Ok(false)
+    } {
+        Ok(true) => info!("federation startup cache: completed graph published"),
+        Ok(false) if restored => info!("federation startup cache: reusing completed checkpoint"),
+        Ok(false) => info!("federation startup cache: inputs changed or worktree is dirty"),
+        Err(error) => tracing::warn!("federation startup cache publish failed: {error}"),
+    }
+
+    if std::env::var("LAIN_STARTUP_DIGEST").as_deref() == Ok("1") {
+        match crate::federation::contracts::digest::federation_content_digest(
+            fed.backend().as_ref(),
+        ) {
+            Ok(digest) => info!("federation startup digest: {}", digest.to_hex()),
+            Err(error) => tracing::warn!("federation startup digest failed: {error}"),
+        }
+    }
+
     for (id, _) in fed.list_repos() {
         if let Some(repo) = fed.get_repo(&id) {
             repo.hold_ready(false);
@@ -480,27 +519,21 @@ async fn index_federation(fed: Arc<FederatedIndex>) {
         } else {
             stale.clone()
         };
-        for id in &to_relink {
-            let Some(repo) = fed.get_repo(id) else {
-                continue;
-            };
-            let linked = if fed.list_repos().len() > 1 {
-                match repo.relink_cross_repo().await {
-                    Ok(n) => n,
-                    Err(e) => {
-                        tracing::warn!(
-                            "lain server: cross-repo relink for '{}' failed: {e}",
-                            id.as_str()
-                        );
-                        0
-                    }
-                }
-            } else {
-                0
-            };
-            if stale.contains(id) || linked > 0 {
-                if let Err(e) = fed.project_repo(id).await {
-                    tracing::warn!("lain server: re-projecting '{}' failed: {e}", id.as_str());
+        for id in &stale {
+            if let Err(error) = fed.project_nodes(id).await {
+                tracing::warn!("lain server: node projection for '{id}' failed: {error}");
+            }
+        }
+        for id in &stale {
+            if let Err(error) = fed.project_edges(id).await {
+                tracing::warn!("lain server: edge projection for '{id}' failed: {error}");
+            }
+            fed.refresh_service_refs(id);
+        }
+        if fed.list_repos().len() > 1 {
+            for id in &to_relink {
+                if let Err(error) = fed.relink_repo(id).await {
+                    tracing::warn!("lain server: cross-repo relink for '{id}' failed: {error}");
                 }
             }
         }

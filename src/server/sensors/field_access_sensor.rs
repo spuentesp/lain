@@ -56,6 +56,7 @@ use crate::server::sensors::patterns::Patterns;
 use crate::server::sensors::util::{
     is_deny_method, lang_for_path as lang_for_path_shared, parse_for_lang, Lang,
 };
+use crate::server::sensors::SensorEntry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use tree_sitter::{Node, Tree};
@@ -115,9 +116,11 @@ pub struct FieldAccessEmission {
     pub reads: Vec<FieldRead>,
     pub escapes: BTreeSet<Escape>,
     /// `true` when the response can be fully traced (no escape
-    /// flipped it). PR 9's contract: a `false` here means the call's
-    /// `ConsumerFact.reads_complete` is also `false`.
+    /// flipped it). HTTP calls patch `ConsumerFact.reads_complete`;
+    /// topic and GraphQL operations report the incompleteness as unresolved.
     pub reads_complete: bool,
+    pub origin: FieldReadOrigin,
+    pub operation: Option<crate::federation::contracts::model::ContractKey>,
 }
 
 /// What escapes a bound identifier from tracking. Each is its own
@@ -143,17 +146,42 @@ pub struct FieldAccessSensor;
 
 // §6.5: phase 2, after the joiner has produced the `Binds` set that scope
 // rules 5 / 6 walk.
-crate::server::sensors::register_sensor!(
-    FieldAccessSensor,
-    "field_access",
-    FieldReads,
-    2,
-    |graph, root, namespace| {
+impl crate::server::sensors::Sensor for FieldAccessSensor {
+    fn name(&self) -> &'static str {
+        "field_access"
+    }
+
+    fn count_field(&self) -> crate::server::sensors::SensorCountField {
+        crate::server::sensors::SensorCountField::FieldReads
+    }
+
+    fn phase(&self) -> u8 {
+        2
+    }
+
+    fn scan(
+        &self,
+        graph: &GraphDatabase,
+        root: &Path,
+        namespace: &RepoNamespace,
+    ) -> Result<usize, LainError> {
         let repo_id = RepoId::new(root.to_string_lossy().as_ref())
             .unwrap_or_else(|_| crate::server::sensors::util::fallback_repo_id());
         scan_workspace_field_access(graph, root, namespace, &repo_id)
     }
-);
+
+    fn scan_with_report(
+        &self,
+        graph: &GraphDatabase,
+        root: &Path,
+        namespace: &RepoNamespace,
+    ) -> Result<crate::server::sensors::ScanReport, LainError> {
+        let repo_id = RepoId::new(root.to_string_lossy().as_ref())
+            .unwrap_or_else(|_| crate::server::sensors::util::fallback_repo_id());
+        scan_workspace_field_access_with_report(graph, root, namespace, &repo_id)
+    }
+}
+inventory::submit!(SensorEntry(&FieldAccessSensor));
 
 // ─── Workspace scan ───────────────────────────────────────────────
 
@@ -161,10 +189,20 @@ pub fn scan_workspace_field_access(
     graph: &GraphDatabase,
     root: &Path,
     namespace: &RepoNamespace,
-    _repo_id: &RepoId,
+    repo_id: &RepoId,
 ) -> Result<usize, LainError> {
+    scan_workspace_field_access_with_report(graph, root, namespace, repo_id)
+        .map(|report| report.emitted)
+}
+
+fn scan_workspace_field_access_with_report(
+    graph: &GraphDatabase,
+    root: &Path,
+    namespace: &RepoNamespace,
+    _repo_id: &RepoId,
+) -> Result<crate::server::sensors::ScanReport, LainError> {
     if graph.is_read_only() {
-        return Ok(0);
+        return Ok(crate::server::sensors::ScanReport::default());
     }
     let patterns = Patterns::with_overrides(root)?;
     let patterns: &Patterns = &patterns;
@@ -173,8 +211,11 @@ pub fn scan_workspace_field_access(
     // `Binds` edges by the time the field-access sensor sees it —
     // we collect them here so rule 5/6 can find the calling /
     // callee relationships.
+    let started = std::time::Instant::now();
     let calls_by_function: BTreeMap<String, BTreeSet<String>> = collect_calls_by_function(graph);
-    let http_calls = collect_http_calls(graph);
+    let http_calls = collect_operation_calls(graph);
+    let graph_ms = started.elapsed().as_millis();
+    let mut metrics = FieldAccessMetrics::default();
 
     // Wrap the per-file emission + scope walk in
     // `with_current_patterns` so the deep walker helpers
@@ -182,39 +223,52 @@ pub fn scan_workspace_field_access(
     // augmented deny set. Without this wrapper, the deny set
     // would be the bundled singleton and per-repo YAML overrides
     // would have no effect on field-access suppression.
-    let (emissions, _) = super::util::with_current_patterns(patterns, || {
-        let mut emissions: Vec<FieldAccessEmission> = Vec::new();
-        if !http_calls.is_empty() {
-            let call_paths: BTreeSet<&str> = http_calls
-                .values()
-                .map(|c| c.consumer_path.as_str())
-                .collect();
-            let by_lang = |p: &Path| {
-                let rel = graph_path(root, p);
-                if !call_paths.contains(rel.as_str()) {
-                    return None;
+    let (emissions, local_detection_ms, scope_ms) =
+        super::util::with_current_patterns(patterns, || {
+            let started = std::time::Instant::now();
+            let mut emissions: Vec<FieldAccessEmission> = Vec::new();
+            if !http_calls.is_empty() {
+                let call_paths: BTreeSet<&str> = http_calls
+                    .values()
+                    .flatten()
+                    .map(|c| c.consumer_path.as_str())
+                    .collect();
+                let by_lang = |p: &Path| {
+                    let rel = graph_path(root, p);
+                    if !call_paths.contains(rel.as_str()) {
+                        return None;
+                    }
+                    lang_for_path(&rel)
+                };
+                for (path, content, lang) in super::util::scan_files(root, by_lang) {
+                    let path_str = graph_path(root, &path);
+                    emissions.extend(detect_emissions_with_http_calls(
+                        &path_str,
+                        &content,
+                        lang,
+                        &http_calls,
+                    ));
                 }
-                lang_for_path(&rel)
-            };
-            for (path, content, lang) in super::util::scan_files(root, by_lang) {
-                let path_str = graph_path(root, &path);
-                emissions.extend(detect_emissions_with_http_calls(
-                    &path_str,
-                    &content,
-                    lang,
-                    &http_calls,
-                ));
             }
-        }
+            let local_detection_ms = started.elapsed().as_millis();
 
-        // §6.5 interprocedural pass: extend every emission with the reads
-        // of the sending function's direct callers and callees (rules
-        // 5/6) over the repo `Calls` graph (`Static{TreeSitter}`/`None`
-        // provenance only — filtered in `collect_calls_by_function`).
-        extend_emissions_with_scope(root, graph, &calls_by_function, &mut emissions);
-        (emissions, ())
-    });
+            // §6.5 interprocedural pass: extend every emission with the reads
+            // of the sending function's direct callers and callees (rules
+            // 5/6) over the repo `Calls` graph (`Static{TreeSitter}`/`None`
+            // provenance only — filtered in `collect_calls_by_function`).
+            let started = std::time::Instant::now();
+            extend_emissions_with_scope(
+                root,
+                graph,
+                &calls_by_function,
+                &mut emissions,
+                &mut metrics,
+            );
+            let scope_ms = started.elapsed().as_millis();
+            (emissions, local_detection_ms, scope_ms)
+        });
 
+    let started = std::time::Instant::now();
     let mut all_nodes: Vec<GraphNode> = Vec::new();
     let mut all_edges: Vec<GraphEdge> = Vec::new();
     for emission in &emissions {
@@ -231,13 +285,50 @@ pub fn scan_workspace_field_access(
         all_nodes.extend(nodes);
         all_edges.extend(edges);
     }
+    let emission_ms = started.elapsed().as_millis();
 
+    let started = std::time::Instant::now();
     let removed =
         graph.replace_sensor_output(SensorFieldAccessOwner::owner(), &all_nodes, &all_edges)?;
+    let replacement_ms = started.elapsed().as_millis();
+    tracing::info!(
+        graph_ms,
+        local_detection_ms,
+        scope_ms,
+        emission_ms,
+        replacement_ms,
+        metrics = ?metrics,
+        "field_access stage metrics",
+    );
     if removed > 0 {
         tracing::debug!("field_access_sensor: replaced {removed} stale FieldRef(s) for {root:?}");
     }
-    Ok(all_nodes.len())
+    let incomplete_operations: BTreeSet<String> = emissions
+        .iter()
+        .filter(|emission| {
+            !emission.reads_complete && emission.origin != FieldReadOrigin::FieldAccess
+        })
+        .filter_map(|emission| {
+            emission
+                .operation
+                .as_ref()
+                .map(|operation| operation.wire_form())
+        })
+        .collect();
+    let unresolved = if incomplete_operations.is_empty() {
+        Vec::new()
+    } else {
+        vec![crate::federation::contracts::coverage::UnresolvedRecord {
+            reason: crate::federation::contracts::model::UnresolvedReason::Unnormalized,
+            count: incomplete_operations.len(),
+            sample_ids: incomplete_operations.iter().take(5).cloned().collect(),
+        }]
+    };
+    Ok(crate::server::sensors::ScanReport {
+        emitted: all_nodes.len(),
+        error: None,
+        unresolved,
+    })
 }
 
 // ─── Per-language detection ─────────────────────────────────────
@@ -345,6 +436,8 @@ struct CallSite {
     call_id: String,
     consumer_path: String,
     consumer_line: u32,
+    origin: FieldReadOrigin,
+    operation: Option<crate::federation::contracts::model::ContractKey>,
 }
 
 #[cfg(test)]
@@ -359,10 +452,10 @@ thread_local! {
 /// `ReadsFrom` edge the field-access sensor emits.
 ///
 /// Reserved for PR 9.
-fn collect_http_calls(graph: &GraphDatabase) -> BTreeMap<String, CallSite> {
+fn collect_http_calls(graph: &GraphDatabase) -> BTreeMap<String, Vec<CallSite>> {
     #[cfg(test)]
     HTTP_CALL_COLLECTION_COUNT.with(|count| count.set(count.get() + 1));
-    let mut out: BTreeMap<String, CallSite> = BTreeMap::new();
+    let mut out: BTreeMap<String, Vec<CallSite>> = BTreeMap::new();
     let nodes = graph.get_all_nodes();
     let calls: BTreeMap<String, String> = nodes
         .iter()
@@ -382,14 +475,69 @@ fn collect_http_calls(graph: &GraphDatabase) -> BTreeMap<String, CallSite> {
         let site = edge.site.as_ref();
         let line = site.map(|s| s.line).unwrap_or(0);
         let consumer_path = site.map(|s| s.path.clone()).unwrap_or_default();
-        out.insert(
-            edge.source_id.clone(),
-            CallSite {
+        out.entry(edge.source_id.clone())
+            .or_default()
+            .push(CallSite {
                 call_id: edge.target_id.clone(),
                 consumer_path,
                 consumer_line: line,
-            },
-        );
+                origin: FieldReadOrigin::FieldAccess,
+                operation: None,
+            });
+    }
+    out
+}
+
+fn collect_operation_calls(graph: &GraphDatabase) -> BTreeMap<String, Vec<CallSite>> {
+    use crate::federation::contracts::model::{ContractFact, ContractKey};
+    let mut out = collect_http_calls(graph);
+    let mut sites_by_source = BTreeMap::new();
+    for edge in graph.all_edges() {
+        if edge.site.is_some() {
+            sites_by_source
+                .entry(edge.source_id.clone())
+                .or_insert_with(Vec::new)
+                .push(edge);
+        }
+    }
+    for node in graph.get_all_nodes() {
+        for fact in &node.contract {
+            let (origin, operation) = match fact {
+                ContractFact::TopicConsumer(topic) => (
+                    FieldReadOrigin::TopicConsumer,
+                    ContractKey::Topic {
+                        broker: topic.broker.clone(),
+                        name: topic.name.clone(),
+                    },
+                ),
+                ContractFact::GraphqlConsumer(graphql) => (
+                    FieldReadOrigin::GraphqlConsumer,
+                    ContractKey::Graphql {
+                        op: graphql.op,
+                        field: graphql.field.clone(),
+                    },
+                ),
+                _ => continue,
+            };
+            let site = sites_by_source
+                .get(&node.id)
+                .and_then(|edges| edges.first())
+                .and_then(|edge| edge.site.clone());
+            out.entry(node.id.clone()).or_default().push(CallSite {
+                call_id: node.id.clone(),
+                consumer_path: site
+                    .as_ref()
+                    .map(|site| site.path.clone())
+                    .unwrap_or_else(|| node.path.clone()),
+                consumer_line: site
+                    .as_ref()
+                    .map(|site| site.line)
+                    .or(node.line_start)
+                    .unwrap_or(1),
+                origin,
+                operation: Some(operation),
+            });
+        }
     }
     out
 }
@@ -421,17 +569,18 @@ pub fn detect_emissions(
     graph: &GraphDatabase,
     _calls_by_function: &BTreeMap<String, BTreeSet<String>>,
 ) -> Vec<FieldAccessEmission> {
-    detect_emissions_with_http_calls(path, content, lang, &collect_http_calls(graph))
+    detect_emissions_with_http_calls(path, content, lang, &collect_operation_calls(graph))
 }
 
 fn detect_emissions_with_http_calls(
     path: &str,
     content: &str,
     lang: Lang,
-    calls: &BTreeMap<String, CallSite>,
+    calls: &BTreeMap<String, Vec<CallSite>>,
 ) -> Vec<FieldAccessEmission> {
     if !calls
         .values()
+        .flatten()
         .any(|call_site| call_site.consumer_path == path)
     {
         return Vec::new();
@@ -442,21 +591,23 @@ fn detect_emissions_with_http_calls(
     let src = content.as_bytes();
     let functions = collect_function_spans(tree.root_node());
     let mut emissions: Vec<FieldAccessEmission> = Vec::new();
-    for (function_id, call_site) in calls {
-        // Only call sites that live in the file being scanned —
-        // anything else would analyze this file's tree against
-        // another file's call line.
-        if call_site.consumer_path != path {
-            continue;
+    for (function_id, call_sites) in calls {
+        for call_site in call_sites {
+            // Only call sites that live in the file being scanned —
+            // anything else would analyze this file's tree against
+            // another file's call line.
+            if call_site.consumer_path != path {
+                continue;
+            }
+            emissions.extend(analyze_sending_function(
+                &functions,
+                src,
+                lang,
+                function_id,
+                call_site,
+                path,
+            ));
         }
-        emissions.extend(analyze_sending_function(
-            &functions,
-            src,
-            lang,
-            function_id,
-            call_site,
-            path,
-        ));
     }
     emissions
 }
@@ -466,6 +617,37 @@ fn parse(lang: Lang, src: &str) -> Option<Tree> {
 }
 
 // ─── Per-function analysis ───────────────────────────────────────
+
+fn parameter_name<'a>(node: Node<'a>, src: &'a [u8]) -> Option<&'a str> {
+    if matches!(
+        node.kind(),
+        "identifier" | "simple_identifier" | "shorthand_property_identifier"
+    ) {
+        return node.utf8_text(src).ok();
+    }
+    if let Some(name) = node.child_by_field_name("name") {
+        return parameter_name(name, src);
+    }
+    let mut cursor = node.walk();
+    let child = node.named_children(&mut cursor).next();
+    child.and_then(|child| parameter_name(child, src))
+}
+
+fn payload_parameter(function_node: Node, src: &[u8]) -> Option<String> {
+    let parameters = function_node
+        .child_by_field_name("parameters")
+        .or_else(|| function_node.child_by_field_name("formal_parameters"))?;
+    let mut cursor = parameters.walk();
+    for parameter in parameters.named_children(&mut cursor) {
+        let Some(name) = parameter_name(parameter, src) else {
+            continue;
+        };
+        if !matches!(name, "self" | "this") {
+            return Some(name.to_string());
+        }
+    }
+    None
+}
 
 /// Analyze the function whose id is `function_id` for reads on the
 /// response bound at `call_site.call_id`. Returns one emission per
@@ -490,6 +672,11 @@ fn analyze_sending_function(
     // call's binding (rule 1).
     let mut bound: BTreeMap<String, JsonPath> = BTreeMap::new();
     bound.insert("__response__".to_string(), JsonPath(Vec::new()));
+    if call_site.origin != FieldReadOrigin::FieldAccess {
+        if let Some(payload) = payload_parameter(function_node, src) {
+            bound.insert(payload, JsonPath(Vec::new()));
+        }
+    }
 
     // Per-bound-name escape flag: the §6.5 paragraph "a bound
     // identifier is … yielded" lists the forms that flip
@@ -523,6 +710,8 @@ fn analyze_sending_function(
         reads,
         escapes,
         reads_complete,
+        origin: call_site.origin,
+        operation: call_site.operation.clone(),
     }]
 }
 
@@ -623,9 +812,8 @@ impl<'a> FrameCtx<'a> {
     }
 }
 
-/// Walk `node`, applying the binding / read / escape rules. The
-/// recursion is delegated to `walk_ts` so a single traversal calls
-/// `walk` exactly once per AST node.
+/// Walk `node` and its descendants in source order, applying the
+/// binding / read / escape rules with sender-frame semantics.
 fn walk<'a>(
     node: Node<'a>,
     src: &[u8],
@@ -635,29 +823,37 @@ fn walk<'a>(
     escapes: &mut BTreeSet<Escape>,
     file_path: &str,
 ) {
-    // Pre-order: handle this node (rules 1–4 / reads / escapes) so
-    // the bound name is registered before its children reference
-    // it. The recursive descent lives in `walk_ts`. `walk` is the
-    // single-function path (S frame / unit tests) → sender semantics.
-    let line = (node.start_position().row as u32) + 1;
-    let frame = FrameCtx::sender();
-    match lang {
-        Lang::Python => {
-            handle_python_node(node, src, bound, reads, escapes, file_path, line, frame)
+    let mut pending = vec![node];
+    while let Some(current) = pending.pop() {
+        let line = (current.start_position().row as u32) + 1;
+        let frame = FrameCtx::sender();
+        match lang {
+            Lang::Python => {
+                handle_python_node(current, src, bound, reads, escapes, file_path, line, frame)
+            }
+            Lang::TsJs | Lang::Ts | Lang::Tsx => {
+                handle_tsjs_node(current, src, bound, reads, escapes, file_path, line, frame)
+            }
+            Lang::Rust => {
+                handle_rust_node(current, src, bound, reads, escapes, file_path, line, frame)
+            }
+            Lang::Go => handle_go_node(current, src, bound, reads, escapes, file_path, line, frame),
+            Lang::Java => {
+                handle_java_node(current, src, bound, reads, escapes, file_path, line, frame)
+            }
+            Lang::CSharp => {
+                handle_csharp_node(current, src, bound, reads, escapes, file_path, line, frame)
+            }
+            Lang::Ruby => {
+                handle_ruby_node(current, src, bound, reads, escapes, file_path, line, frame)
+            }
+            Lang::Kotlin => {
+                handle_kotlin_node(current, src, bound, reads, escapes, file_path, line, frame)
+            }
         }
-        Lang::TsJs | Lang::Ts | Lang::Tsx => {
-            handle_tsjs_node(node, src, bound, reads, escapes, file_path, line, frame)
-        }
-        Lang::Rust => handle_rust_node(node, src, bound, reads, escapes, file_path, line, frame),
-        Lang::Go => handle_go_node(node, src, bound, reads, escapes, file_path, line, frame),
-        Lang::Java => handle_java_node(node, src, bound, reads, escapes, file_path, line, frame),
-        Lang::CSharp => {
-            handle_csharp_node(node, src, bound, reads, escapes, file_path, line, frame)
-        }
-        Lang::Ruby => handle_ruby_node(node, src, bound, reads, escapes, file_path, line, frame),
-        Lang::Kotlin => {
-            handle_kotlin_node(node, src, bound, reads, escapes, file_path, line, frame)
-        }
+        let mut cursor = current.walk();
+        let children: Vec<_> = current.named_children(&mut cursor).collect();
+        pending.extend(children.into_iter().rev());
     }
 }
 
@@ -924,6 +1120,13 @@ fn handle_python_return(
     }
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
+        if child.kind() == "subscript" {
+            if let Some((_, _, _, key_ok)) = chain_unwrap_subscript_or_attr(child, src, bound) {
+                if !key_ok {
+                    escapes.insert(Escape::Stored);
+                }
+            }
+        }
         if returns_bound_identifier(child, src, bound) {
             escapes.insert(Escape::Returned);
         }
@@ -1132,32 +1335,39 @@ fn handle_subscript<'a>(
     let Some(value_text) = value.utf8_text(src).ok() else {
         return;
     };
-    if let Some(prefix) = bound.get(value_text) {
-        let (key_text, exact) = match index_node.kind() {
-            "string" => {
-                let raw = index_node.utf8_text(src).ok().unwrap_or_default();
-                let s = strip_python_string_quotes(raw);
-                (s.to_string(), true)
-            }
-            "integer" | "number" => {
-                let s = index_node.utf8_text(src).ok().unwrap_or_default();
-                (s.to_string(), true)
-            }
-            _ => (String::new(), false),
-        };
-        if !exact {
-            escapes.insert(Escape::Stored);
+    let (prefix, parent_exact, parent_key_ok) = if let Some(prefix) = bound.get(value_text) {
+        (prefix.clone(), true, true)
+    } else {
+        let Some((_, prefix, exact, key_ok)) = chain_unwrap_subscript_or_attr(value, src, bound)
+        else {
             return;
+        };
+        (prefix, exact, key_ok)
+    };
+    let (key_text, exact) = match index_node.kind() {
+        "string" => {
+            let raw = index_node.utf8_text(src).ok().unwrap_or_default();
+            let s = strip_python_string_quotes(raw);
+            (s.to_string(), true)
         }
-        let mut chain = prefix.0.clone();
-        chain.push(PathSegment::Name(key_text));
-        reads.push(FieldRead {
-            chain: JsonPath(chain),
-            exact: true,
-            path: file_path.to_string(),
-            line,
-        });
+        "integer" | "number" => {
+            let s = index_node.utf8_text(src).ok().unwrap_or_default();
+            (s.to_string(), true)
+        }
+        _ => (String::new(), false),
+    };
+    if !exact || !parent_exact || !parent_key_ok {
+        escapes.insert(Escape::Stored);
+        return;
     }
+    let mut chain = prefix.0.clone();
+    chain.push(PathSegment::Name(key_text));
+    reads.push(FieldRead {
+        chain: JsonPath(chain),
+        exact: true,
+        path: file_path.to_string(),
+        line,
+    });
 }
 
 fn handle_attribute<'a>(
@@ -4016,7 +4226,8 @@ fn build_emission(
         node.contract = vec![ContractFact::FieldRead(FieldReadFact {
             chain: read.chain.clone(),
             exact: read.exact,
-            origin: FieldReadOrigin::FieldAccess,
+            origin: emission.origin,
+            operation: emission.operation.clone(),
         })];
         // Only link `ReadsField` when the reader is known; an
         // unattributed read keeps its `FieldRef` node and `ReadsFrom`
@@ -4069,34 +4280,100 @@ fn patch_reads_complete(graph: &GraphDatabase, call_id: &str) -> Result<(), Lain
     Ok(())
 }
 
-/// Lazily parse and cache a workspace source file for the
-/// interprocedural pass. Returns `false` when the path is not a
-/// supported source or cannot be read/parsed.
-fn ensure_file(files: &mut BTreeMap<String, (Lang, String, Tree)>, root: &Path, rel: &str) -> bool {
-    if files.contains_key(rel) {
-        return true;
+#[derive(Debug, Default, PartialEq, Eq)]
+struct FieldAccessMetrics {
+    scope_http: usize,
+    scope_payload: usize,
+    scope_cache_hits: usize,
+    file_metadata_builds: usize,
+    path_index_builds: usize,
+    graph_snapshots: usize,
+}
+
+#[derive(Debug)]
+struct FunctionDef {
+    name: String,
+    #[allow(dead_code)]
+    line: u32,
+    range: tree_sitter::Range,
+}
+
+struct ParsedFile {
+    lang: Lang,
+    content: std::sync::Arc<str>,
+    tree: Tree,
+    defs: Vec<FunctionDef>,
+    metadata: FunctionMetadata,
+}
+
+impl ParsedFile {
+    fn node(&self, def: &FunctionDef) -> Option<tree_sitter::Node<'_>> {
+        self.tree
+            .root_node()
+            .descendant_for_byte_range(def.range.start_byte, def.range.end_byte)
     }
-    let Some(lang) = lang_for_path(rel) else {
-        return false;
-    };
-    let Ok(content) = std::fs::read_to_string(root.join(rel)) else {
-        return false;
-    };
-    let Some(tree) = parse(lang, &content) else {
-        return false;
-    };
-    files.insert(rel.to_string(), (lang, content, tree));
-    true
+}
+
+#[derive(Default)]
+struct ParsedFiles {
+    entries: std::collections::BTreeMap<String, ParsedFile>,
+}
+
+impl ParsedFiles {
+    fn ensure(&mut self, root: &Path, rel: &str, metrics: &mut FieldAccessMetrics) -> bool {
+        if self.entries.contains_key(rel) {
+            return true;
+        }
+        let Some(file) = Self::load(root, rel, metrics) else {
+            return false;
+        };
+        self.entries.insert(rel.to_string(), file);
+        true
+    }
+
+    fn load(root: &Path, rel: &str, metrics: &mut FieldAccessMetrics) -> Option<ParsedFile> {
+        let lang = lang_for_path(rel)?;
+        let path = root.join(rel);
+        let content = std::fs::read_to_string(path).ok()?;
+        let content: std::sync::Arc<str> = std::sync::Arc::from(content.as_str());
+        let tree = parse(lang, &content)?;
+        let functions = collect_function_defs(tree.root_node(), content.as_bytes());
+        let metadata = collect_function_metadata(&functions, content.as_bytes());
+        let defs = functions
+            .into_iter()
+            .map(|(name, line, node)| FunctionDef {
+                name,
+                line,
+                range: node.range(),
+            })
+            .collect();
+        metrics.file_metadata_builds += 1;
+        Some(ParsedFile {
+            lang,
+            content,
+            tree,
+            defs,
+            metadata,
+        })
+    }
+
+    fn get(&self, rel: &str) -> Option<&ParsedFile> {
+        self.entries.get(rel)
+    }
 }
 
 /// First-wins metadata merge: the sender's file is merged first so
 /// its `return_text` for S wins over a same-named function elsewhere.
-fn merge_metadata(into: &mut FunctionMetadata, from: FunctionMetadata) {
-    for (k, v) in from.parameters {
-        into.parameters.entry(k).or_insert(v);
+fn merge_metadata(into: &mut FunctionMetadata, from: &FunctionMetadata) {
+    for (k, v) in &from.parameters {
+        if !into.parameters.contains_key(k) {
+            into.parameters.insert(k.clone(), v.clone());
+        }
     }
-    for (k, v) in from.return_text {
-        into.return_text.entry(k).or_insert(v);
+    for (k, v) in &from.return_text {
+        if !into.return_text.contains_key(k) {
+            into.return_text.insert(k.clone(), v.clone());
+        }
     }
 }
 
@@ -4121,6 +4398,7 @@ fn extend_emissions_with_scope(
     graph: &GraphDatabase,
     calls_by_function: &BTreeMap<String, BTreeSet<String>>,
     emissions: &mut [FieldAccessEmission],
+    metrics: &mut FieldAccessMetrics,
 ) {
     if emissions.is_empty() {
         return;
@@ -4143,7 +4421,7 @@ fn extend_emissions_with_scope(
         }
     }
     // Parsed-file cache shared across emissions.
-    let mut files: BTreeMap<String, (Lang, String, Tree)> = BTreeMap::new();
+    let mut files = ParsedFiles::default();
 
     for emission in emissions.iter_mut() {
         if emission.sender_id.is_empty() {
@@ -4189,12 +4467,12 @@ fn extend_emissions_with_scope(
         // Load S's file and every member file we can; skip members
         // whose file cannot be loaded (they are marked walked below
         // so their callees are not blocked).
-        if !ensure_file(&mut files, root, &sender_path) {
+        if !files.ensure(root, &sender_path, metrics) {
             continue;
         }
         let mut unloadable: BTreeSet<String> = BTreeSet::new();
         for (_, path, _) in &members {
-            if !ensure_file(&mut files, root, path) {
+            if !files.ensure(root, path, metrics) {
                 unloadable.insert(path.clone());
             }
         }
@@ -4205,50 +4483,59 @@ fn extend_emissions_with_scope(
             parameters: BTreeMap::new(),
             return_text: BTreeMap::new(),
         };
-        {
-            let (_, content, tree) = &files[&sender_path];
-            let defs = collect_function_defs(tree.root_node(), content.as_bytes());
-            merge_metadata(
-                &mut metadata,
-                collect_function_metadata(&defs, content.as_bytes()),
-            );
-        }
+        merge_metadata(
+            &mut metadata,
+            &files
+                .get(&sender_path)
+                .expect("sender file is loaded")
+                .metadata,
+        );
         for (_, path, _) in &members {
             if unloadable.contains(path) {
                 continue;
             }
-            let (_, content, tree) = &files[path];
-            let defs = collect_function_defs(tree.root_node(), content.as_bytes());
             merge_metadata(
                 &mut metadata,
-                collect_function_metadata(&defs, content.as_bytes()),
+                &files
+                    .get(path)
+                    .expect("loadable member file is cached")
+                    .metadata,
             );
         }
 
         // Locate S's AST node in its file (by graph name).
-        let (_, s_content, s_tree) = &files[&sender_path];
-        let s_defs = collect_function_defs(s_tree.root_node(), s_content.as_bytes());
-        let Some(sender_node) = s_defs
+        let s_file = files.get(&sender_path).expect("sender file is loaded");
+        let Some(sender_node) = s_file
+            .defs
             .iter()
-            .find(|(n, _, _)| n == &sender_name)
-            .map(|(_, _, node)| *node)
+            .find(|def| def.name == sender_name)
+            .and_then(|def| s_file.node(def))
         else {
             // Graph name ≠ AST name — keep phase A's reads.
             continue;
         };
+        if function_def_name(sender_node, s_file.content.as_bytes()).as_deref()
+            != Some(sender_name.as_str())
+        {
+            continue;
+        }
 
         // Fresh binding state for this emission's scope walk.
         let mut bound: BTreeMap<String, JsonPath> = BTreeMap::new();
         bound.insert("__response__".to_string(), JsonPath(Vec::new()));
         bound.insert(sender_name.clone(), JsonPath(Vec::new()));
+        if emission.origin != FieldReadOrigin::FieldAccess {
+            if let Some(payload) = payload_parameter(sender_node, s_file.content.as_bytes()) {
+                bound.insert(payload, JsonPath(Vec::new()));
+            }
+        }
         let mut reads: Vec<FieldRead> = Vec::new();
         let mut escapes: BTreeSet<Escape> = BTreeSet::new();
 
         // Walk S first (sender frame — rule 1 over-binding applies),
         // establishing the bindings rule 5 resolves against.
         {
-            let (s_lang, s_content, _) = &files[&sender_path];
-            let s_bytes = s_content.as_bytes();
+            let s_bytes = s_file.content.as_bytes();
             let s_path = sender_path.clone();
             let sender_frame = FrameCtx {
                 sender_name: &sender_name,
@@ -4259,7 +4546,7 @@ fn extend_emissions_with_scope(
                 walk_with_metadata(
                     n,
                     s_bytes,
-                    *s_lang,
+                    s_file.lang,
                     &mut bound,
                     &mut reads,
                     &mut escapes,
@@ -4312,21 +4599,25 @@ fn extend_emissions_with_scope(
                     walked.insert(id.clone());
                     continue;
                 }
-                let Some((m_lang, m_content, m_tree)) = files.get(path) else {
+                let Some(m_file) = files.get(path) else {
                     walked.insert(id.clone());
                     continue;
                 };
-                let m_bytes = m_content.as_bytes();
-                let m_defs = collect_function_defs(m_tree.root_node(), m_bytes);
-                let Some(member_node) = m_defs
+                let m_bytes = m_file.content.as_bytes();
+                let Some(member_node) = m_file
+                    .defs
                     .iter()
-                    .find(|(n, _, _)| n == name)
-                    .map(|(_, _, node)| *node)
+                    .find(|def| &def.name == name)
+                    .and_then(|def| m_file.node(def))
                 else {
                     // Graph name ≠ AST name — skip this frame.
                     walked.insert(id.clone());
                     continue;
                 };
+                if function_def_name(member_node, m_bytes).as_deref() != Some(name.as_str()) {
+                    walked.insert(id.clone());
+                    continue;
+                }
                 let scope_frame = FrameCtx {
                     sender_name: &sender_name,
                     is_sender: false,
@@ -4341,7 +4632,7 @@ fn extend_emissions_with_scope(
                     walk_with_metadata(
                         n,
                         m_bytes,
-                        *m_lang,
+                        m_file.lang,
                         &mut bound,
                         &mut reads,
                         &mut escapes,
@@ -4503,6 +4794,8 @@ fn detect_emissions_with_calls<'a>(
         reads: reads_clone,
         escapes: escapes_clone,
         reads_complete: escapes.is_empty(),
+        origin: FieldReadOrigin::FieldAccess,
+        operation: None,
     });
     emissions
 }
@@ -4730,6 +5023,7 @@ fn walk_in_scope<'a>(
 }
 
 /// Per-function metadata needed to apply rules 5 and 6.
+#[derive(Clone)]
 struct FunctionMetadata {
     /// function name → list of parameter names in declaration
     /// order. Empty for parameter-less functions.
@@ -5135,6 +5429,9 @@ fn apply_rule6_tsjs<'a>(
 // ─── Tests ───────────────────────────────────────────────────────
 
 #[cfg(test)]
+mod reuse_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::schema::{NodeType, RepoNamespace};
@@ -5161,11 +5458,13 @@ mod tests {
         let mut calls = BTreeMap::new();
         calls.insert(
             "fn-load".to_string(),
-            CallSite {
+            vec![CallSite {
                 call_id: "call-1".to_string(),
                 consumer_path: "client.py".to_string(),
                 consumer_line: 3,
-            },
+                origin: FieldReadOrigin::FieldAccess,
+                operation: None,
+            }],
         );
         let emissions = detect_emissions_with_http_calls("client.py", src, Lang::Python, &calls);
         assert_eq!(emissions.len(), 1, "one emission per consumer call site");
@@ -5229,12 +5528,6 @@ mod tests {
         JsonPath(segments)
     }
 
-    /// Helper to drive `walk` over a parsed tree. Wraps the
-    /// recursive call so each test stays in a single lifetime scope
-    /// — calling `walk` from inside a `FnMut(Node)` closure was
-    /// tripping the borrow checker (the closure's `Node` has its
-    /// own lifetime, not the one `walk` would introduce on its
-    /// own `'a` parameter).
     fn walk_tree<'a>(
         root: Node<'a>,
         src: &'a [u8],
@@ -5244,9 +5537,7 @@ mod tests {
         escapes: &mut BTreeSet<Escape>,
         file_path: &'a str,
     ) {
-        walk_ts(root, &mut |n| {
-            walk(n, src, lang, bound, reads, escapes, file_path)
-        });
+        walk(root, src, lang, bound, reads, escapes, file_path);
     }
 
     #[test]
@@ -5292,6 +5583,8 @@ mod tests {
             }],
             escapes: BTreeSet::new(),
             reads_complete: true,
+            origin: FieldReadOrigin::FieldAccess,
+            operation: None,
         };
 
         let (nodes, edges) = build_emission(&graph, &emission, &ns);
@@ -5324,6 +5617,8 @@ mod tests {
                 reads: vec![],
                 escapes: BTreeSet::new(),
                 reads_complete: true,
+                origin: FieldReadOrigin::FieldAccess,
+                operation: None,
             },
             NodeType::FieldRef,
             RepoNamespace::for_test(),
@@ -6415,6 +6710,8 @@ async function fetch_data() { return await fetch(\"/a\"); }
             }],
             escapes: BTreeSet::new(),
             reads_complete: true,
+            origin: FieldReadOrigin::FieldAccess,
+            operation: None,
         };
         let (_nodes, edges) = build_emission(&graph, &emission, &ns);
         let reads_field = edges

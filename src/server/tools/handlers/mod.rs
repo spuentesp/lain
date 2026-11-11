@@ -10,6 +10,7 @@ pub mod metrics;
 pub mod navigation;
 pub mod search;
 pub mod semantic;
+pub mod structured;
 // `filesystem` (read_file / list_directory / find_files) was removed:
 // 112 lines of handler and 151 lines of tests for three functions that
 // were never registered as MCP tools, so no agent could reach them. The
@@ -37,6 +38,8 @@ mod enrichment_tests;
 mod gitops_tests;
 #[cfg(test)]
 mod metrics_tests;
+#[cfg(test)]
+mod navigation_tests;
 #[cfg(test)]
 mod query_tests;
 #[cfg(test)]

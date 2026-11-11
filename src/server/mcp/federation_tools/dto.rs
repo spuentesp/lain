@@ -64,6 +64,13 @@ pub struct CrossRepoBlastRadius {
     pub by_repo: BTreeMap<String, Vec<String>>,
     pub total_count: usize,
     pub truncated: bool,
+    /// Why the answer cannot be read as complete, or `None` when it can.
+    /// Covers duplicate seed names, stale or incomplete indexing, runtime
+    /// dispatch, and traversal truncation. Omitted when the index has no
+    /// observed gap. Typed as the shared reason enum so the wire label
+    /// cannot drift from the vocabulary every other tool uses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer_scope: Option<crate::server::tools::answer_scope::IncompleteReason>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

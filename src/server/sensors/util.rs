@@ -1091,6 +1091,10 @@ pub fn emit_graphql_field_refs(
             chain: JsonPath(vec![PathSegment::Name(sel.clone())]),
             exact: true,
             origin: FieldReadOrigin::GraphqlConsumer,
+            operation: Some(crate::federation::contracts::model::ContractKey::Graphql {
+                op,
+                field: field.to_string(),
+            }),
         })];
         all_nodes.push(ref_node);
         all_edges.push(GraphEdge::new(

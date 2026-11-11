@@ -1,0 +1,4979 @@
+{
+  "started_utc": "2026-11-07T04:45:27.999629+00:00",
+  "mode": "static-no-lsp",
+  "analyzer_revision": 9,
+  "binary_sha256": "f181991e132306b1b17da6019de18a71db451d92721e4796e10b81390c93f503",
+  "smokes": [
+    {
+      "group": "openshell",
+      "exit_code": 0,
+      "elapsed_s": 77.68612994599971,
+      "stdout": "federation states: ready ready ready\nrpc contracts: 120\nbound consumers: 21\nPASS: at least one RPC contract binds a consumer\nparse_sandbox_policy callers by repo: {'nemo-fabric': 42, 'nemoclaw': 57, 'openshell': 96}\nPASS: nemo-fabric calls into openshell\n"
+    },
+    {
+      "group": "nat",
+      "exit_code": 0,
+      "elapsed_s": 26.962887399015017,
+      "stdout": "federation states: ready ready ready\nhttp endpoints: 22 bound consumers: 1\nHTTP provider source scopes: {'declared': 2, 'example': 1, 'mixed': 1, 'non_test_source': 13, 'test': 5}\nHTTP bound-consumer source scopes: {'test': 1}\nNon-test source HTTP bindings: 0\nRuntime production coverage: not established by this static smoke\nunresolved consumers: 41 {'no_match': 30, 'no_route_in_service': 9, 'env_unmapped': 2}\n--- declared providers present ---\nOK   http:POST /chat/stream\nOK   http:POST /chat\nOK   http:GET /mcp/client/tool/list\nOK   http:GET /mcp/client/tool/list/per_user\n--- SQL source is not a GraphQL consumer ---\nOK   no MySQL-to-GraphQL false consumers\n--- client callback is not a WebSocket provider ---\nOK   no /async callback provider\n--- no garbage ANY routes (prose or log lines as paths) ---\n0\n--- nat-ui Next.js API route ---\nOK   http:ANY /api/mcp/clients\n--- the UI proxy is attributed to the nat service ---\nOK   proxy/server.js -> no_route_in_service (service nat)\nPASS: expected routes and attribution verified; source-scope coverage reported separately\n"
+    }
+  ],
+  "nat_cold": {
+    "http_contracts": [
+      {
+        "bound_consumers": 0,
+        "endpoint": {
+          "key": "http:GET /.well-known/oauth-protected-resource",
+          "service": "nat"
+        },
+        "has_schema": false,
+        "providers": [
+          {
+            "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+            "id": "nat:HttpRoute:packages/nvidia_nat_mcp/tests/server/test_add_root_level_routes.py:GET /.well-known/oauth-protected-resource:38",
+            "line": 38,
+            "path": "packages/nvidia_nat_mcp/tests/server/test_add_root_level_routes.py",
+            "repo": "nat",
+            "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_mcp/tests/server/test_add_root_level_routes.py:38"
+          }
+        ]
+      },
+      {
+        "bound_consumers": 0,
+        "endpoint": {
+          "key": "http:GET /auth/redirect",
+          "service": "nat"
+        },
+        "has_schema": false,
+        "providers": [
+          {
+            "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+            "id": "nat:HttpRoute:packages/nvidia_nat_core/src/nat/front_ends/console/authentication_flow_handler.py:GET /auth/redirect:230",
+            "line": 230,
+            "path": "packages/nvidia_nat_core/src/nat/front_ends/console/authentication_flow_handler.py",
+            "repo": "nat",
+            "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_core/src/nat/front_ends/console/authentication_flow_handler.py:230"
+          }
+        ]
+      },
+      {
+        "bound_consumers": 0,
+        "endpoint": {
+          "key": "http:GET /custom",
+          "service": "nat"
+        },
+        "has_schema": false,
+        "providers": [
+          {
+            "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+            "id": "nat:HttpRoute:packages/nvidia_nat_core/tests/nat/front_ends/fastapi/test_fastapi_front_end_plugin.py:GET /custom:68",
+            "line": 68,
+            "path": "packages/nvidia_nat_core/tests/nat/front_ends/fastapi/test_fastapi_front_end_plugin.py",
+            "repo": "nat",
+            "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_core/tests/nat/front_ends/fastapi/test_fastapi_front_end_plugin.py:68"
+          }
+        ]
+      },
+      {
+        "bound_consumers": 0,
+        "endpoint": {
+          "key": "http:GET /executions/{}",
+          "service": "nat"
+        },
+        "has_schema": false,
+        "providers": [
+          {
+            "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+            "id": "nat:HttpRoute:packages/nvidia_nat_core/src/nat/front_ends/fastapi/routes/execution.py:GET /executions/{execution_id}:128",
+            "line": 128,
+            "path": "packages/nvidia_nat_core/src/nat/front_ends/fastapi/routes/execution.py",
+            "repo": "nat",
+            "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_core/src/nat/front_ends/fastapi/routes/execution.py:128"
+          }
+        ]
+      },
+      {
+        "bound_consumers": 0,
+        "endpoint": {
+          "key": "http:GET /health",
+          "service": "nat"
+        },
+        "has_schema": false,
+        "providers": [
+          {
+            "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+            "id": "nat:HttpRoute:packages/nvidia_nat_core/src/nat/front_ends/fastapi/routes/health.py:GET /health:36",
+            "line": 36,
+            "path": "packages/nvidia_nat_core/src/nat/front_ends/fastapi/routes/health.py",
+            "repo": "nat",
+            "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_core/src/nat/front_ends/fastapi/routes/health.py:36"
+          },
+          {
+            "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+            "id": "nat:HttpRoute:packages/nvidia_nat_mcp/tests/server/test_add_root_level_routes.py:GET /health:48",
+            "line": 48,
+            "path": "packages/nvidia_nat_mcp/tests/server/test_add_root_level_routes.py",
+            "repo": "nat",
+            "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_mcp/tests/server/test_add_root_level_routes.py:48"
+          }
+        ]
+      },
+      {
+        "bound_consumers": 0,
+        "endpoint": {
+          "key": "http:GET /mcp/client/tool/list",
+          "service": "nat"
+        },
+        "has_schema": false,
+        "providers": [
+          {
+            "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+            "id": "nat:HttpRoute:packages/nvidia_nat_mcp/src/nat/plugins/mcp/client/fastapi_routes.py:GET /mcp/client/tool/list:222",
+            "line": 222,
+            "path": "packages/nvidia_nat_mcp/src/nat/plugins/mcp/client/fastapi_routes.py",
+            "repo": "nat",
+            "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_mcp/src/nat/plugins/mcp/client/fastapi_routes.py:222"
+          }
+        ]
+      },
+      {
+        "bound_consumers": 0,
+        "endpoint": {
+          "key": "http:GET /mcp/client/tool/list/per_user",
+          "service": "nat"
+        },
+        "has_schema": false,
+        "providers": [
+          {
+            "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+            "id": "nat:HttpRoute:packages/nvidia_nat_mcp/src/nat/plugins/mcp/client/fastapi_routes.py:GET /mcp/client/tool/list/per_user:257",
+            "line": 257,
+            "path": "packages/nvidia_nat_mcp/src/nat/plugins/mcp/client/fastapi_routes.py",
+            "repo": "nat",
+            "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_mcp/src/nat/plugins/mcp/client/fastapi_routes.py:257"
+          }
+        ]
+      },
+      {
+        "bound_consumers": 0,
+        "endpoint": {
+          "key": "http:GET /monitor/users",
+          "service": "nat"
+        },
+        "has_schema": false,
+        "providers": [
+          {
+            "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+            "id": "nat:HttpRoute:packages/nvidia_nat_core/src/nat/front_ends/fastapi/routes/monitor.py:GET /monitor/users:62",
+            "line": 62,
+            "path": "packages/nvidia_nat_core/src/nat/front_ends/fastapi/routes/monitor.py",
+            "repo": "nat",
+            "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_core/src/nat/front_ends/fastapi/routes/monitor.py:62"
+          }
+        ]
+      },
+      {
+        "bound_consumers": 0,
+        "endpoint": {
+          "key": "http:GET /oauth/authorize",
+          "service": "nat"
+        },
+        "has_schema": false,
+        "providers": [
+          {
+            "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+            "id": "nat:HttpRoute:packages/nvidia_nat_core/tests/nat/front_ends/auth_flow_handlers/mock_oauth2_server.py:GET /oauth/authorize:185",
+            "line": 185,
+            "path": "packages/nvidia_nat_core/tests/nat/front_ends/auth_flow_handlers/mock_oauth2_server.py",
+            "repo": "nat",
+            "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_core/tests/nat/front_ends/auth_flow_handlers/mock_oauth2_server.py:185"
+          }
+        ]
+      },
+      {
+        "bound_consumers": 0,
+        "endpoint": {
+          "key": "http:GET /static/{**}",
+          "service": "nat"
+        },
+        "has_schema": false,
+        "providers": [
+          {
+            "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+            "id": "nat:HttpRoute:packages/nvidia_nat_core/src/nat/front_ends/fastapi/routes/static.py:GET /static/{file_path%3Apath}:126",
+            "line": 126,
+            "path": "packages/nvidia_nat_core/src/nat/front_ends/fastapi/routes/static.py",
+            "repo": "nat",
+            "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_core/src/nat/front_ends/fastapi/routes/static.py:126"
+          }
+        ]
+      },
+      {
+        "bound_consumers": 0,
+        "endpoint": {
+          "key": "http:POST /alerts",
+          "service": "nat"
+        },
+        "has_schema": false,
+        "providers": [
+          {
+            "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+            "id": "nat:HttpRoute:examples/advanced_agents/alert_triage_agent/src/nat_alert_triage_agent/run.py:POST /alerts:136",
+            "line": 136,
+            "path": "examples/advanced_agents/alert_triage_agent/src/nat_alert_triage_agent/run.py",
+            "repo": "nat",
+            "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:examples/advanced_agents/alert_triage_agent/src/nat_alert_triage_agent/run.py:136"
+          }
+        ]
+      },
+      {
+        "bound_consumers": 0,
+        "endpoint": {
+          "key": "http:POST /chat",
+          "service": "nat"
+        },
+        "has_schema": false,
+        "providers": [
+          {
+            "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+            "id": "nat:HttpRoute:repos.yaml#provides[1]:http%3APOST /chat:1",
+            "line": 1,
+            "path": "repos.yaml#provides[1]",
+            "repo": "nat",
+            "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:repos.yaml#provides[1]:1"
+          }
+        ]
+      },
+      {
+        "bound_consumers": 1,
+        "endpoint": {
+          "key": "http:POST /chat/stream",
+          "service": "nat"
+        },
+        "has_schema": false,
+        "providers": [
+          {
+            "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+            "id": "nat:HttpRoute:repos.yaml#provides[0]:http%3APOST /chat/stream:0",
+            "line": 0,
+            "path": "repos.yaml#provides[0]",
+            "repo": "nat",
+            "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:repos.yaml#provides[0]:0"
+          }
+        ]
+      },
+      {
+        "bound_consumers": 0,
+        "endpoint": {
+          "key": "http:POST /executions/{}/interactions/{}/response",
+          "service": "nat"
+        },
+        "has_schema": false,
+        "providers": [
+          {
+            "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+            "id": "nat:HttpRoute:packages/nvidia_nat_core/src/nat/front_ends/fastapi/routes/execution.py:POST /executions/{execution_id}/interactions/{interaction_id}/response:140",
+            "line": 140,
+            "path": "packages/nvidia_nat_core/src/nat/front_ends/fastapi/routes/execution.py",
+            "repo": "nat",
+            "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_core/src/nat/front_ends/fastapi/routes/execution.py:140"
+          }
+        ]
+      },
+      {
+        "bound_consumers": 0,
+        "endpoint": {
+          "key": "http:POST /feedback",
+          "service": "nat"
+        },
+        "has_schema": false,
+        "providers": [
+          {
+            "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+            "id": "nat:HttpRoute:packages/nvidia_nat_weave/src/nat/plugins/weave/fastapi_plugin_worker.py:POST /feedback:153",
+            "line": 153,
+            "path": "packages/nvidia_nat_weave/src/nat/plugins/weave/fastapi_plugin_worker.py",
+            "repo": "nat",
+            "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_weave/src/nat/plugins/weave/fastapi_plugin_worker.py:153"
+          }
+        ]
+      },
+      {
+        "bound_consumers": 0,
+        "endpoint": {
+          "key": "http:POST /oauth/device/code",
+          "service": "nat"
+        },
+        "has_schema": false,
+        "providers": [
+          {
+            "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+            "id": "nat:HttpRoute:packages/nvidia_nat_core/tests/nat/front_ends/auth_flow_handlers/mock_oauth2_server.py:POST /oauth/device/code:221",
+            "line": 221,
+            "path": "packages/nvidia_nat_core/tests/nat/front_ends/auth_flow_handlers/mock_oauth2_server.py",
+            "repo": "nat",
+            "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_core/tests/nat/front_ends/auth_flow_handlers/mock_oauth2_server.py:221"
+          }
+        ]
+      },
+      {
+        "bound_consumers": 0,
+        "endpoint": {
+          "key": "http:POST /oauth/token",
+          "service": "nat"
+        },
+        "has_schema": false,
+        "providers": [
+          {
+            "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+            "id": "nat:HttpRoute:packages/nvidia_nat_core/tests/nat/front_ends/auth_flow_handlers/mock_oauth2_server.py:POST /oauth/token:249",
+            "line": 249,
+            "path": "packages/nvidia_nat_core/tests/nat/front_ends/auth_flow_handlers/mock_oauth2_server.py",
+            "repo": "nat",
+            "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_core/tests/nat/front_ends/auth_flow_handlers/mock_oauth2_server.py:249"
+          }
+        ]
+      },
+      {
+        "bound_consumers": 0,
+        "endpoint": {
+          "key": "http:POST /static/{**}",
+          "service": "nat"
+        },
+        "has_schema": false,
+        "providers": [
+          {
+            "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+            "id": "nat:HttpRoute:packages/nvidia_nat_core/src/nat/front_ends/fastapi/routes/static.py:POST /static/{file_path%3Apath}:114",
+            "line": 114,
+            "path": "packages/nvidia_nat_core/src/nat/front_ends/fastapi/routes/static.py",
+            "repo": "nat",
+            "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_core/src/nat/front_ends/fastapi/routes/static.py:114"
+          }
+        ]
+      },
+      {
+        "bound_consumers": 0,
+        "endpoint": {
+          "key": "http:PUT /static/{**}",
+          "service": "nat"
+        },
+        "has_schema": false,
+        "providers": [
+          {
+            "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+            "id": "nat:HttpRoute:packages/nvidia_nat_core/src/nat/front_ends/fastapi/routes/static.py:PUT /static/{file_path%3Apath}:120",
+            "line": 120,
+            "path": "packages/nvidia_nat_core/src/nat/front_ends/fastapi/routes/static.py",
+            "repo": "nat",
+            "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_core/src/nat/front_ends/fastapi/routes/static.py:120"
+          }
+        ]
+      },
+      {
+        "bound_consumers": 0,
+        "endpoint": {
+          "key": "http:DELETE /static/{**}",
+          "service": "nat"
+        },
+        "has_schema": false,
+        "providers": [
+          {
+            "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+            "id": "nat:HttpRoute:packages/nvidia_nat_core/src/nat/front_ends/fastapi/routes/static.py:DELETE /static/{file_path%3Apath}:132",
+            "line": 132,
+            "path": "packages/nvidia_nat_core/src/nat/front_ends/fastapi/routes/static.py",
+            "repo": "nat",
+            "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_core/src/nat/front_ends/fastapi/routes/static.py:132"
+          }
+        ]
+      },
+      {
+        "bound_consumers": 0,
+        "endpoint": {
+          "key": "http:ANY /api/mcp/clients",
+          "service": "nat-ui"
+        },
+        "has_schema": false,
+        "providers": [
+          {
+            "commit": "41cb8cf843091a24bd06d0a5f844a3cb824049d8",
+            "id": "nat-ui:HttpRoute:pages/api/mcp/clients.ts:ANY /api/mcp/clients:5",
+            "line": 5,
+            "path": "pages/api/mcp/clients.ts",
+            "repo": "nat-ui",
+            "text": "nat-ui@41cb8cf843091a24bd06d0a5f844a3cb824049d8:pages/api/mcp/clients.ts:5"
+          }
+        ]
+      },
+      {
+        "bound_consumers": 0,
+        "endpoint": {
+          "key": "http:ANY /api/update-data-stream",
+          "service": "nat-ui"
+        },
+        "has_schema": false,
+        "providers": [
+          {
+            "commit": "41cb8cf843091a24bd06d0a5f844a3cb824049d8",
+            "id": "nat-ui:HttpRoute:pages/api/update-data-stream.ts:ANY /api/update-data-stream:111",
+            "line": 111,
+            "path": "pages/api/update-data-stream.ts",
+            "repo": "nat-ui",
+            "text": "nat-ui@41cb8cf843091a24bd06d0a5f844a3cb824049d8:pages/api/update-data-stream.ts:111"
+          }
+        ]
+      }
+    ],
+    "websocket_contracts": [
+      {
+        "bound_consumers": 0,
+        "endpoint": {
+          "key": "websocket:/websocket",
+          "service": "nat"
+        },
+        "has_schema": false,
+        "providers": [
+          {
+            "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+            "id": "nat:HttpRoute:repos.yaml#provides[2]:ws%3A/websocket:2",
+            "line": 2,
+            "path": "repos.yaml#provides[2]",
+            "repo": "nat",
+            "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:repos.yaml#provides[2]:2"
+          }
+        ]
+      }
+    ],
+    "source_scope": {
+      "provider_scopes": {
+        "test": 5,
+        "non_test_source": 13,
+        "mixed": 1,
+        "example": 1,
+        "declared": 2
+      },
+      "consumer_scopes": {
+        "test": 1
+      },
+      "non_test_source_bindings": 0,
+      "bound_details": [
+        {
+          "consumers": [
+            {
+              "binding": {
+                "confidence": 1.0,
+                "kind": "static",
+                "source": "TreeSitter"
+              },
+              "caller": {
+                "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+                "id": "nat:HttpClientCall:packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py:POST /chat/stream:389",
+                "line": 389,
+                "name": "POST /chat/stream",
+                "path": "packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py",
+                "repo": "nat",
+                "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py:389"
+              },
+              "match": "exact",
+              "reads": [],
+              "reads_complete": true,
+              "site": {
+                "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+                "id": "nat:HttpClientCall:packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py:POST /chat/stream:389",
+                "line": 389,
+                "path": "packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py",
+                "repo": "nat",
+                "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py:389"
+              }
+            }
+          ],
+          "endpoint": {
+            "key": "http:POST /chat/stream",
+            "service": "nat"
+          },
+          "providers": [
+            {
+              "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+              "id": "nat:HttpRoute:repos.yaml#provides[0]:http%3APOST /chat/stream:0",
+              "line": 0,
+              "path": "repos.yaml#provides[0]",
+              "repo": "nat",
+              "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:repos.yaml#provides[0]:0"
+            }
+          ],
+          "schemas": []
+        }
+      ],
+      "runtime_coverage": "not_established"
+    },
+    "unresolved": {
+      "analyzer_version": "0.13.0",
+      "api_version": 1,
+      "data": {
+        "ambiguous": [],
+        "items": [
+          {
+            "candidates": [
+              {
+                "endpoint": {
+                  "key": "http:GET /.well-known/oauth-protected-resource",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /auth/redirect",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /custom",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /executions/{}",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /health",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /mcp/client/tool/list",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /mcp/client/tool/list/per_user",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /monitor/users",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /oauth/authorize",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /static/{**}",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:POST /alerts",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:POST /chat",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:POST /chat/stream",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:POST /executions/{}/interactions/{}/response",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:POST /feedback",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:POST /oauth/device/code",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:POST /oauth/token",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:POST /static/{**}",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:PUT /static/{**}",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:DELETE /static/{**}",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:ANY /api/mcp/clients",
+                  "service": "nat-ui"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:ANY /api/update-data-stream",
+                  "service": "nat-ui"
+                },
+                "reason": "pattern"
+              }
+            ],
+            "consumer": {
+              "commit": "eadbb7573b9ba12c01a9df85c601a32a886d7b25",
+              "id": "nat-examples:HttpClientCall:examples/agent_identity_tool/scripts/mock_registry_server.py:ws%3Aclient%3Aws.example.com%3A/stream:52",
+              "line": 52,
+              "path": "examples/agent_identity_tool/scripts/mock_registry_server.py",
+              "repo": "nat-examples",
+              "text": "nat-examples@eadbb7573b9ba12c01a9df85c601a32a886d7b25:examples/agent_identity_tool/scripts/mock_registry_server.py:52"
+            },
+            "host": null,
+            "method": "ws:client:ws.example.com:/stream",
+            "reason": "no_match",
+            "target_service": null,
+            "template": null,
+            "url_expr": "ws:client:ws.example.com:/stream"
+          },
+          {
+            "candidates": [],
+            "consumer": {
+              "commit": "41cb8cf843091a24bd06d0a5f844a3cb824049d8",
+              "id": "nat-ui:HttpClientCall:__tests__/api/routes.test.ts:POST /init:335",
+              "line": 335,
+              "path": "__tests__/api/routes.test.ts",
+              "repo": "nat-ui",
+              "text": "nat-ui@41cb8cf843091a24bd06d0a5f844a3cb824049d8:__tests__/api/routes.test.ts:335"
+            },
+            "host": null,
+            "method": "POST",
+            "reason": "no_match",
+            "target_service": null,
+            "template": "/init",
+            "url_expr": "POST /init"
+          },
+          {
+            "candidates": [
+              {
+                "endpoint": {
+                  "key": "http:GET /.well-known/oauth-protected-resource",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /auth/redirect",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /custom",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /executions/{}",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /health",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /mcp/client/tool/list",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /mcp/client/tool/list/per_user",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /monitor/users",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /oauth/authorize",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /static/{**}",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:POST /alerts",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:POST /chat",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:POST /chat/stream",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:POST /executions/{}/interactions/{}/response",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:POST /feedback",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:POST /oauth/device/code",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:POST /oauth/token",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:POST /static/{**}",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:PUT /static/{**}",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:DELETE /static/{**}",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:ANY /api/mcp/clients",
+                  "service": "nat-ui"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:ANY /api/update-data-stream",
+                  "service": "nat-ui"
+                },
+                "reason": "pattern"
+              }
+            ],
+            "consumer": {
+              "commit": "41cb8cf843091a24bd06d0a5f844a3cb824049d8",
+              "id": "nat-ui:HttpClientCall:__tests__/components/Chat.websocket.test.tsx:ws%3Aclient%3Atest-server.com%3A/websocket:41",
+              "line": 41,
+              "path": "__tests__/components/Chat.websocket.test.tsx",
+              "repo": "nat-ui",
+              "text": "nat-ui@41cb8cf843091a24bd06d0a5f844a3cb824049d8:__tests__/components/Chat.websocket.test.tsx:41"
+            },
+            "host": null,
+            "method": "ws:client:test-server.com:/websocket",
+            "reason": "no_match",
+            "target_service": null,
+            "template": null,
+            "url_expr": "ws:client:test-server.com:/websocket"
+          },
+          {
+            "candidates": [
+              {
+                "endpoint": {
+                  "key": "http:GET /.well-known/oauth-protected-resource",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /auth/redirect",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /custom",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /executions/{}",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /health",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /mcp/client/tool/list",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /mcp/client/tool/list/per_user",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /monitor/users",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /oauth/authorize",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /static/{**}",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:POST /alerts",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:POST /chat",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:POST /chat/stream",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:POST /executions/{}/interactions/{}/response",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:POST /feedback",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:POST /oauth/device/code",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:POST /oauth/token",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:POST /static/{**}",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:PUT /static/{**}",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:DELETE /static/{**}",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:ANY /api/mcp/clients",
+                  "service": "nat-ui"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:ANY /api/update-data-stream",
+                  "service": "nat-ui"
+                },
+                "reason": "pattern"
+              }
+            ],
+            "consumer": {
+              "commit": "41cb8cf843091a24bd06d0a5f844a3cb824049d8",
+              "id": "nat-ui:HttpClientCall:__tests__/components/Chat.websocket.test.tsx:ws%3Aclient%3Atest.com%3A/websocket:246",
+              "line": 246,
+              "path": "__tests__/components/Chat.websocket.test.tsx",
+              "repo": "nat-ui",
+              "text": "nat-ui@41cb8cf843091a24bd06d0a5f844a3cb824049d8:__tests__/components/Chat.websocket.test.tsx:246"
+            },
+            "host": null,
+            "method": "ws:client:test.com:/websocket",
+            "reason": "no_match",
+            "target_service": null,
+            "template": null,
+            "url_expr": "ws:client:test.com:/websocket"
+          },
+          {
+            "candidates": [
+              {
+                "endpoint": {
+                  "key": "http:GET /.well-known/oauth-protected-resource",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /auth/redirect",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /custom",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /executions/{}",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /health",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /mcp/client/tool/list",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /mcp/client/tool/list/per_user",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /monitor/users",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /oauth/authorize",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /static/{**}",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:POST /alerts",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:POST /chat",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:POST /chat/stream",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:POST /executions/{}/interactions/{}/response",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:POST /feedback",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:POST /oauth/device/code",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:POST /oauth/token",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:POST /static/{**}",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:PUT /static/{**}",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:DELETE /static/{**}",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:ANY /api/mcp/clients",
+                  "service": "nat-ui"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:ANY /api/update-data-stream",
+                  "service": "nat-ui"
+                },
+                "reason": "pattern"
+              }
+            ],
+            "consumer": {
+              "commit": "41cb8cf843091a24bd06d0a5f844a3cb824049d8",
+              "id": "nat-ui:HttpClientCall:__tests__/components/Chat.websocket.test.tsx:ws%3Aclient%3Atest1.com%3A/:191",
+              "line": 191,
+              "path": "__tests__/components/Chat.websocket.test.tsx",
+              "repo": "nat-ui",
+              "text": "nat-ui@41cb8cf843091a24bd06d0a5f844a3cb824049d8:__tests__/components/Chat.websocket.test.tsx:191"
+            },
+            "host": null,
+            "method": "ws:client:test1.com:/",
+            "reason": "no_match",
+            "target_service": null,
+            "template": null,
+            "url_expr": "ws:client:test1.com:/"
+          },
+          {
+            "candidates": [
+              {
+                "endpoint": {
+                  "key": "http:GET /.well-known/oauth-protected-resource",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /auth/redirect",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /custom",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /executions/{}",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /health",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /mcp/client/tool/list",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /mcp/client/tool/list/per_user",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /monitor/users",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /oauth/authorize",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /static/{**}",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:POST /alerts",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:POST /chat",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:POST /chat/stream",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:POST /executions/{}/interactions/{}/response",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:POST /feedback",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:POST /oauth/device/code",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:POST /oauth/token",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:POST /static/{**}",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:PUT /static/{**}",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:DELETE /static/{**}",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:ANY /api/mcp/clients",
+                  "service": "nat-ui"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:ANY /api/update-data-stream",
+                  "service": "nat-ui"
+                },
+                "reason": "pattern"
+              }
+            ],
+            "consumer": {
+              "commit": "41cb8cf843091a24bd06d0a5f844a3cb824049d8",
+              "id": "nat-ui:HttpClientCall:__tests__/components/Chat.websocket.test.tsx:ws%3Aclient%3Atest2.com%3A/:194",
+              "line": 194,
+              "path": "__tests__/components/Chat.websocket.test.tsx",
+              "repo": "nat-ui",
+              "text": "nat-ui@41cb8cf843091a24bd06d0a5f844a3cb824049d8:__tests__/components/Chat.websocket.test.tsx:194"
+            },
+            "host": null,
+            "method": "ws:client:test2.com:/",
+            "reason": "no_match",
+            "target_service": null,
+            "template": null,
+            "url_expr": "ws:client:test2.com:/"
+          },
+          {
+            "candidates": [],
+            "consumer": {
+              "commit": "41cb8cf843091a24bd06d0a5f844a3cb824049d8",
+              "id": "nat-ui:HttpClientCall:__tests__/proxy/proxy-integration.test.js:GET /:26",
+              "line": 26,
+              "path": "__tests__/proxy/proxy-integration.test.js",
+              "repo": "nat-ui",
+              "text": "nat-ui@41cb8cf843091a24bd06d0a5f844a3cb824049d8:__tests__/proxy/proxy-integration.test.js:26"
+            },
+            "host": null,
+            "method": "GET",
+            "reason": "no_match",
+            "target_service": null,
+            "template": "/",
+            "url_expr": "GET /"
+          },
+          {
+            "candidates": [
+              {
+                "endpoint": {
+                  "key": "http:POST /chat/stream",
+                  "service": "nat"
+                },
+                "reason": "prefix_stripped"
+              }
+            ],
+            "consumer": {
+              "commit": "41cb8cf843091a24bd06d0a5f844a3cb824049d8",
+              "id": "nat-ui:HttpClientCall:__tests__/proxy/proxy-integration.test.js:POST /api/chat/stream:45",
+              "line": 45,
+              "path": "__tests__/proxy/proxy-integration.test.js",
+              "repo": "nat-ui",
+              "text": "nat-ui@41cb8cf843091a24bd06d0a5f844a3cb824049d8:__tests__/proxy/proxy-integration.test.js:45"
+            },
+            "host": null,
+            "method": "POST",
+            "reason": "no_match",
+            "target_service": null,
+            "template": "/api/chat/stream",
+            "url_expr": "POST /api/chat/stream"
+          },
+          {
+            "candidates": [],
+            "consumer": {
+              "commit": "41cb8cf843091a24bd06d0a5f844a3cb824049d8",
+              "id": "nat-ui:HttpClientCall:__tests__/proxy/proxy-integration.test.js:POST /api/unauthorized:74",
+              "line": 74,
+              "path": "__tests__/proxy/proxy-integration.test.js",
+              "repo": "nat-ui",
+              "text": "nat-ui@41cb8cf843091a24bd06d0a5f844a3cb824049d8:__tests__/proxy/proxy-integration.test.js:74"
+            },
+            "host": null,
+            "method": "POST",
+            "reason": "no_match",
+            "target_service": null,
+            "template": "/api/unauthorized",
+            "url_expr": "POST /api/unauthorized"
+          },
+          {
+            "candidates": [],
+            "consumer": {
+              "commit": "41cb8cf843091a24bd06d0a5f844a3cb824049d8",
+              "id": "nat-ui:HttpClientCall:components/Chat/Chat.tsx:POST <dynamic>:1165",
+              "line": 1165,
+              "path": "components/Chat/Chat.tsx",
+              "repo": "nat-ui",
+              "text": "nat-ui@41cb8cf843091a24bd06d0a5f844a3cb824049d8:components/Chat/Chat.tsx:1165"
+            },
+            "host": null,
+            "method": "POST",
+            "reason": "no_route_in_service",
+            "target_service": null,
+            "template": "<dynamic>",
+            "url_expr": "POST <dynamic>"
+          },
+          {
+            "candidates": [],
+            "consumer": {
+              "commit": "41cb8cf843091a24bd06d0a5f844a3cb824049d8",
+              "id": "nat-ui:HttpClientCall:components/DataStreamDisplay/DataStreamDisplay.tsx:GET <dynamic>:62",
+              "line": 62,
+              "path": "components/DataStreamDisplay/DataStreamDisplay.tsx",
+              "repo": "nat-ui",
+              "text": "nat-ui@41cb8cf843091a24bd06d0a5f844a3cb824049d8:components/DataStreamDisplay/DataStreamDisplay.tsx:62"
+            },
+            "host": null,
+            "method": "GET",
+            "reason": "no_route_in_service",
+            "target_service": null,
+            "template": "<dynamic>",
+            "url_expr": "GET <dynamic>"
+          },
+          {
+            "candidates": [],
+            "consumer": {
+              "commit": "41cb8cf843091a24bd06d0a5f844a3cb824049d8",
+              "id": "nat-ui:HttpClientCall:components/DataStreamDisplay/DataStreamDisplay.tsx:GET <dynamic>:82",
+              "line": 82,
+              "path": "components/DataStreamDisplay/DataStreamDisplay.tsx",
+              "repo": "nat-ui",
+              "text": "nat-ui@41cb8cf843091a24bd06d0a5f844a3cb824049d8:components/DataStreamDisplay/DataStreamDisplay.tsx:82"
+            },
+            "host": null,
+            "method": "GET",
+            "reason": "no_route_in_service",
+            "target_service": null,
+            "template": "<dynamic>",
+            "url_expr": "GET <dynamic>"
+          },
+          {
+            "candidates": [],
+            "consumer": {
+              "commit": "41cb8cf843091a24bd06d0a5f844a3cb824049d8",
+              "id": "nat-ui:HttpClientCall:components/DataStreamDisplay/DataStreamManager.tsx:GET <dynamic>:88",
+              "line": 88,
+              "path": "components/DataStreamDisplay/DataStreamManager.tsx",
+              "repo": "nat-ui",
+              "text": "nat-ui@41cb8cf843091a24bd06d0a5f844a3cb824049d8:components/DataStreamDisplay/DataStreamManager.tsx:88"
+            },
+            "host": null,
+            "method": "GET",
+            "reason": "no_route_in_service",
+            "target_service": null,
+            "template": "<dynamic>",
+            "url_expr": "GET <dynamic>"
+          },
+          {
+            "candidates": [
+              {
+                "endpoint": {
+                  "key": "http:POST /feedback",
+                  "service": "nat"
+                },
+                "reason": "prefix_stripped"
+              }
+            ],
+            "consumer": {
+              "commit": "41cb8cf843091a24bd06d0a5f844a3cb824049d8",
+              "id": "nat-ui:HttpClientCall:hooks/useFeedback.ts:POST /api/feedback:26",
+              "line": 26,
+              "path": "hooks/useFeedback.ts",
+              "repo": "nat-ui",
+              "text": "nat-ui@41cb8cf843091a24bd06d0a5f844a3cb824049d8:hooks/useFeedback.ts:26"
+            },
+            "host": null,
+            "method": "POST",
+            "reason": "no_match",
+            "target_service": null,
+            "template": "/api/feedback",
+            "url_expr": "POST /api/feedback"
+          },
+          {
+            "candidates": [],
+            "consumer": {
+              "commit": "41cb8cf843091a24bd06d0a5f844a3cb824049d8",
+              "id": "nat-ui:HttpClientCall:pages/api/mcp/clients.ts:GET /:18",
+              "line": 18,
+              "path": "pages/api/mcp/clients.ts",
+              "repo": "nat-ui",
+              "text": "nat-ui@41cb8cf843091a24bd06d0a5f844a3cb824049d8:pages/api/mcp/clients.ts:18"
+            },
+            "host": null,
+            "method": "GET",
+            "reason": "no_match",
+            "target_service": null,
+            "template": "/",
+            "url_expr": "GET /"
+          },
+          {
+            "candidates": [],
+            "consumer": {
+              "commit": "41cb8cf843091a24bd06d0a5f844a3cb824049d8",
+              "id": "nat-ui:HttpClientCall:pages/database-updates.tsx:GET <dynamic>:109",
+              "line": 109,
+              "path": "pages/database-updates.tsx",
+              "repo": "nat-ui",
+              "text": "nat-ui@41cb8cf843091a24bd06d0a5f844a3cb824049d8:pages/database-updates.tsx:109"
+            },
+            "host": null,
+            "method": "GET",
+            "reason": "no_route_in_service",
+            "target_service": null,
+            "template": "<dynamic>",
+            "url_expr": "GET <dynamic>"
+          },
+          {
+            "candidates": [],
+            "consumer": {
+              "commit": "41cb8cf843091a24bd06d0a5f844a3cb824049d8",
+              "id": "nat-ui:HttpClientCall:proxy/server.js:POST /:263",
+              "line": 263,
+              "path": "proxy/server.js",
+              "repo": "nat-ui",
+              "text": "nat-ui@41cb8cf843091a24bd06d0a5f844a3cb824049d8:proxy/server.js:263"
+            },
+            "host": null,
+            "method": "POST",
+            "reason": "no_match",
+            "target_service": null,
+            "template": "/",
+            "url_expr": "POST /"
+          },
+          {
+            "candidates": [],
+            "consumer": {
+              "commit": "41cb8cf843091a24bd06d0a5f844a3cb824049d8",
+              "id": "nat-ui:HttpClientCall:proxy/server.js:UNKNOWN <dynamic>:234",
+              "line": 234,
+              "path": "proxy/server.js",
+              "repo": "nat-ui",
+              "text": "nat-ui@41cb8cf843091a24bd06d0a5f844a3cb824049d8:proxy/server.js:234"
+            },
+            "host": null,
+            "method": "UNKNOWN",
+            "reason": "no_route_in_service",
+            "target_service": "nat",
+            "template": "<dynamic>",
+            "url_expr": "UNKNOWN <dynamic>"
+          },
+          {
+            "candidates": [],
+            "consumer": {
+              "commit": "41cb8cf843091a24bd06d0a5f844a3cb824049d8",
+              "id": "nat-ui:HttpClientCall:utils/api/mcpClient.ts:GET <dynamic>:28",
+              "line": 28,
+              "path": "utils/api/mcpClient.ts",
+              "repo": "nat-ui",
+              "text": "nat-ui@41cb8cf843091a24bd06d0a5f844a3cb824049d8:utils/api/mcpClient.ts:28"
+            },
+            "host": null,
+            "method": "GET",
+            "reason": "no_route_in_service",
+            "target_service": null,
+            "template": "<dynamic>",
+            "url_expr": "GET <dynamic>"
+          },
+          {
+            "candidates": [],
+            "consumer": {
+              "commit": "41cb8cf843091a24bd06d0a5f844a3cb824049d8",
+              "id": "nat-ui:HttpClientCall:utils/app/content.ts:GET /content/{}:19",
+              "line": 19,
+              "path": "utils/app/content.ts",
+              "repo": "nat-ui",
+              "text": "nat-ui@41cb8cf843091a24bd06d0a5f844a3cb824049d8:utils/app/content.ts:19"
+            },
+            "host": null,
+            "method": "GET",
+            "reason": "no_match",
+            "target_service": null,
+            "template": "/content/{}",
+            "url_expr": "GET /content/{}"
+          },
+          {
+            "candidates": [],
+            "consumer": {
+              "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+              "id": "nat:HttpClientCall:ci/scripts/gitlab/artifactory_upload.py:GET /api/v0/projects:76",
+              "line": 76,
+              "path": "ci/scripts/gitlab/artifactory_upload.py",
+              "repo": "nat",
+              "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:ci/scripts/gitlab/artifactory_upload.py:76"
+            },
+            "host": null,
+            "method": "GET",
+            "reason": "env_unmapped",
+            "target_service": null,
+            "template": "/api/v0/projects",
+            "url_expr": "GET /api/v0/projects"
+          },
+          {
+            "candidates": [],
+            "consumer": {
+              "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+              "id": "nat:HttpClientCall:ci/scripts/gitlab/artifactory_upload.py:POST /api/v0/projects/{}/releases:104",
+              "line": 104,
+              "path": "ci/scripts/gitlab/artifactory_upload.py",
+              "repo": "nat",
+              "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:ci/scripts/gitlab/artifactory_upload.py:104"
+            },
+            "host": null,
+            "method": "POST",
+            "reason": "env_unmapped",
+            "target_service": null,
+            "template": "/api/v0/projects/{}/releases",
+            "url_expr": "POST /api/v0/projects/{}/releases"
+          },
+          {
+            "candidates": [],
+            "consumer": {
+              "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+              "id": "nat:HttpClientCall:examples/MCP/simple_calculator_fastmcp_protected/tests/test_simple_calculator_fastmcp_protected.py:GET /mcp:116",
+              "line": 116,
+              "path": "examples/MCP/simple_calculator_fastmcp_protected/tests/test_simple_calculator_fastmcp_protected.py",
+              "repo": "nat",
+              "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:examples/MCP/simple_calculator_fastmcp_protected/tests/test_simple_calculator_fastmcp_protected.py:116"
+            },
+            "host": null,
+            "method": "GET",
+            "reason": "no_match",
+            "target_service": null,
+            "template": "/mcp",
+            "url_expr": "GET /mcp"
+          },
+          {
+            "candidates": [],
+            "consumer": {
+              "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+              "id": "nat:HttpClientCall:packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py:POST /:342",
+              "line": 342,
+              "path": "packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py",
+              "repo": "nat",
+              "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py:342"
+            },
+            "host": null,
+            "method": "POST",
+            "reason": "no_match",
+            "target_service": null,
+            "template": "/",
+            "url_expr": "POST /"
+          },
+          {
+            "candidates": [],
+            "consumer": {
+              "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+              "id": "nat:HttpClientCall:packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py:POST /:353",
+              "line": 353,
+              "path": "packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py",
+              "repo": "nat",
+              "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py:353"
+            },
+            "host": null,
+            "method": "POST",
+            "reason": "no_match",
+            "target_service": null,
+            "template": "/",
+            "url_expr": "POST /"
+          },
+          {
+            "candidates": [],
+            "consumer": {
+              "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+              "id": "nat:HttpClientCall:packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py:POST /:367",
+              "line": 367,
+              "path": "packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py",
+              "repo": "nat",
+              "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py:367"
+            },
+            "host": null,
+            "method": "POST",
+            "reason": "no_match",
+            "target_service": null,
+            "template": "/",
+            "url_expr": "POST /"
+          },
+          {
+            "candidates": [],
+            "consumer": {
+              "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+              "id": "nat:HttpClientCall:packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py:POST /:413",
+              "line": 413,
+              "path": "packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py",
+              "repo": "nat",
+              "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py:413"
+            },
+            "host": null,
+            "method": "POST",
+            "reason": "no_match",
+            "target_service": null,
+            "template": "/",
+            "url_expr": "POST /"
+          },
+          {
+            "candidates": [],
+            "consumer": {
+              "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+              "id": "nat:HttpClientCall:packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py:POST /:424",
+              "line": 424,
+              "path": "packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py",
+              "repo": "nat",
+              "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py:424"
+            },
+            "host": null,
+            "method": "POST",
+            "reason": "no_match",
+            "target_service": null,
+            "template": "/",
+            "url_expr": "POST /"
+          },
+          {
+            "candidates": [],
+            "consumer": {
+              "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+              "id": "nat:HttpClientCall:packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py:POST /:437",
+              "line": 437,
+              "path": "packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py",
+              "repo": "nat",
+              "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py:437"
+            },
+            "host": null,
+            "method": "POST",
+            "reason": "no_match",
+            "target_service": null,
+            "template": "/",
+            "url_expr": "POST /"
+          },
+          {
+            "candidates": [],
+            "consumer": {
+              "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+              "id": "nat:HttpClientCall:packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py:POST /:456",
+              "line": 456,
+              "path": "packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py",
+              "repo": "nat",
+              "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py:456"
+            },
+            "host": null,
+            "method": "POST",
+            "reason": "no_match",
+            "target_service": null,
+            "template": "/",
+            "url_expr": "POST /"
+          },
+          {
+            "candidates": [],
+            "consumer": {
+              "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+              "id": "nat:HttpClientCall:packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py:POST /:467",
+              "line": 467,
+              "path": "packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py",
+              "repo": "nat",
+              "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py:467"
+            },
+            "host": null,
+            "method": "POST",
+            "reason": "no_match",
+            "target_service": null,
+            "template": "/",
+            "url_expr": "POST /"
+          },
+          {
+            "candidates": [],
+            "consumer": {
+              "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+              "id": "nat:HttpClientCall:packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py:POST /:489",
+              "line": 489,
+              "path": "packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py",
+              "repo": "nat",
+              "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py:489"
+            },
+            "host": null,
+            "method": "POST",
+            "reason": "no_match",
+            "target_service": null,
+            "template": "/",
+            "url_expr": "POST /"
+          },
+          {
+            "candidates": [],
+            "consumer": {
+              "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+              "id": "nat:HttpClientCall:packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py:POST /:573",
+              "line": 573,
+              "path": "packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py",
+              "repo": "nat",
+              "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py:573"
+            },
+            "host": null,
+            "method": "POST",
+            "reason": "no_match",
+            "target_service": null,
+            "template": "/",
+            "url_expr": "POST /"
+          },
+          {
+            "candidates": [],
+            "consumer": {
+              "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+              "id": "nat:HttpClientCall:packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py:POST /generate/full:528",
+              "line": 528,
+              "path": "packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py",
+              "repo": "nat",
+              "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py:528"
+            },
+            "host": null,
+            "method": "POST",
+            "reason": "no_route_in_service",
+            "target_service": "nat",
+            "template": "/generate/full",
+            "url_expr": "POST /generate/full"
+          },
+          {
+            "candidates": [],
+            "consumer": {
+              "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+              "id": "nat:HttpClientCall:packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py:POST /generate/stream:388",
+              "line": 388,
+              "path": "packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py",
+              "repo": "nat",
+              "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py:388"
+            },
+            "host": null,
+            "method": "POST",
+            "reason": "no_route_in_service",
+            "target_service": "nat",
+            "template": "/generate/stream",
+            "url_expr": "POST /generate/stream"
+          },
+          {
+            "candidates": [
+              {
+                "endpoint": {
+                  "key": "http:GET /.well-known/oauth-protected-resource",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /auth/redirect",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /custom",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /executions/{}",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /health",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /mcp/client/tool/list",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /mcp/client/tool/list/per_user",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /monitor/users",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /oauth/authorize",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /static/{**}",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:POST /alerts",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:POST /chat",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:POST /chat/stream",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:POST /executions/{}/interactions/{}/response",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:POST /feedback",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:POST /oauth/device/code",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:POST /oauth/token",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:POST /static/{**}",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:PUT /static/{**}",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:DELETE /static/{**}",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:ANY /api/mcp/clients",
+                  "service": "nat-ui"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:ANY /api/update-data-stream",
+                  "service": "nat-ui"
+                },
+                "reason": "pattern"
+              }
+            ],
+            "consumer": {
+              "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+              "id": "nat:HttpClientCall:packages/nvidia_nat_mcp/scripts/check_mcp_auth_cookie.py:ws%3Aclient%3Alocalhost%3A8000%3A/websocket?session={user_id}:138",
+              "line": 138,
+              "path": "packages/nvidia_nat_mcp/scripts/check_mcp_auth_cookie.py",
+              "repo": "nat",
+              "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_mcp/scripts/check_mcp_auth_cookie.py:138"
+            },
+            "host": null,
+            "method": "ws:client:localhost:8000:/websocket?session={user_id}",
+            "reason": "no_match",
+            "target_service": null,
+            "template": null,
+            "url_expr": "ws:client:localhost:8000:/websocket?session={user_id}"
+          },
+          {
+            "candidates": [
+              {
+                "endpoint": {
+                  "key": "http:GET /.well-known/oauth-protected-resource",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /auth/redirect",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /custom",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /executions/{}",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /health",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /mcp/client/tool/list",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /mcp/client/tool/list/per_user",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /monitor/users",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /oauth/authorize",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:GET /static/{**}",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:POST /alerts",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:POST /chat",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:POST /chat/stream",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:POST /executions/{}/interactions/{}/response",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:POST /feedback",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:POST /oauth/device/code",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:POST /oauth/token",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:POST /static/{**}",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:PUT /static/{**}",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:DELETE /static/{**}",
+                  "service": "nat"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:ANY /api/mcp/clients",
+                  "service": "nat-ui"
+                },
+                "reason": "pattern"
+              },
+              {
+                "endpoint": {
+                  "key": "http:ANY /api/update-data-stream",
+                  "service": "nat-ui"
+                },
+                "reason": "pattern"
+              }
+            ],
+            "consumer": {
+              "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+              "id": "nat:HttpClientCall:packages/nvidia_nat_mcp/scripts/check_mcp_auth_jwt.py:ws%3Aclient%3Alocalhost%3A8000%3A/websocket:169",
+              "line": 169,
+              "path": "packages/nvidia_nat_mcp/scripts/check_mcp_auth_jwt.py",
+              "repo": "nat",
+              "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_mcp/scripts/check_mcp_auth_jwt.py:169"
+            },
+            "host": null,
+            "method": "ws:client:localhost:8000:/websocket",
+            "reason": "no_match",
+            "target_service": null,
+            "template": null,
+            "url_expr": "ws:client:localhost:8000:/websocket"
+          },
+          {
+            "candidates": [
+              {
+                "endpoint": {
+                  "key": "http:GET /health",
+                  "service": "nat"
+                },
+                "reason": "prefix_stripped"
+              }
+            ],
+            "consumer": {
+              "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+              "id": "nat:HttpClientCall:packages/nvidia_nat_memmachine/tests/test_memmachine_integration.py:GET /api/v2/health:51",
+              "line": 51,
+              "path": "packages/nvidia_nat_memmachine/tests/test_memmachine_integration.py",
+              "repo": "nat",
+              "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_memmachine/tests/test_memmachine_integration.py:51"
+            },
+            "host": null,
+            "method": "GET",
+            "reason": "no_match",
+            "target_service": null,
+            "template": "/api/v2/health",
+            "url_expr": "GET /api/v2/health"
+          },
+          {
+            "candidates": [],
+            "consumer": {
+              "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+              "id": "nat:HttpClientCall:packages/nvidia_nat_test/src/nat/test/plugin.py:GET /runtimes:833",
+              "line": 833,
+              "path": "packages/nvidia_nat_test/src/nat/test/plugin.py",
+              "repo": "nat",
+              "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_test/src/nat/test/plugin.py:833"
+            },
+            "host": null,
+            "method": "GET",
+            "reason": "no_match",
+            "target_service": null,
+            "template": "/runtimes",
+            "url_expr": "GET /runtimes"
+          },
+          {
+            "candidates": [],
+            "consumer": {
+              "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+              "id": "nat:HttpClientCall:packages/nvidia_nat_test/src/nat/test/plugin.py:POST /create_client:770",
+              "line": 770,
+              "path": "packages/nvidia_nat_test/src/nat/test/plugin.py",
+              "repo": "nat",
+              "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_test/src/nat/test/plugin.py:770"
+            },
+            "host": null,
+            "method": "POST",
+            "reason": "no_match",
+            "target_service": null,
+            "template": "/create_client",
+            "url_expr": "POST /create_client"
+          },
+          {
+            "candidates": [],
+            "consumer": {
+              "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+              "id": "nat:HttpClientCall:packages/nvidia_nat_test/src/nat/test/plugin.py:POST /packages:843",
+              "line": 843,
+              "path": "packages/nvidia_nat_test/src/nat/test/plugin.py",
+              "repo": "nat",
+              "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_test/src/nat/test/plugin.py:843"
+            },
+            "host": null,
+            "method": "POST",
+            "reason": "no_match",
+            "target_service": null,
+            "template": "/packages",
+            "url_expr": "POST /packages"
+          }
+        ],
+        "scope": {
+          "configured_only": true,
+          "reviewed": [
+            {
+              "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+              "dirty": false,
+              "repo": "nat"
+            },
+            {
+              "commit": "eadbb7573b9ba12c01a9df85c601a32a886d7b25",
+              "dirty": false,
+              "repo": "nat-examples"
+            },
+            {
+              "commit": "41cb8cf843091a24bd06d0a5f844a3cb824049d8",
+              "dirty": false,
+              "repo": "nat-ui"
+            }
+          ],
+          "unreviewed": []
+        }
+      },
+      "meta": {
+        "elapsed_ms": 1,
+        "view": {
+          "git_commits": {
+            "nat": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+            "nat-examples": "eadbb7573b9ba12c01a9df85c601a32a886d7b25",
+            "nat-ui": "41cb8cf843091a24bd06d0a5f844a3cb824049d8"
+          },
+          "kind": "live",
+          "snapshot_id": null
+        }
+      },
+      "reproducible": false,
+      "snapshot": "live",
+      "view": {
+        "git_commits": {
+          "nat": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+          "nat-examples": "eadbb7573b9ba12c01a9df85c601a32a886d7b25",
+          "nat-ui": "41cb8cf843091a24bd06d0a5f844a3cb824049d8"
+        },
+        "kind": "live",
+        "snapshot_id": null
+      }
+    }
+  },
+  "formatted_path_regression": {
+    "invalid_suffix_keys_absent": true,
+    "excluded_keys": [
+      "http:GET /job/last",
+      "http:GET /job/{{job_id}}",
+      "http:GET /jobs"
+    ]
+  },
+  "sql_positive_regression": {
+    "consumer_ids_preserved": true,
+    "consumer_count": 3,
+    "response": {
+      "analyzer_version": "0.13.0",
+      "api_version": 1,
+      "data": {
+        "items": [
+          {
+            "consumers": [
+              {
+                "binding": {
+                  "confidence": 1.0,
+                  "kind": "static",
+                  "source": "Regex"
+                },
+                "caller": {
+                  "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+                  "id": "nat:Function:packages/nvidia_nat_mysql/src/nat/plugins/mysql/mysql_object_store.py:sql-read%3Apackages/nvidia_nat_mysql/src/nat/plugins/mysql/mysql_object_store.py%3A130:130",
+                  "line": 130,
+                  "name": "sql-read:packages/nvidia_nat_mysql/src/nat/plugins/mysql/mysql_object_store.py:130",
+                  "path": "packages/nvidia_nat_mysql/src/nat/plugins/mysql/mysql_object_store.py",
+                  "repo": "nat",
+                  "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_mysql/src/nat/plugins/mysql/mysql_object_store.py:130"
+                },
+                "match": "exact",
+                "reads": [],
+                "reads_complete": true,
+                "site": {
+                  "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+                  "id": "nat:Function:packages/nvidia_nat_mysql/src/nat/plugins/mysql/mysql_object_store.py:sql-read%3Apackages/nvidia_nat_mysql/src/nat/plugins/mysql/mysql_object_store.py%3A130:130",
+                  "line": 130,
+                  "path": "packages/nvidia_nat_mysql/src/nat/plugins/mysql/mysql_object_store.py",
+                  "repo": "nat",
+                  "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_mysql/src/nat/plugins/mysql/mysql_object_store.py:130"
+                }
+              },
+              {
+                "binding": {
+                  "confidence": 1.0,
+                  "kind": "static",
+                  "source": "Regex"
+                },
+                "caller": {
+                  "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+                  "id": "nat:Function:packages/nvidia_nat_mysql/src/nat/plugins/mysql/mysql_object_store.py:sql-read%3Apackages/nvidia_nat_mysql/src/nat/plugins/mysql/mysql_object_store.py%3A135:135",
+                  "line": 135,
+                  "name": "sql-read:packages/nvidia_nat_mysql/src/nat/plugins/mysql/mysql_object_store.py:135",
+                  "path": "packages/nvidia_nat_mysql/src/nat/plugins/mysql/mysql_object_store.py",
+                  "repo": "nat",
+                  "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_mysql/src/nat/plugins/mysql/mysql_object_store.py:135"
+                },
+                "match": "exact",
+                "reads": [],
+                "reads_complete": true,
+                "site": {
+                  "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+                  "id": "nat:Function:packages/nvidia_nat_mysql/src/nat/plugins/mysql/mysql_object_store.py:sql-read%3Apackages/nvidia_nat_mysql/src/nat/plugins/mysql/mysql_object_store.py%3A135:135",
+                  "line": 135,
+                  "path": "packages/nvidia_nat_mysql/src/nat/plugins/mysql/mysql_object_store.py",
+                  "repo": "nat",
+                  "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_mysql/src/nat/plugins/mysql/mysql_object_store.py:135"
+                }
+              },
+              {
+                "binding": {
+                  "confidence": 1.0,
+                  "kind": "static",
+                  "source": "Regex"
+                },
+                "caller": {
+                  "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+                  "id": "nat:Function:packages/nvidia_nat_mysql/src/nat/plugins/mysql/mysql_object_store.py:sql-read%3Apackages/nvidia_nat_mysql/src/nat/plugins/mysql/mysql_object_store.py%3A161:161",
+                  "line": 161,
+                  "name": "sql-read:packages/nvidia_nat_mysql/src/nat/plugins/mysql/mysql_object_store.py:161",
+                  "path": "packages/nvidia_nat_mysql/src/nat/plugins/mysql/mysql_object_store.py",
+                  "repo": "nat",
+                  "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_mysql/src/nat/plugins/mysql/mysql_object_store.py:161"
+                },
+                "match": "exact",
+                "reads": [],
+                "reads_complete": true,
+                "site": {
+                  "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+                  "id": "nat:Function:packages/nvidia_nat_mysql/src/nat/plugins/mysql/mysql_object_store.py:sql-read%3Apackages/nvidia_nat_mysql/src/nat/plugins/mysql/mysql_object_store.py%3A161:161",
+                  "line": 161,
+                  "path": "packages/nvidia_nat_mysql/src/nat/plugins/mysql/mysql_object_store.py",
+                  "repo": "nat",
+                  "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_mysql/src/nat/plugins/mysql/mysql_object_store.py:161"
+                }
+              }
+            ],
+            "endpoint": {
+              "key": "table:object_meta",
+              "service": "nat"
+            },
+            "providers": [
+              {
+                "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+                "id": "nat:Table:packages/nvidia_nat_mysql/src/nat/plugins/mysql/mysql_object_store.py:object_meta:0",
+                "line": 0,
+                "path": "packages/nvidia_nat_mysql/src/nat/plugins/mysql/mysql_object_store.py",
+                "repo": "nat",
+                "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_mysql/src/nat/plugins/mysql/mysql_object_store.py:0"
+              }
+            ],
+            "schemas": []
+          }
+        ],
+        "scope": {
+          "configured_only": true,
+          "reviewed": [
+            {
+              "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+              "dirty": false,
+              "repo": "nat"
+            },
+            {
+              "commit": "eadbb7573b9ba12c01a9df85c601a32a886d7b25",
+              "dirty": false,
+              "repo": "nat-examples"
+            },
+            {
+              "commit": "41cb8cf843091a24bd06d0a5f844a3cb824049d8",
+              "dirty": false,
+              "repo": "nat-ui"
+            }
+          ],
+          "unreviewed": []
+        }
+      },
+      "meta": {
+        "elapsed_ms": 0,
+        "view": {
+          "git_commits": {
+            "nat": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+            "nat-examples": "eadbb7573b9ba12c01a9df85c601a32a886d7b25",
+            "nat-ui": "41cb8cf843091a24bd06d0a5f844a3cb824049d8"
+          },
+          "kind": "live",
+          "snapshot_id": null
+        }
+      },
+      "reproducible": false,
+      "snapshot": "live",
+      "view": {
+        "git_commits": {
+          "nat": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+          "nat-examples": "eadbb7573b9ba12c01a9df85c601a32a886d7b25",
+          "nat-ui": "41cb8cf843091a24bd06d0a5f844a3cb824049d8"
+        },
+        "kind": "live",
+        "snapshot_id": null
+      }
+    }
+  },
+  "strict_warm_validation": {
+    "cache_hit": true,
+    "http_data_equal": true,
+    "websocket_data_equal": true,
+    "unresolved_data_equal": true,
+    "responses": {
+      "http": {
+        "analyzer_version": "0.13.0",
+        "api_version": 1,
+        "data": {
+          "items": [
+            {
+              "bound_consumers": 0,
+              "endpoint": {
+                "key": "http:GET /.well-known/oauth-protected-resource",
+                "service": "nat"
+              },
+              "has_schema": false,
+              "providers": [
+                {
+                  "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+                  "id": "nat:HttpRoute:packages/nvidia_nat_mcp/tests/server/test_add_root_level_routes.py:GET /.well-known/oauth-protected-resource:38",
+                  "line": 38,
+                  "path": "packages/nvidia_nat_mcp/tests/server/test_add_root_level_routes.py",
+                  "repo": "nat",
+                  "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_mcp/tests/server/test_add_root_level_routes.py:38"
+                }
+              ]
+            },
+            {
+              "bound_consumers": 0,
+              "endpoint": {
+                "key": "http:GET /auth/redirect",
+                "service": "nat"
+              },
+              "has_schema": false,
+              "providers": [
+                {
+                  "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+                  "id": "nat:HttpRoute:packages/nvidia_nat_core/src/nat/front_ends/console/authentication_flow_handler.py:GET /auth/redirect:230",
+                  "line": 230,
+                  "path": "packages/nvidia_nat_core/src/nat/front_ends/console/authentication_flow_handler.py",
+                  "repo": "nat",
+                  "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_core/src/nat/front_ends/console/authentication_flow_handler.py:230"
+                }
+              ]
+            },
+            {
+              "bound_consumers": 0,
+              "endpoint": {
+                "key": "http:GET /custom",
+                "service": "nat"
+              },
+              "has_schema": false,
+              "providers": [
+                {
+                  "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+                  "id": "nat:HttpRoute:packages/nvidia_nat_core/tests/nat/front_ends/fastapi/test_fastapi_front_end_plugin.py:GET /custom:68",
+                  "line": 68,
+                  "path": "packages/nvidia_nat_core/tests/nat/front_ends/fastapi/test_fastapi_front_end_plugin.py",
+                  "repo": "nat",
+                  "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_core/tests/nat/front_ends/fastapi/test_fastapi_front_end_plugin.py:68"
+                }
+              ]
+            },
+            {
+              "bound_consumers": 0,
+              "endpoint": {
+                "key": "http:GET /executions/{}",
+                "service": "nat"
+              },
+              "has_schema": false,
+              "providers": [
+                {
+                  "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+                  "id": "nat:HttpRoute:packages/nvidia_nat_core/src/nat/front_ends/fastapi/routes/execution.py:GET /executions/{execution_id}:128",
+                  "line": 128,
+                  "path": "packages/nvidia_nat_core/src/nat/front_ends/fastapi/routes/execution.py",
+                  "repo": "nat",
+                  "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_core/src/nat/front_ends/fastapi/routes/execution.py:128"
+                }
+              ]
+            },
+            {
+              "bound_consumers": 0,
+              "endpoint": {
+                "key": "http:GET /health",
+                "service": "nat"
+              },
+              "has_schema": false,
+              "providers": [
+                {
+                  "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+                  "id": "nat:HttpRoute:packages/nvidia_nat_core/src/nat/front_ends/fastapi/routes/health.py:GET /health:36",
+                  "line": 36,
+                  "path": "packages/nvidia_nat_core/src/nat/front_ends/fastapi/routes/health.py",
+                  "repo": "nat",
+                  "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_core/src/nat/front_ends/fastapi/routes/health.py:36"
+                },
+                {
+                  "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+                  "id": "nat:HttpRoute:packages/nvidia_nat_mcp/tests/server/test_add_root_level_routes.py:GET /health:48",
+                  "line": 48,
+                  "path": "packages/nvidia_nat_mcp/tests/server/test_add_root_level_routes.py",
+                  "repo": "nat",
+                  "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_mcp/tests/server/test_add_root_level_routes.py:48"
+                }
+              ]
+            },
+            {
+              "bound_consumers": 0,
+              "endpoint": {
+                "key": "http:GET /mcp/client/tool/list",
+                "service": "nat"
+              },
+              "has_schema": false,
+              "providers": [
+                {
+                  "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+                  "id": "nat:HttpRoute:packages/nvidia_nat_mcp/src/nat/plugins/mcp/client/fastapi_routes.py:GET /mcp/client/tool/list:222",
+                  "line": 222,
+                  "path": "packages/nvidia_nat_mcp/src/nat/plugins/mcp/client/fastapi_routes.py",
+                  "repo": "nat",
+                  "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_mcp/src/nat/plugins/mcp/client/fastapi_routes.py:222"
+                }
+              ]
+            },
+            {
+              "bound_consumers": 0,
+              "endpoint": {
+                "key": "http:GET /mcp/client/tool/list/per_user",
+                "service": "nat"
+              },
+              "has_schema": false,
+              "providers": [
+                {
+                  "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+                  "id": "nat:HttpRoute:packages/nvidia_nat_mcp/src/nat/plugins/mcp/client/fastapi_routes.py:GET /mcp/client/tool/list/per_user:257",
+                  "line": 257,
+                  "path": "packages/nvidia_nat_mcp/src/nat/plugins/mcp/client/fastapi_routes.py",
+                  "repo": "nat",
+                  "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_mcp/src/nat/plugins/mcp/client/fastapi_routes.py:257"
+                }
+              ]
+            },
+            {
+              "bound_consumers": 0,
+              "endpoint": {
+                "key": "http:GET /monitor/users",
+                "service": "nat"
+              },
+              "has_schema": false,
+              "providers": [
+                {
+                  "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+                  "id": "nat:HttpRoute:packages/nvidia_nat_core/src/nat/front_ends/fastapi/routes/monitor.py:GET /monitor/users:62",
+                  "line": 62,
+                  "path": "packages/nvidia_nat_core/src/nat/front_ends/fastapi/routes/monitor.py",
+                  "repo": "nat",
+                  "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_core/src/nat/front_ends/fastapi/routes/monitor.py:62"
+                }
+              ]
+            },
+            {
+              "bound_consumers": 0,
+              "endpoint": {
+                "key": "http:GET /oauth/authorize",
+                "service": "nat"
+              },
+              "has_schema": false,
+              "providers": [
+                {
+                  "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+                  "id": "nat:HttpRoute:packages/nvidia_nat_core/tests/nat/front_ends/auth_flow_handlers/mock_oauth2_server.py:GET /oauth/authorize:185",
+                  "line": 185,
+                  "path": "packages/nvidia_nat_core/tests/nat/front_ends/auth_flow_handlers/mock_oauth2_server.py",
+                  "repo": "nat",
+                  "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_core/tests/nat/front_ends/auth_flow_handlers/mock_oauth2_server.py:185"
+                }
+              ]
+            },
+            {
+              "bound_consumers": 0,
+              "endpoint": {
+                "key": "http:GET /static/{**}",
+                "service": "nat"
+              },
+              "has_schema": false,
+              "providers": [
+                {
+                  "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+                  "id": "nat:HttpRoute:packages/nvidia_nat_core/src/nat/front_ends/fastapi/routes/static.py:GET /static/{file_path%3Apath}:126",
+                  "line": 126,
+                  "path": "packages/nvidia_nat_core/src/nat/front_ends/fastapi/routes/static.py",
+                  "repo": "nat",
+                  "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_core/src/nat/front_ends/fastapi/routes/static.py:126"
+                }
+              ]
+            },
+            {
+              "bound_consumers": 0,
+              "endpoint": {
+                "key": "http:POST /alerts",
+                "service": "nat"
+              },
+              "has_schema": false,
+              "providers": [
+                {
+                  "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+                  "id": "nat:HttpRoute:examples/advanced_agents/alert_triage_agent/src/nat_alert_triage_agent/run.py:POST /alerts:136",
+                  "line": 136,
+                  "path": "examples/advanced_agents/alert_triage_agent/src/nat_alert_triage_agent/run.py",
+                  "repo": "nat",
+                  "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:examples/advanced_agents/alert_triage_agent/src/nat_alert_triage_agent/run.py:136"
+                }
+              ]
+            },
+            {
+              "bound_consumers": 0,
+              "endpoint": {
+                "key": "http:POST /chat",
+                "service": "nat"
+              },
+              "has_schema": false,
+              "providers": [
+                {
+                  "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+                  "id": "nat:HttpRoute:repos.yaml#provides[1]:http%3APOST /chat:1",
+                  "line": 1,
+                  "path": "repos.yaml#provides[1]",
+                  "repo": "nat",
+                  "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:repos.yaml#provides[1]:1"
+                }
+              ]
+            },
+            {
+              "bound_consumers": 1,
+              "endpoint": {
+                "key": "http:POST /chat/stream",
+                "service": "nat"
+              },
+              "has_schema": false,
+              "providers": [
+                {
+                  "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+                  "id": "nat:HttpRoute:repos.yaml#provides[0]:http%3APOST /chat/stream:0",
+                  "line": 0,
+                  "path": "repos.yaml#provides[0]",
+                  "repo": "nat",
+                  "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:repos.yaml#provides[0]:0"
+                }
+              ]
+            },
+            {
+              "bound_consumers": 0,
+              "endpoint": {
+                "key": "http:POST /executions/{}/interactions/{}/response",
+                "service": "nat"
+              },
+              "has_schema": false,
+              "providers": [
+                {
+                  "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+                  "id": "nat:HttpRoute:packages/nvidia_nat_core/src/nat/front_ends/fastapi/routes/execution.py:POST /executions/{execution_id}/interactions/{interaction_id}/response:140",
+                  "line": 140,
+                  "path": "packages/nvidia_nat_core/src/nat/front_ends/fastapi/routes/execution.py",
+                  "repo": "nat",
+                  "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_core/src/nat/front_ends/fastapi/routes/execution.py:140"
+                }
+              ]
+            },
+            {
+              "bound_consumers": 0,
+              "endpoint": {
+                "key": "http:POST /feedback",
+                "service": "nat"
+              },
+              "has_schema": false,
+              "providers": [
+                {
+                  "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+                  "id": "nat:HttpRoute:packages/nvidia_nat_weave/src/nat/plugins/weave/fastapi_plugin_worker.py:POST /feedback:153",
+                  "line": 153,
+                  "path": "packages/nvidia_nat_weave/src/nat/plugins/weave/fastapi_plugin_worker.py",
+                  "repo": "nat",
+                  "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_weave/src/nat/plugins/weave/fastapi_plugin_worker.py:153"
+                }
+              ]
+            },
+            {
+              "bound_consumers": 0,
+              "endpoint": {
+                "key": "http:POST /oauth/device/code",
+                "service": "nat"
+              },
+              "has_schema": false,
+              "providers": [
+                {
+                  "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+                  "id": "nat:HttpRoute:packages/nvidia_nat_core/tests/nat/front_ends/auth_flow_handlers/mock_oauth2_server.py:POST /oauth/device/code:221",
+                  "line": 221,
+                  "path": "packages/nvidia_nat_core/tests/nat/front_ends/auth_flow_handlers/mock_oauth2_server.py",
+                  "repo": "nat",
+                  "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_core/tests/nat/front_ends/auth_flow_handlers/mock_oauth2_server.py:221"
+                }
+              ]
+            },
+            {
+              "bound_consumers": 0,
+              "endpoint": {
+                "key": "http:POST /oauth/token",
+                "service": "nat"
+              },
+              "has_schema": false,
+              "providers": [
+                {
+                  "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+                  "id": "nat:HttpRoute:packages/nvidia_nat_core/tests/nat/front_ends/auth_flow_handlers/mock_oauth2_server.py:POST /oauth/token:249",
+                  "line": 249,
+                  "path": "packages/nvidia_nat_core/tests/nat/front_ends/auth_flow_handlers/mock_oauth2_server.py",
+                  "repo": "nat",
+                  "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_core/tests/nat/front_ends/auth_flow_handlers/mock_oauth2_server.py:249"
+                }
+              ]
+            },
+            {
+              "bound_consumers": 0,
+              "endpoint": {
+                "key": "http:POST /static/{**}",
+                "service": "nat"
+              },
+              "has_schema": false,
+              "providers": [
+                {
+                  "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+                  "id": "nat:HttpRoute:packages/nvidia_nat_core/src/nat/front_ends/fastapi/routes/static.py:POST /static/{file_path%3Apath}:114",
+                  "line": 114,
+                  "path": "packages/nvidia_nat_core/src/nat/front_ends/fastapi/routes/static.py",
+                  "repo": "nat",
+                  "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_core/src/nat/front_ends/fastapi/routes/static.py:114"
+                }
+              ]
+            },
+            {
+              "bound_consumers": 0,
+              "endpoint": {
+                "key": "http:PUT /static/{**}",
+                "service": "nat"
+              },
+              "has_schema": false,
+              "providers": [
+                {
+                  "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+                  "id": "nat:HttpRoute:packages/nvidia_nat_core/src/nat/front_ends/fastapi/routes/static.py:PUT /static/{file_path%3Apath}:120",
+                  "line": 120,
+                  "path": "packages/nvidia_nat_core/src/nat/front_ends/fastapi/routes/static.py",
+                  "repo": "nat",
+                  "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_core/src/nat/front_ends/fastapi/routes/static.py:120"
+                }
+              ]
+            },
+            {
+              "bound_consumers": 0,
+              "endpoint": {
+                "key": "http:DELETE /static/{**}",
+                "service": "nat"
+              },
+              "has_schema": false,
+              "providers": [
+                {
+                  "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+                  "id": "nat:HttpRoute:packages/nvidia_nat_core/src/nat/front_ends/fastapi/routes/static.py:DELETE /static/{file_path%3Apath}:132",
+                  "line": 132,
+                  "path": "packages/nvidia_nat_core/src/nat/front_ends/fastapi/routes/static.py",
+                  "repo": "nat",
+                  "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_core/src/nat/front_ends/fastapi/routes/static.py:132"
+                }
+              ]
+            },
+            {
+              "bound_consumers": 0,
+              "endpoint": {
+                "key": "http:ANY /api/mcp/clients",
+                "service": "nat-ui"
+              },
+              "has_schema": false,
+              "providers": [
+                {
+                  "commit": "41cb8cf843091a24bd06d0a5f844a3cb824049d8",
+                  "id": "nat-ui:HttpRoute:pages/api/mcp/clients.ts:ANY /api/mcp/clients:5",
+                  "line": 5,
+                  "path": "pages/api/mcp/clients.ts",
+                  "repo": "nat-ui",
+                  "text": "nat-ui@41cb8cf843091a24bd06d0a5f844a3cb824049d8:pages/api/mcp/clients.ts:5"
+                }
+              ]
+            },
+            {
+              "bound_consumers": 0,
+              "endpoint": {
+                "key": "http:ANY /api/update-data-stream",
+                "service": "nat-ui"
+              },
+              "has_schema": false,
+              "providers": [
+                {
+                  "commit": "41cb8cf843091a24bd06d0a5f844a3cb824049d8",
+                  "id": "nat-ui:HttpRoute:pages/api/update-data-stream.ts:ANY /api/update-data-stream:111",
+                  "line": 111,
+                  "path": "pages/api/update-data-stream.ts",
+                  "repo": "nat-ui",
+                  "text": "nat-ui@41cb8cf843091a24bd06d0a5f844a3cb824049d8:pages/api/update-data-stream.ts:111"
+                }
+              ]
+            }
+          ],
+          "scope": {
+            "configured_only": true,
+            "reviewed": [
+              {
+                "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+                "dirty": false,
+                "repo": "nat"
+              },
+              {
+                "commit": "eadbb7573b9ba12c01a9df85c601a32a886d7b25",
+                "dirty": false,
+                "repo": "nat-examples"
+              },
+              {
+                "commit": "41cb8cf843091a24bd06d0a5f844a3cb824049d8",
+                "dirty": false,
+                "repo": "nat-ui"
+              }
+            ],
+            "unreviewed": []
+          }
+        },
+        "meta": {
+          "elapsed_ms": 0,
+          "view": {
+            "git_commits": {
+              "nat": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+              "nat-examples": "eadbb7573b9ba12c01a9df85c601a32a886d7b25",
+              "nat-ui": "41cb8cf843091a24bd06d0a5f844a3cb824049d8"
+            },
+            "kind": "live",
+            "snapshot_id": null
+          }
+        },
+        "reproducible": false,
+        "snapshot": "live",
+        "view": {
+          "git_commits": {
+            "nat": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+            "nat-examples": "eadbb7573b9ba12c01a9df85c601a32a886d7b25",
+            "nat-ui": "41cb8cf843091a24bd06d0a5f844a3cb824049d8"
+          },
+          "kind": "live",
+          "snapshot_id": null
+        }
+      },
+      "websocket": {
+        "analyzer_version": "0.13.0",
+        "api_version": 1,
+        "data": {
+          "items": [
+            {
+              "bound_consumers": 0,
+              "endpoint": {
+                "key": "websocket:/websocket",
+                "service": "nat"
+              },
+              "has_schema": false,
+              "providers": [
+                {
+                  "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+                  "id": "nat:HttpRoute:repos.yaml#provides[2]:ws%3A/websocket:2",
+                  "line": 2,
+                  "path": "repos.yaml#provides[2]",
+                  "repo": "nat",
+                  "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:repos.yaml#provides[2]:2"
+                }
+              ]
+            }
+          ],
+          "scope": {
+            "configured_only": true,
+            "reviewed": [
+              {
+                "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+                "dirty": false,
+                "repo": "nat"
+              },
+              {
+                "commit": "eadbb7573b9ba12c01a9df85c601a32a886d7b25",
+                "dirty": false,
+                "repo": "nat-examples"
+              },
+              {
+                "commit": "41cb8cf843091a24bd06d0a5f844a3cb824049d8",
+                "dirty": false,
+                "repo": "nat-ui"
+              }
+            ],
+            "unreviewed": []
+          }
+        },
+        "meta": {
+          "elapsed_ms": 0,
+          "view": {
+            "git_commits": {
+              "nat": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+              "nat-examples": "eadbb7573b9ba12c01a9df85c601a32a886d7b25",
+              "nat-ui": "41cb8cf843091a24bd06d0a5f844a3cb824049d8"
+            },
+            "kind": "live",
+            "snapshot_id": null
+          }
+        },
+        "reproducible": false,
+        "snapshot": "live",
+        "view": {
+          "git_commits": {
+            "nat": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+            "nat-examples": "eadbb7573b9ba12c01a9df85c601a32a886d7b25",
+            "nat-ui": "41cb8cf843091a24bd06d0a5f844a3cb824049d8"
+          },
+          "kind": "live",
+          "snapshot_id": null
+        }
+      },
+      "unresolved": {
+        "analyzer_version": "0.13.0",
+        "api_version": 1,
+        "data": {
+          "ambiguous": [],
+          "items": [
+            {
+              "candidates": [
+                {
+                  "endpoint": {
+                    "key": "http:GET /.well-known/oauth-protected-resource",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /auth/redirect",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /custom",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /executions/{}",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /health",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /mcp/client/tool/list",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /mcp/client/tool/list/per_user",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /monitor/users",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /oauth/authorize",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /static/{**}",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:POST /alerts",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:POST /chat",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:POST /chat/stream",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:POST /executions/{}/interactions/{}/response",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:POST /feedback",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:POST /oauth/device/code",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:POST /oauth/token",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:POST /static/{**}",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:PUT /static/{**}",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:DELETE /static/{**}",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:ANY /api/mcp/clients",
+                    "service": "nat-ui"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:ANY /api/update-data-stream",
+                    "service": "nat-ui"
+                  },
+                  "reason": "pattern"
+                }
+              ],
+              "consumer": {
+                "commit": "eadbb7573b9ba12c01a9df85c601a32a886d7b25",
+                "id": "nat-examples:HttpClientCall:examples/agent_identity_tool/scripts/mock_registry_server.py:ws%3Aclient%3Aws.example.com%3A/stream:52",
+                "line": 52,
+                "path": "examples/agent_identity_tool/scripts/mock_registry_server.py",
+                "repo": "nat-examples",
+                "text": "nat-examples@eadbb7573b9ba12c01a9df85c601a32a886d7b25:examples/agent_identity_tool/scripts/mock_registry_server.py:52"
+              },
+              "host": null,
+              "method": "ws:client:ws.example.com:/stream",
+              "reason": "no_match",
+              "target_service": null,
+              "template": null,
+              "url_expr": "ws:client:ws.example.com:/stream"
+            },
+            {
+              "candidates": [],
+              "consumer": {
+                "commit": "41cb8cf843091a24bd06d0a5f844a3cb824049d8",
+                "id": "nat-ui:HttpClientCall:__tests__/api/routes.test.ts:POST /init:335",
+                "line": 335,
+                "path": "__tests__/api/routes.test.ts",
+                "repo": "nat-ui",
+                "text": "nat-ui@41cb8cf843091a24bd06d0a5f844a3cb824049d8:__tests__/api/routes.test.ts:335"
+              },
+              "host": null,
+              "method": "POST",
+              "reason": "no_match",
+              "target_service": null,
+              "template": "/init",
+              "url_expr": "POST /init"
+            },
+            {
+              "candidates": [
+                {
+                  "endpoint": {
+                    "key": "http:GET /.well-known/oauth-protected-resource",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /auth/redirect",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /custom",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /executions/{}",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /health",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /mcp/client/tool/list",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /mcp/client/tool/list/per_user",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /monitor/users",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /oauth/authorize",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /static/{**}",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:POST /alerts",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:POST /chat",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:POST /chat/stream",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:POST /executions/{}/interactions/{}/response",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:POST /feedback",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:POST /oauth/device/code",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:POST /oauth/token",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:POST /static/{**}",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:PUT /static/{**}",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:DELETE /static/{**}",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:ANY /api/mcp/clients",
+                    "service": "nat-ui"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:ANY /api/update-data-stream",
+                    "service": "nat-ui"
+                  },
+                  "reason": "pattern"
+                }
+              ],
+              "consumer": {
+                "commit": "41cb8cf843091a24bd06d0a5f844a3cb824049d8",
+                "id": "nat-ui:HttpClientCall:__tests__/components/Chat.websocket.test.tsx:ws%3Aclient%3Atest-server.com%3A/websocket:41",
+                "line": 41,
+                "path": "__tests__/components/Chat.websocket.test.tsx",
+                "repo": "nat-ui",
+                "text": "nat-ui@41cb8cf843091a24bd06d0a5f844a3cb824049d8:__tests__/components/Chat.websocket.test.tsx:41"
+              },
+              "host": null,
+              "method": "ws:client:test-server.com:/websocket",
+              "reason": "no_match",
+              "target_service": null,
+              "template": null,
+              "url_expr": "ws:client:test-server.com:/websocket"
+            },
+            {
+              "candidates": [
+                {
+                  "endpoint": {
+                    "key": "http:GET /.well-known/oauth-protected-resource",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /auth/redirect",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /custom",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /executions/{}",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /health",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /mcp/client/tool/list",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /mcp/client/tool/list/per_user",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /monitor/users",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /oauth/authorize",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /static/{**}",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:POST /alerts",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:POST /chat",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:POST /chat/stream",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:POST /executions/{}/interactions/{}/response",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:POST /feedback",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:POST /oauth/device/code",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:POST /oauth/token",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:POST /static/{**}",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:PUT /static/{**}",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:DELETE /static/{**}",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:ANY /api/mcp/clients",
+                    "service": "nat-ui"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:ANY /api/update-data-stream",
+                    "service": "nat-ui"
+                  },
+                  "reason": "pattern"
+                }
+              ],
+              "consumer": {
+                "commit": "41cb8cf843091a24bd06d0a5f844a3cb824049d8",
+                "id": "nat-ui:HttpClientCall:__tests__/components/Chat.websocket.test.tsx:ws%3Aclient%3Atest.com%3A/websocket:246",
+                "line": 246,
+                "path": "__tests__/components/Chat.websocket.test.tsx",
+                "repo": "nat-ui",
+                "text": "nat-ui@41cb8cf843091a24bd06d0a5f844a3cb824049d8:__tests__/components/Chat.websocket.test.tsx:246"
+              },
+              "host": null,
+              "method": "ws:client:test.com:/websocket",
+              "reason": "no_match",
+              "target_service": null,
+              "template": null,
+              "url_expr": "ws:client:test.com:/websocket"
+            },
+            {
+              "candidates": [
+                {
+                  "endpoint": {
+                    "key": "http:GET /.well-known/oauth-protected-resource",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /auth/redirect",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /custom",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /executions/{}",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /health",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /mcp/client/tool/list",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /mcp/client/tool/list/per_user",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /monitor/users",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /oauth/authorize",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /static/{**}",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:POST /alerts",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:POST /chat",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:POST /chat/stream",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:POST /executions/{}/interactions/{}/response",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:POST /feedback",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:POST /oauth/device/code",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:POST /oauth/token",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:POST /static/{**}",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:PUT /static/{**}",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:DELETE /static/{**}",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:ANY /api/mcp/clients",
+                    "service": "nat-ui"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:ANY /api/update-data-stream",
+                    "service": "nat-ui"
+                  },
+                  "reason": "pattern"
+                }
+              ],
+              "consumer": {
+                "commit": "41cb8cf843091a24bd06d0a5f844a3cb824049d8",
+                "id": "nat-ui:HttpClientCall:__tests__/components/Chat.websocket.test.tsx:ws%3Aclient%3Atest1.com%3A/:191",
+                "line": 191,
+                "path": "__tests__/components/Chat.websocket.test.tsx",
+                "repo": "nat-ui",
+                "text": "nat-ui@41cb8cf843091a24bd06d0a5f844a3cb824049d8:__tests__/components/Chat.websocket.test.tsx:191"
+              },
+              "host": null,
+              "method": "ws:client:test1.com:/",
+              "reason": "no_match",
+              "target_service": null,
+              "template": null,
+              "url_expr": "ws:client:test1.com:/"
+            },
+            {
+              "candidates": [
+                {
+                  "endpoint": {
+                    "key": "http:GET /.well-known/oauth-protected-resource",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /auth/redirect",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /custom",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /executions/{}",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /health",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /mcp/client/tool/list",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /mcp/client/tool/list/per_user",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /monitor/users",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /oauth/authorize",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /static/{**}",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:POST /alerts",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:POST /chat",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:POST /chat/stream",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:POST /executions/{}/interactions/{}/response",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:POST /feedback",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:POST /oauth/device/code",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:POST /oauth/token",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:POST /static/{**}",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:PUT /static/{**}",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:DELETE /static/{**}",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:ANY /api/mcp/clients",
+                    "service": "nat-ui"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:ANY /api/update-data-stream",
+                    "service": "nat-ui"
+                  },
+                  "reason": "pattern"
+                }
+              ],
+              "consumer": {
+                "commit": "41cb8cf843091a24bd06d0a5f844a3cb824049d8",
+                "id": "nat-ui:HttpClientCall:__tests__/components/Chat.websocket.test.tsx:ws%3Aclient%3Atest2.com%3A/:194",
+                "line": 194,
+                "path": "__tests__/components/Chat.websocket.test.tsx",
+                "repo": "nat-ui",
+                "text": "nat-ui@41cb8cf843091a24bd06d0a5f844a3cb824049d8:__tests__/components/Chat.websocket.test.tsx:194"
+              },
+              "host": null,
+              "method": "ws:client:test2.com:/",
+              "reason": "no_match",
+              "target_service": null,
+              "template": null,
+              "url_expr": "ws:client:test2.com:/"
+            },
+            {
+              "candidates": [],
+              "consumer": {
+                "commit": "41cb8cf843091a24bd06d0a5f844a3cb824049d8",
+                "id": "nat-ui:HttpClientCall:__tests__/proxy/proxy-integration.test.js:GET /:26",
+                "line": 26,
+                "path": "__tests__/proxy/proxy-integration.test.js",
+                "repo": "nat-ui",
+                "text": "nat-ui@41cb8cf843091a24bd06d0a5f844a3cb824049d8:__tests__/proxy/proxy-integration.test.js:26"
+              },
+              "host": null,
+              "method": "GET",
+              "reason": "no_match",
+              "target_service": null,
+              "template": "/",
+              "url_expr": "GET /"
+            },
+            {
+              "candidates": [
+                {
+                  "endpoint": {
+                    "key": "http:POST /chat/stream",
+                    "service": "nat"
+                  },
+                  "reason": "prefix_stripped"
+                }
+              ],
+              "consumer": {
+                "commit": "41cb8cf843091a24bd06d0a5f844a3cb824049d8",
+                "id": "nat-ui:HttpClientCall:__tests__/proxy/proxy-integration.test.js:POST /api/chat/stream:45",
+                "line": 45,
+                "path": "__tests__/proxy/proxy-integration.test.js",
+                "repo": "nat-ui",
+                "text": "nat-ui@41cb8cf843091a24bd06d0a5f844a3cb824049d8:__tests__/proxy/proxy-integration.test.js:45"
+              },
+              "host": null,
+              "method": "POST",
+              "reason": "no_match",
+              "target_service": null,
+              "template": "/api/chat/stream",
+              "url_expr": "POST /api/chat/stream"
+            },
+            {
+              "candidates": [],
+              "consumer": {
+                "commit": "41cb8cf843091a24bd06d0a5f844a3cb824049d8",
+                "id": "nat-ui:HttpClientCall:__tests__/proxy/proxy-integration.test.js:POST /api/unauthorized:74",
+                "line": 74,
+                "path": "__tests__/proxy/proxy-integration.test.js",
+                "repo": "nat-ui",
+                "text": "nat-ui@41cb8cf843091a24bd06d0a5f844a3cb824049d8:__tests__/proxy/proxy-integration.test.js:74"
+              },
+              "host": null,
+              "method": "POST",
+              "reason": "no_match",
+              "target_service": null,
+              "template": "/api/unauthorized",
+              "url_expr": "POST /api/unauthorized"
+            },
+            {
+              "candidates": [],
+              "consumer": {
+                "commit": "41cb8cf843091a24bd06d0a5f844a3cb824049d8",
+                "id": "nat-ui:HttpClientCall:components/Chat/Chat.tsx:POST <dynamic>:1165",
+                "line": 1165,
+                "path": "components/Chat/Chat.tsx",
+                "repo": "nat-ui",
+                "text": "nat-ui@41cb8cf843091a24bd06d0a5f844a3cb824049d8:components/Chat/Chat.tsx:1165"
+              },
+              "host": null,
+              "method": "POST",
+              "reason": "no_route_in_service",
+              "target_service": null,
+              "template": "<dynamic>",
+              "url_expr": "POST <dynamic>"
+            },
+            {
+              "candidates": [],
+              "consumer": {
+                "commit": "41cb8cf843091a24bd06d0a5f844a3cb824049d8",
+                "id": "nat-ui:HttpClientCall:components/DataStreamDisplay/DataStreamDisplay.tsx:GET <dynamic>:62",
+                "line": 62,
+                "path": "components/DataStreamDisplay/DataStreamDisplay.tsx",
+                "repo": "nat-ui",
+                "text": "nat-ui@41cb8cf843091a24bd06d0a5f844a3cb824049d8:components/DataStreamDisplay/DataStreamDisplay.tsx:62"
+              },
+              "host": null,
+              "method": "GET",
+              "reason": "no_route_in_service",
+              "target_service": null,
+              "template": "<dynamic>",
+              "url_expr": "GET <dynamic>"
+            },
+            {
+              "candidates": [],
+              "consumer": {
+                "commit": "41cb8cf843091a24bd06d0a5f844a3cb824049d8",
+                "id": "nat-ui:HttpClientCall:components/DataStreamDisplay/DataStreamDisplay.tsx:GET <dynamic>:82",
+                "line": 82,
+                "path": "components/DataStreamDisplay/DataStreamDisplay.tsx",
+                "repo": "nat-ui",
+                "text": "nat-ui@41cb8cf843091a24bd06d0a5f844a3cb824049d8:components/DataStreamDisplay/DataStreamDisplay.tsx:82"
+              },
+              "host": null,
+              "method": "GET",
+              "reason": "no_route_in_service",
+              "target_service": null,
+              "template": "<dynamic>",
+              "url_expr": "GET <dynamic>"
+            },
+            {
+              "candidates": [],
+              "consumer": {
+                "commit": "41cb8cf843091a24bd06d0a5f844a3cb824049d8",
+                "id": "nat-ui:HttpClientCall:components/DataStreamDisplay/DataStreamManager.tsx:GET <dynamic>:88",
+                "line": 88,
+                "path": "components/DataStreamDisplay/DataStreamManager.tsx",
+                "repo": "nat-ui",
+                "text": "nat-ui@41cb8cf843091a24bd06d0a5f844a3cb824049d8:components/DataStreamDisplay/DataStreamManager.tsx:88"
+              },
+              "host": null,
+              "method": "GET",
+              "reason": "no_route_in_service",
+              "target_service": null,
+              "template": "<dynamic>",
+              "url_expr": "GET <dynamic>"
+            },
+            {
+              "candidates": [
+                {
+                  "endpoint": {
+                    "key": "http:POST /feedback",
+                    "service": "nat"
+                  },
+                  "reason": "prefix_stripped"
+                }
+              ],
+              "consumer": {
+                "commit": "41cb8cf843091a24bd06d0a5f844a3cb824049d8",
+                "id": "nat-ui:HttpClientCall:hooks/useFeedback.ts:POST /api/feedback:26",
+                "line": 26,
+                "path": "hooks/useFeedback.ts",
+                "repo": "nat-ui",
+                "text": "nat-ui@41cb8cf843091a24bd06d0a5f844a3cb824049d8:hooks/useFeedback.ts:26"
+              },
+              "host": null,
+              "method": "POST",
+              "reason": "no_match",
+              "target_service": null,
+              "template": "/api/feedback",
+              "url_expr": "POST /api/feedback"
+            },
+            {
+              "candidates": [],
+              "consumer": {
+                "commit": "41cb8cf843091a24bd06d0a5f844a3cb824049d8",
+                "id": "nat-ui:HttpClientCall:pages/api/mcp/clients.ts:GET /:18",
+                "line": 18,
+                "path": "pages/api/mcp/clients.ts",
+                "repo": "nat-ui",
+                "text": "nat-ui@41cb8cf843091a24bd06d0a5f844a3cb824049d8:pages/api/mcp/clients.ts:18"
+              },
+              "host": null,
+              "method": "GET",
+              "reason": "no_match",
+              "target_service": null,
+              "template": "/",
+              "url_expr": "GET /"
+            },
+            {
+              "candidates": [],
+              "consumer": {
+                "commit": "41cb8cf843091a24bd06d0a5f844a3cb824049d8",
+                "id": "nat-ui:HttpClientCall:pages/database-updates.tsx:GET <dynamic>:109",
+                "line": 109,
+                "path": "pages/database-updates.tsx",
+                "repo": "nat-ui",
+                "text": "nat-ui@41cb8cf843091a24bd06d0a5f844a3cb824049d8:pages/database-updates.tsx:109"
+              },
+              "host": null,
+              "method": "GET",
+              "reason": "no_route_in_service",
+              "target_service": null,
+              "template": "<dynamic>",
+              "url_expr": "GET <dynamic>"
+            },
+            {
+              "candidates": [],
+              "consumer": {
+                "commit": "41cb8cf843091a24bd06d0a5f844a3cb824049d8",
+                "id": "nat-ui:HttpClientCall:proxy/server.js:POST /:263",
+                "line": 263,
+                "path": "proxy/server.js",
+                "repo": "nat-ui",
+                "text": "nat-ui@41cb8cf843091a24bd06d0a5f844a3cb824049d8:proxy/server.js:263"
+              },
+              "host": null,
+              "method": "POST",
+              "reason": "no_match",
+              "target_service": null,
+              "template": "/",
+              "url_expr": "POST /"
+            },
+            {
+              "candidates": [],
+              "consumer": {
+                "commit": "41cb8cf843091a24bd06d0a5f844a3cb824049d8",
+                "id": "nat-ui:HttpClientCall:proxy/server.js:UNKNOWN <dynamic>:234",
+                "line": 234,
+                "path": "proxy/server.js",
+                "repo": "nat-ui",
+                "text": "nat-ui@41cb8cf843091a24bd06d0a5f844a3cb824049d8:proxy/server.js:234"
+              },
+              "host": null,
+              "method": "UNKNOWN",
+              "reason": "no_route_in_service",
+              "target_service": "nat",
+              "template": "<dynamic>",
+              "url_expr": "UNKNOWN <dynamic>"
+            },
+            {
+              "candidates": [],
+              "consumer": {
+                "commit": "41cb8cf843091a24bd06d0a5f844a3cb824049d8",
+                "id": "nat-ui:HttpClientCall:utils/api/mcpClient.ts:GET <dynamic>:28",
+                "line": 28,
+                "path": "utils/api/mcpClient.ts",
+                "repo": "nat-ui",
+                "text": "nat-ui@41cb8cf843091a24bd06d0a5f844a3cb824049d8:utils/api/mcpClient.ts:28"
+              },
+              "host": null,
+              "method": "GET",
+              "reason": "no_route_in_service",
+              "target_service": null,
+              "template": "<dynamic>",
+              "url_expr": "GET <dynamic>"
+            },
+            {
+              "candidates": [],
+              "consumer": {
+                "commit": "41cb8cf843091a24bd06d0a5f844a3cb824049d8",
+                "id": "nat-ui:HttpClientCall:utils/app/content.ts:GET /content/{}:19",
+                "line": 19,
+                "path": "utils/app/content.ts",
+                "repo": "nat-ui",
+                "text": "nat-ui@41cb8cf843091a24bd06d0a5f844a3cb824049d8:utils/app/content.ts:19"
+              },
+              "host": null,
+              "method": "GET",
+              "reason": "no_match",
+              "target_service": null,
+              "template": "/content/{}",
+              "url_expr": "GET /content/{}"
+            },
+            {
+              "candidates": [],
+              "consumer": {
+                "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+                "id": "nat:HttpClientCall:ci/scripts/gitlab/artifactory_upload.py:GET /api/v0/projects:76",
+                "line": 76,
+                "path": "ci/scripts/gitlab/artifactory_upload.py",
+                "repo": "nat",
+                "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:ci/scripts/gitlab/artifactory_upload.py:76"
+              },
+              "host": null,
+              "method": "GET",
+              "reason": "env_unmapped",
+              "target_service": null,
+              "template": "/api/v0/projects",
+              "url_expr": "GET /api/v0/projects"
+            },
+            {
+              "candidates": [],
+              "consumer": {
+                "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+                "id": "nat:HttpClientCall:ci/scripts/gitlab/artifactory_upload.py:POST /api/v0/projects/{}/releases:104",
+                "line": 104,
+                "path": "ci/scripts/gitlab/artifactory_upload.py",
+                "repo": "nat",
+                "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:ci/scripts/gitlab/artifactory_upload.py:104"
+              },
+              "host": null,
+              "method": "POST",
+              "reason": "env_unmapped",
+              "target_service": null,
+              "template": "/api/v0/projects/{}/releases",
+              "url_expr": "POST /api/v0/projects/{}/releases"
+            },
+            {
+              "candidates": [],
+              "consumer": {
+                "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+                "id": "nat:HttpClientCall:examples/MCP/simple_calculator_fastmcp_protected/tests/test_simple_calculator_fastmcp_protected.py:GET /mcp:116",
+                "line": 116,
+                "path": "examples/MCP/simple_calculator_fastmcp_protected/tests/test_simple_calculator_fastmcp_protected.py",
+                "repo": "nat",
+                "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:examples/MCP/simple_calculator_fastmcp_protected/tests/test_simple_calculator_fastmcp_protected.py:116"
+              },
+              "host": null,
+              "method": "GET",
+              "reason": "no_match",
+              "target_service": null,
+              "template": "/mcp",
+              "url_expr": "GET /mcp"
+            },
+            {
+              "candidates": [],
+              "consumer": {
+                "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+                "id": "nat:HttpClientCall:packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py:POST /:342",
+                "line": 342,
+                "path": "packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py",
+                "repo": "nat",
+                "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py:342"
+              },
+              "host": null,
+              "method": "POST",
+              "reason": "no_match",
+              "target_service": null,
+              "template": "/",
+              "url_expr": "POST /"
+            },
+            {
+              "candidates": [],
+              "consumer": {
+                "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+                "id": "nat:HttpClientCall:packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py:POST /:353",
+                "line": 353,
+                "path": "packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py",
+                "repo": "nat",
+                "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py:353"
+              },
+              "host": null,
+              "method": "POST",
+              "reason": "no_match",
+              "target_service": null,
+              "template": "/",
+              "url_expr": "POST /"
+            },
+            {
+              "candidates": [],
+              "consumer": {
+                "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+                "id": "nat:HttpClientCall:packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py:POST /:367",
+                "line": 367,
+                "path": "packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py",
+                "repo": "nat",
+                "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py:367"
+              },
+              "host": null,
+              "method": "POST",
+              "reason": "no_match",
+              "target_service": null,
+              "template": "/",
+              "url_expr": "POST /"
+            },
+            {
+              "candidates": [],
+              "consumer": {
+                "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+                "id": "nat:HttpClientCall:packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py:POST /:413",
+                "line": 413,
+                "path": "packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py",
+                "repo": "nat",
+                "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py:413"
+              },
+              "host": null,
+              "method": "POST",
+              "reason": "no_match",
+              "target_service": null,
+              "template": "/",
+              "url_expr": "POST /"
+            },
+            {
+              "candidates": [],
+              "consumer": {
+                "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+                "id": "nat:HttpClientCall:packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py:POST /:424",
+                "line": 424,
+                "path": "packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py",
+                "repo": "nat",
+                "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py:424"
+              },
+              "host": null,
+              "method": "POST",
+              "reason": "no_match",
+              "target_service": null,
+              "template": "/",
+              "url_expr": "POST /"
+            },
+            {
+              "candidates": [],
+              "consumer": {
+                "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+                "id": "nat:HttpClientCall:packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py:POST /:437",
+                "line": 437,
+                "path": "packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py",
+                "repo": "nat",
+                "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py:437"
+              },
+              "host": null,
+              "method": "POST",
+              "reason": "no_match",
+              "target_service": null,
+              "template": "/",
+              "url_expr": "POST /"
+            },
+            {
+              "candidates": [],
+              "consumer": {
+                "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+                "id": "nat:HttpClientCall:packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py:POST /:456",
+                "line": 456,
+                "path": "packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py",
+                "repo": "nat",
+                "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py:456"
+              },
+              "host": null,
+              "method": "POST",
+              "reason": "no_match",
+              "target_service": null,
+              "template": "/",
+              "url_expr": "POST /"
+            },
+            {
+              "candidates": [],
+              "consumer": {
+                "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+                "id": "nat:HttpClientCall:packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py:POST /:467",
+                "line": 467,
+                "path": "packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py",
+                "repo": "nat",
+                "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py:467"
+              },
+              "host": null,
+              "method": "POST",
+              "reason": "no_match",
+              "target_service": null,
+              "template": "/",
+              "url_expr": "POST /"
+            },
+            {
+              "candidates": [],
+              "consumer": {
+                "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+                "id": "nat:HttpClientCall:packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py:POST /:489",
+                "line": 489,
+                "path": "packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py",
+                "repo": "nat",
+                "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py:489"
+              },
+              "host": null,
+              "method": "POST",
+              "reason": "no_match",
+              "target_service": null,
+              "template": "/",
+              "url_expr": "POST /"
+            },
+            {
+              "candidates": [],
+              "consumer": {
+                "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+                "id": "nat:HttpClientCall:packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py:POST /:573",
+                "line": 573,
+                "path": "packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py",
+                "repo": "nat",
+                "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py:573"
+              },
+              "host": null,
+              "method": "POST",
+              "reason": "no_match",
+              "target_service": null,
+              "template": "/",
+              "url_expr": "POST /"
+            },
+            {
+              "candidates": [],
+              "consumer": {
+                "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+                "id": "nat:HttpClientCall:packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py:POST /generate/full:528",
+                "line": 528,
+                "path": "packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py",
+                "repo": "nat",
+                "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py:528"
+              },
+              "host": null,
+              "method": "POST",
+              "reason": "no_route_in_service",
+              "target_service": "nat",
+              "template": "/generate/full",
+              "url_expr": "POST /generate/full"
+            },
+            {
+              "candidates": [],
+              "consumer": {
+                "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+                "id": "nat:HttpClientCall:packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py:POST /generate/stream:388",
+                "line": 388,
+                "path": "packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py",
+                "repo": "nat",
+                "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_core/tests/nat/server/test_unified_api_server.py:388"
+              },
+              "host": null,
+              "method": "POST",
+              "reason": "no_route_in_service",
+              "target_service": "nat",
+              "template": "/generate/stream",
+              "url_expr": "POST /generate/stream"
+            },
+            {
+              "candidates": [
+                {
+                  "endpoint": {
+                    "key": "http:GET /.well-known/oauth-protected-resource",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /auth/redirect",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /custom",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /executions/{}",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /health",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /mcp/client/tool/list",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /mcp/client/tool/list/per_user",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /monitor/users",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /oauth/authorize",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /static/{**}",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:POST /alerts",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:POST /chat",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:POST /chat/stream",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:POST /executions/{}/interactions/{}/response",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:POST /feedback",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:POST /oauth/device/code",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:POST /oauth/token",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:POST /static/{**}",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:PUT /static/{**}",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:DELETE /static/{**}",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:ANY /api/mcp/clients",
+                    "service": "nat-ui"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:ANY /api/update-data-stream",
+                    "service": "nat-ui"
+                  },
+                  "reason": "pattern"
+                }
+              ],
+              "consumer": {
+                "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+                "id": "nat:HttpClientCall:packages/nvidia_nat_mcp/scripts/check_mcp_auth_cookie.py:ws%3Aclient%3Alocalhost%3A8000%3A/websocket?session={user_id}:138",
+                "line": 138,
+                "path": "packages/nvidia_nat_mcp/scripts/check_mcp_auth_cookie.py",
+                "repo": "nat",
+                "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_mcp/scripts/check_mcp_auth_cookie.py:138"
+              },
+              "host": null,
+              "method": "ws:client:localhost:8000:/websocket?session={user_id}",
+              "reason": "no_match",
+              "target_service": null,
+              "template": null,
+              "url_expr": "ws:client:localhost:8000:/websocket?session={user_id}"
+            },
+            {
+              "candidates": [
+                {
+                  "endpoint": {
+                    "key": "http:GET /.well-known/oauth-protected-resource",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /auth/redirect",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /custom",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /executions/{}",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /health",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /mcp/client/tool/list",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /mcp/client/tool/list/per_user",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /monitor/users",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /oauth/authorize",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:GET /static/{**}",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:POST /alerts",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:POST /chat",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:POST /chat/stream",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:POST /executions/{}/interactions/{}/response",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:POST /feedback",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:POST /oauth/device/code",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:POST /oauth/token",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:POST /static/{**}",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:PUT /static/{**}",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:DELETE /static/{**}",
+                    "service": "nat"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:ANY /api/mcp/clients",
+                    "service": "nat-ui"
+                  },
+                  "reason": "pattern"
+                },
+                {
+                  "endpoint": {
+                    "key": "http:ANY /api/update-data-stream",
+                    "service": "nat-ui"
+                  },
+                  "reason": "pattern"
+                }
+              ],
+              "consumer": {
+                "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+                "id": "nat:HttpClientCall:packages/nvidia_nat_mcp/scripts/check_mcp_auth_jwt.py:ws%3Aclient%3Alocalhost%3A8000%3A/websocket:169",
+                "line": 169,
+                "path": "packages/nvidia_nat_mcp/scripts/check_mcp_auth_jwt.py",
+                "repo": "nat",
+                "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_mcp/scripts/check_mcp_auth_jwt.py:169"
+              },
+              "host": null,
+              "method": "ws:client:localhost:8000:/websocket",
+              "reason": "no_match",
+              "target_service": null,
+              "template": null,
+              "url_expr": "ws:client:localhost:8000:/websocket"
+            },
+            {
+              "candidates": [
+                {
+                  "endpoint": {
+                    "key": "http:GET /health",
+                    "service": "nat"
+                  },
+                  "reason": "prefix_stripped"
+                }
+              ],
+              "consumer": {
+                "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+                "id": "nat:HttpClientCall:packages/nvidia_nat_memmachine/tests/test_memmachine_integration.py:GET /api/v2/health:51",
+                "line": 51,
+                "path": "packages/nvidia_nat_memmachine/tests/test_memmachine_integration.py",
+                "repo": "nat",
+                "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_memmachine/tests/test_memmachine_integration.py:51"
+              },
+              "host": null,
+              "method": "GET",
+              "reason": "no_match",
+              "target_service": null,
+              "template": "/api/v2/health",
+              "url_expr": "GET /api/v2/health"
+            },
+            {
+              "candidates": [],
+              "consumer": {
+                "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+                "id": "nat:HttpClientCall:packages/nvidia_nat_test/src/nat/test/plugin.py:GET /runtimes:833",
+                "line": 833,
+                "path": "packages/nvidia_nat_test/src/nat/test/plugin.py",
+                "repo": "nat",
+                "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_test/src/nat/test/plugin.py:833"
+              },
+              "host": null,
+              "method": "GET",
+              "reason": "no_match",
+              "target_service": null,
+              "template": "/runtimes",
+              "url_expr": "GET /runtimes"
+            },
+            {
+              "candidates": [],
+              "consumer": {
+                "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+                "id": "nat:HttpClientCall:packages/nvidia_nat_test/src/nat/test/plugin.py:POST /create_client:770",
+                "line": 770,
+                "path": "packages/nvidia_nat_test/src/nat/test/plugin.py",
+                "repo": "nat",
+                "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_test/src/nat/test/plugin.py:770"
+              },
+              "host": null,
+              "method": "POST",
+              "reason": "no_match",
+              "target_service": null,
+              "template": "/create_client",
+              "url_expr": "POST /create_client"
+            },
+            {
+              "candidates": [],
+              "consumer": {
+                "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+                "id": "nat:HttpClientCall:packages/nvidia_nat_test/src/nat/test/plugin.py:POST /packages:843",
+                "line": 843,
+                "path": "packages/nvidia_nat_test/src/nat/test/plugin.py",
+                "repo": "nat",
+                "text": "nat@2fdf56a41a4a3237a4dd83492fed8e11be7eec99:packages/nvidia_nat_test/src/nat/test/plugin.py:843"
+              },
+              "host": null,
+              "method": "POST",
+              "reason": "no_match",
+              "target_service": null,
+              "template": "/packages",
+              "url_expr": "POST /packages"
+            }
+          ],
+          "scope": {
+            "configured_only": true,
+            "reviewed": [
+              {
+                "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+                "dirty": false,
+                "repo": "nat"
+              },
+              {
+                "commit": "eadbb7573b9ba12c01a9df85c601a32a886d7b25",
+                "dirty": false,
+                "repo": "nat-examples"
+              },
+              {
+                "commit": "41cb8cf843091a24bd06d0a5f844a3cb824049d8",
+                "dirty": false,
+                "repo": "nat-ui"
+              }
+            ],
+            "unreviewed": []
+          }
+        },
+        "meta": {
+          "elapsed_ms": 0,
+          "view": {
+            "git_commits": {
+              "nat": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+              "nat-examples": "eadbb7573b9ba12c01a9df85c601a32a886d7b25",
+              "nat-ui": "41cb8cf843091a24bd06d0a5f844a3cb824049d8"
+            },
+            "kind": "live",
+            "snapshot_id": null
+          }
+        },
+        "reproducible": false,
+        "snapshot": "live",
+        "view": {
+          "git_commits": {
+            "nat": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+            "nat-examples": "eadbb7573b9ba12c01a9df85c601a32a886d7b25",
+            "nat-ui": "41cb8cf843091a24bd06d0a5f844a3cb824049d8"
+          },
+          "kind": "live",
+          "snapshot_id": null
+        }
+      }
+    }
+  },
+  "strict_non_test_binding_probe": {
+    "exit_code": 1,
+    "stdout": "HTTP provider source scopes: {'declared': 2, 'example': 1, 'mixed': 1, 'non_test_source': 13, 'test': 5}\nHTTP bound-consumer source scopes: {'test': 1}\nNon-test source HTTP bindings: 0\nRuntime production coverage: not established by this static smoke\n",
+    "stderr": "FAIL: no non-test source HTTP consumer binding was demonstrated\n",
+    "non_test_source_bindings": 0
+  },
+  "intermediate_query_issue": {
+    "binary_sha256": "fc9dc0512ecaf0fabc099cb7c648f1686ac162e6b9d6bdcfd31fae5fbd58053d",
+    "observed_incorrect_path_examples": [
+      "http:GET /job/last",
+      "http:GET /job/{{job_id}}",
+      "http:GET /jobs"
+    ],
+    "cause": "A string_content capture was a suffix of an f-string with a dynamic prefix.",
+    "correction": "Limit the new keyword registration query to plain unescaped literals; regression covers formatted and escaped paths."
+  },
+  "completed_utc": "2026-11-07T04:47:14.478554+00:00",
+  "validation": {
+    "full_workspace": {
+      "passed": 4122,
+      "ignored": 16,
+      "suites": 113,
+      "command": "cargo test --workspace -- --test-threads=2"
+    },
+    "http_regressions_passed": 54,
+    "python_startup_harness_passed": 9,
+    "python_scope_harness_passed": 3,
+    "ci_configured_clippy_all_targets": "passed",
+    "schema_tools": 100,
+    "schema_snapshot_equal": true,
+    "workflow_yaml_validated": true,
+    "new_python_regressions_in_ci": true,
+    "capability": {
+      "passed": 171,
+      "failed": 0,
+      "skipped": 2,
+      "evidence": "startup-capability-c9-2026-11-07.json"
+    },
+    "strict_non_test_binding_gate": {
+      "exit_code": 1,
+      "non_test_bindings": 0,
+      "status": "expected coverage failure; remaining URL-resolution work"
+    }
+  },
+  "finding_status": {
+    "NAT-01": "fixed",
+    "NAT-02": "fixed",
+    "NAT-03": "fixed for plain unescaped literal keyword registrations",
+    "NAT-04": "scope reporting and strict gate added; non-test binding coverage remains zero",
+    "NAT-05": "open",
+    "NAT-06": "open",
+    "NAT-07": "open"
+  }
+}

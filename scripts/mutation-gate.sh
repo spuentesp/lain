@@ -76,12 +76,12 @@
 #   test targets (~5-10 min, warm deps) + ~12 min per candidate here. The
 #   CI job timeout bounds the worst case.
 #
-# Baseline: `--baseline skip` in both phases -- the unmutated tree is known
-# green (CI's `test` job runs the full suite on every PR), so the budget goes
-# to mutants. Implication: if the confirm environment were itself red,
-# candidates would be misjudged caught-on-confirm; the `test` job's green
-# suite is the evidence that it is not. Timeouts are absolute (no measured
-# baseline to multiply from): phase 1 `--timeout 300` vs the measured ~45s
+# Baseline: both phases run the unmutated tree in the copied build directory.
+# A green checkout does not prove this environment works: temporary socket
+# paths or compiler-cache state can differ. Skipping the baseline can classify
+# setup failures as UNVIABLE or CAUGHT and turn a broken run green. Each phase
+# therefore pays for one baseline before judging mutants. Timeouts are absolute:
+# phase 1 `--timeout 300` vs the measured ~45s
 # focused run (~7x headroom), `--build-timeout 600`; phase 2 `--timeout 1800`
 # vs the ~12 min full suite, `--build-timeout 900`. A mutant that hangs past
 # its timeout is reported TIMEOUT and fails the gate (a phase-1 TIMEOUT that
@@ -92,6 +92,16 @@
 # harness alone is ~640MB; `make mutants` makes the same choice). Set them to
 # something else in the environment to override. Phase 2 additionally builds
 # every integration-test binary (a few GB even without debuginfo).
+#
+# Build correctness: `CARGO_INCREMENTAL=0` (also overridable). Incremental
+# rebuilds of the MUTATED tree poison rustc's const-eval of `tracing`
+# callsite metadata (rustc 1.98.1: a valid mutant like `delete !` on
+# `if !http_calls.is_empty()` panics `layout_of usize` in
+# `__tracing_stringify`, exit 101). cargo-mutants classifies the ICE as
+# UNVIABLE — a mutant that never got judged, which on a tracing-heavy diff
+# silently turns a broken build into a green gate. With the cache off each
+# mutant compiles and is judged for real; the cost is one full crate rebuild
+# per mutant (~90s instead of ~10s).
 #
 # Host quirk (this is why the header documents TMPDIR instead of hardcoding
 # one): on the current dev machine `/tmp` is quota-exhausted, and a TMPDIR
@@ -215,6 +225,10 @@ fi
 # Keep each scratch build small; caller may override (see header).
 export CARGO_PROFILE_DEV_DEBUG="${CARGO_PROFILE_DEV_DEBUG:-0}"
 export CARGO_PROFILE_TEST_DEBUG="${CARGO_PROFILE_TEST_DEBUG:-0}"
+# Judge mutants honestly: incremental rebuilds of the mutated tree ICE
+# rustc's tracing-callsite const-eval and the ICE lands in the UNVIABLE
+# bucket (see header, "Build correctness").
+export CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}"
 
 # Escape regex metacharacters so a mutant name can be matched literally.
 re_escape() {
@@ -233,12 +247,12 @@ re_escape() {
 echo "phase 1 (cargo test --lib): census over the diff"
 
 # Sequential (`-j` default 1) keeps one scratch tree and one target on disk.
-# `--baseline skip`: tree known green (see header). Output streams through so
+# The copied-tree baseline must pass (see header). Output streams through so
 # a long CI run is not a dark window; the structured table and summary come
 # after both phases.
 cargo mutants \
   --in-diff "$WORK/diff.patch" \
-  --baseline skip \
+  --baseline run \
   --timeout 300 \
   --build-timeout 600 \
   --cargo-arg=--lib \
@@ -289,7 +303,7 @@ if [[ ${#candidates[@]} -gt 0 ]]; then
   echo "phase 2 (${confirm_cmd}): confirming ${#candidates[@]} candidate(s)"
   cargo mutants \
     --in-diff "$WORK/diff.patch" \
-    --baseline skip \
+    --baseline run \
     --timeout 1800 \
     --build-timeout 900 \
     -e 'src/main.rs' -e 'src/bin/*' \

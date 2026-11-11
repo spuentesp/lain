@@ -32,11 +32,11 @@ mod common;
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use common::{free_port, ServerGuard};
+use common::{free_port, startup_budget_ms_from_env, ServerGuard};
 
 /// Bound applied on top of every documented budget. 4× absorbs a
 /// 2-core CI runner with the debug binary and in-binary parallel
@@ -160,16 +160,130 @@ fn build_perf_fixture(root: &Path) {
     assert!(commit.success(), "git commit failed");
 }
 
+/// Startup measurements for a single server boot.
+#[derive(Debug)]
+struct StartupMetrics {
+    /// Wall time from process spawn to the first 200 `/health`.
+    listening: Duration,
+    /// Wall time from process spawn to every repo reporting `ready`.
+    indexed: Duration,
+    /// Peak resident set size of the server process, in bytes, taken
+    /// from the kernel's `VmHWM` high-water mark. `None` when the
+    /// platform does not expose it (non-Linux) or the child had already
+    /// exited.
+    peak_rss_bytes: Option<u64>,
+}
+
+/// Peak resident set size of `pid`, in bytes, read from the kernel's
+/// `VmHWM` high-water mark in `/proc/<pid>/status`.
+///
+/// `VmHWM` is the kernel's own record of the largest resident set the
+/// process ever had, so the value is not a polling sample: a spike
+/// between two polls is still counted. `None` when the process is gone
+/// or the field cannot be parsed.
+#[cfg(target_os = "linux")]
+fn rss_bytes(pid: u32) -> Option<u64> {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    parse_peak_rss_bytes(&status)
+}
+
+/// A `/proc/<pid>/status` excerpt with a *different* current RSS and
+/// high-water mark, so a parser that picks the wrong field is caught.
+#[cfg(target_os = "linux")]
+const PROC_STATUS_SAMPLE: &str = "\
+Name:\tlain
+State:\tS (sleeping)
+VmPeak:\t  123456 kB
+VmSize:\t  234567 kB
+VmHWM:\t  111111 kB
+VmRSS:\t   99999 kB
+RssAnon:\t   90000 kB
+Threads:\t  12
+";
+
+/// The reported peak must be the kernel's high-water mark (`VmHWM`),
+/// not the instantaneous resident size (`VmRSS`): a polling sample of
+/// the latter under-reports every spike that happened between two
+/// polls.
+#[test]
+#[cfg(target_os = "linux")]
+fn peak_rss_parser_reads_the_high_water_mark_not_the_current_rss() {
+    let parsed = parse_peak_rss_bytes(PROC_STATUS_SAMPLE).expect("VmHWM must be present");
+    assert_eq!(
+        parsed,
+        111_111 * 1024,
+        "the parser must read VmHWM, the kernel's peak resident size"
+    );
+    assert_ne!(
+        parsed,
+        99_999 * 1024,
+        "the parser must not read VmRSS, the instantaneous resident size"
+    );
+}
+
+/// The parser must work on a real `/proc` entry too, and the kernel's
+/// high-water mark is never below the current resident size.
+#[test]
+#[cfg(target_os = "linux")]
+fn peak_rss_parser_reads_a_real_proc_status() {
+    let pid = std::process::id();
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap();
+    let hwm = parse_peak_rss_bytes(&status).expect("VmHWM for this process");
+    let rss = parse_current_rss_bytes(&status).expect("VmRSS for this process");
+    assert!(hwm > 0, "the high-water mark must be a positive byte count");
+    assert!(
+        hwm >= rss,
+        "the high-water mark ({hwm}) must never be below the current RSS ({rss})"
+    );
+}
+
+#[cfg(not(target_os = "linux"))]
+fn rss_bytes(_pid: u32) -> Option<u64> {
+    None
+}
+
+/// Extract the kernel's peak resident size (`VmHWM`) from the contents of
+/// a `/proc/<pid>/status` file.
+#[cfg(target_os = "linux")]
+fn parse_peak_rss_bytes(status: &str) -> Option<u64> {
+    let kb = status.lines().find_map(|line| {
+        line.strip_prefix("VmHWM:")?
+            .split_whitespace()
+            .next()?
+            .parse::<u64>()
+            .ok()
+    })?;
+    Some(kb * 1024)
+}
+
+/// Extract the current resident size from the contents of a
+/// `/proc/<pid>/status` file.
+#[cfg(target_os = "linux")]
+fn parse_current_rss_bytes(status: &str) -> Option<u64> {
+    let kb = status.lines().find_map(|line| {
+        line.strip_prefix("VmRSS:")?
+            .split_whitespace()
+            .next()?
+            .parse::<u64>()
+            .ok()
+    })?;
+    Some(kb * 1024)
+}
+
 /// Spawn the server, wait until `/health` returns 200, then until every
-/// repo reports `ready`. Returns the guard, the time to the first 200
-/// (the metric for `server_boot_under_5_seconds`), the time until indexed
-/// (for `small_repo_index_under_10_seconds`), and the host string.
-fn boot_and_time(
+/// repo reports `ready`. Returns the guard, the startup metrics (time to
+/// the first 200, time until indexed, peak RSS), and the host string.
+///
+/// `disable_lsp` drives the server's `LAIN_DISABLE_LSP` switch: `Some(true)`
+/// silences the LSP entirely, `Some(false)` forces it back on, and `None`
+/// leaves the environment untouched.
+fn boot_and_measure(
     project_dir: &Path,
     repo_dir: &Path,
     data_dir: &Path,
     port: u16,
-) -> (ServerGuard, Duration, Duration, String) {
+    disable_lsp: Option<bool>,
+) -> (ServerGuard, StartupMetrics, String) {
     let repo_id = repo_dir
         .file_name()
         .and_then(|s| s.to_str())
@@ -196,8 +310,8 @@ fn boot_and_time(
     let stderr_path = std::env::temp_dir().join(format!("perf-budgets-stderr-{port}.log"));
     let stderr_file = std::fs::File::create(&stderr_path).unwrap();
 
-    let boot_start = Instant::now();
-    let child = Command::new(env!("CARGO_BIN_EXE_lain"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_lain"));
+    command
         .args([
             "server",
             "--transport",
@@ -214,25 +328,41 @@ fn boot_and_time(
         .env("LAIN_JOB_STORE", state.path().join("jobs.json"))
         .env_remove("LAIN_EMBEDDING_MODEL")
         .stdout(Stdio::null())
-        .stderr(Stdio::from(stderr_file))
-        .spawn()
-        .unwrap_or_else(|e| {
-            panic!(
-                "spawn lain server failed: {e}; binary={}; stderr={}",
-                env!("CARGO_BIN_EXE_lain"),
-                stderr_path.display()
-            )
-        });
+        .stderr(Stdio::from(stderr_file));
+    if let Some(disable) = disable_lsp {
+        command.env("LAIN_DISABLE_LSP", if disable { "1" } else { "0" });
+    }
+
+    let boot_start = Instant::now();
+    let child = command.spawn().unwrap_or_else(|e| {
+        panic!(
+            "spawn lain server failed: {e}; binary={}; stderr={}",
+            env!("CARGO_BIN_EXE_lain"),
+            stderr_path.display()
+        )
+    });
 
     let guard = ServerGuard {
         child,
-        stderr_path: std::path::PathBuf::from(""),
+        // The child's stderr went to this file; handing the path to the
+        // guard is what lets `exit_diag` explain a crash instead of
+        // returning an empty diagnostic.
+        stderr_path: stderr_path.clone(),
     };
     let host = format!("127.0.0.1:{port}");
+    // Read in both polling loops because the peak usually lands during
+    // indexing, long after the first 200. The value is the kernel's
+    // `VmHWM` high-water mark, so it never shrinks and the retained
+    // maximum is the process's true peak resident size.
+    let pid = guard.child.id();
+    let mut peak_rss_bytes: Option<u64> = None;
 
     // Poll /health until 200. The first successful response marks
     // "ready"; the elapsed wall time is what we assert on.
     loop {
+        if let Some(rss) = rss_bytes(pid) {
+            peak_rss_bytes = Some(peak_rss_bytes.unwrap_or(0).max(rss));
+        }
         if boot_start.elapsed() > Duration::from_secs(60) {
             let log = std::fs::read_to_string(&stderr_path).unwrap_or_default();
             panic!("server did not become healthy within 60s on {host}; last stderr:\n{log}");
@@ -275,12 +405,15 @@ fn boot_and_time(
             }
         }
     }
-    let elapsed = boot_start.elapsed();
+    let listening = boot_start.elapsed();
 
     // The server answers while it indexes (indexing runs in the
     // background), so wait for every repo to report `ready` before
     // callers query it.
     loop {
+        if let Some(rss) = rss_bytes(pid) {
+            peak_rss_bytes = Some(peak_rss_bytes.unwrap_or(0).max(rss));
+        }
         if boot_start.elapsed() > Duration::from_secs(120) {
             let log = std::fs::read_to_string(&stderr_path).unwrap_or_default();
             panic!("repos did not finish indexing within 120s on {host}; stderr:\n{log}");
@@ -296,8 +429,129 @@ fn boot_and_time(
         }
         std::thread::sleep(Duration::from_millis(50));
     }
+    // One final read of the kernel high-water mark, so the recorded peak
+    // covers the whole window up to the moment readiness was observed.
+    if let Some(rss) = rss_bytes(pid) {
+        peak_rss_bytes = Some(peak_rss_bytes.unwrap_or(0).max(rss));
+    }
     let indexed = boot_start.elapsed();
-    (guard, elapsed, indexed, host)
+    let metrics = StartupMetrics {
+        listening,
+        indexed,
+        peak_rss_bytes,
+    };
+    (guard, metrics, host)
+}
+
+/// Compatibility wrapper over [`boot_and_measure`] for the tests that
+/// only care about the two wall-clock numbers.
+fn boot_and_time(
+    project_dir: &Path,
+    repo_dir: &Path,
+    data_dir: &Path,
+    port: u16,
+) -> (ServerGuard, Duration, Duration, String) {
+    let (guard, metrics, host) = boot_and_measure(project_dir, repo_dir, data_dir, port, None);
+    (guard, metrics.listening, metrics.indexed, host)
+}
+
+/// The guard must carry the path of the file the child's stderr went
+/// to, so `exit_diag` can explain a crash instead of returning an
+/// empty diagnostic.
+#[test]
+fn boot_and_measure_records_the_child_stderr_path() {
+    let port = free_port();
+    let project = tempfile::tempdir().unwrap();
+    let repo_dir = project.path().join("repo");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    build_perf_fixture(&repo_dir);
+    let data_dir = project.path().join("data");
+
+    let (guard, _metrics, _host) =
+        boot_and_measure(project.path(), &repo_dir, &data_dir, port, None);
+
+    assert_eq!(
+        guard.stderr_path,
+        std::env::temp_dir().join(format!("perf-budgets-stderr-{port}.log")),
+        "the guard must point at the child's stderr log"
+    );
+    assert!(
+        guard.stderr_path.exists(),
+        "the stderr log must exist while the child runs"
+    );
+    drop(guard);
+}
+
+/// The outcome of comparing a run's peak RSS against the configured
+/// budget.
+#[derive(Debug, PartialEq, Eq)]
+enum PeakRssBudget {
+    /// No baseline was configured, so there was nothing to compare.
+    NotConfigured,
+    /// The platform does not expose a peak RSS (`/proc` is Linux-only),
+    /// so the comparison was skipped explicitly.
+    Unavailable,
+    /// The peak was measured and is within `baseline * 110 / 100`.
+    Within(u64),
+}
+
+/// Compare a run's peak RSS against the configured baseline.
+///
+/// The budget is 110 % of the baseline, matching the rule the
+/// remediation spec sets for peak RSS. A `None` peak means the
+/// platform cannot report one, so the comparison is skipped
+/// explicitly instead of failing a run that has no number to
+/// compare.
+fn check_peak_rss_budget(
+    run: usize,
+    peak: Option<u64>,
+    baseline: Option<u64>,
+) -> Result<PeakRssBudget, String> {
+    let Some(baseline) = baseline else {
+        return Ok(PeakRssBudget::NotConfigured);
+    };
+    let Some(peak) = peak else {
+        return Ok(PeakRssBudget::Unavailable);
+    };
+    let ceiling = baseline * 110 / 100;
+    if peak <= ceiling {
+        Ok(PeakRssBudget::Within(peak))
+    } else {
+        Err(format!(
+            "run {run}: peak RSS {peak} exceeds 110% of baseline {baseline} (ceiling {ceiling})"
+        ))
+    }
+}
+
+/// A platform that cannot report a peak RSS must skip the comparison
+/// explicitly, not fail the run.
+#[test]
+fn peak_rss_budget_skips_when_the_platform_cannot_report_a_peak() {
+    assert_eq!(
+        check_peak_rss_budget(0, None, Some(100)),
+        Ok(PeakRssBudget::Unavailable)
+    );
+    assert_eq!(
+        check_peak_rss_budget(0, Some(100), None),
+        Ok(PeakRssBudget::NotConfigured)
+    );
+}
+
+/// Linux keeps the 110 % assertion: ten percent of headroom is
+/// allowed, one byte more is not.
+#[test]
+fn peak_rss_budget_allows_ten_percent_of_headroom() {
+    assert_eq!(
+        check_peak_rss_budget(0, Some(100), Some(100)),
+        Ok(PeakRssBudget::Within(100))
+    );
+    assert_eq!(
+        check_peak_rss_budget(0, Some(110), Some(100)),
+        Ok(PeakRssBudget::Within(110))
+    );
+    let err = check_peak_rss_budget(2, Some(111), Some(100)).expect_err("111 exceeds 110%");
+    assert!(err.contains("run 2"), "the error must name the run: {err}");
+    assert!(err.contains("110%"), "the error must name the rule: {err}");
 }
 
 /// Build the standard fixture and boot a server against it. Used by
@@ -635,4 +889,76 @@ fn small_repo_index_under_10_seconds() {
     );
 
     drop(guard);
+}
+
+/// T7: real-checkout startup budget (startup remediation, task 1).
+///
+/// Three cold boots of the server against the *measured checkout* (the
+/// one the remediation targets, not the synthetic fixture), each with a
+/// fresh temporary data directory and the LSP disabled so the number is
+/// about static indexing only.
+///
+/// `LAIN_STARTUP_REPO_ROOT` selects the checkout, `LAIN_STARTUP_BUDGET_MS`
+/// the per-run readiness budget in milliseconds, and
+/// `LAIN_STARTUP_BASELINE_RSS_BYTES` an optional peak-RSS ceiling
+/// (measured baseline + 10%). The test is `#[ignore]`d because it needs
+/// a real checkout and takes minutes; run it explicitly:
+///
+/// ```bash
+/// LAIN_STARTUP_REPO_ROOT="$PWD" LAIN_STARTUP_BUDGET_MS=60000 \
+///   cargo test --release --test performance_budgets \
+///   real_checkout_static_ready_under_configured_budget -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore]
+fn real_checkout_static_ready_under_configured_budget() {
+    let repo = PathBuf::from(std::env::var("LAIN_STARTUP_REPO_ROOT").unwrap());
+    // The same parser the budget test validates: a configured budget of
+    // zero is rejected here too, instead of silently making every
+    // readiness assertion pass.
+    let budget = startup_budget_ms_from_env() as u128;
+    let baseline_rss = std::env::var("LAIN_STARTUP_BASELINE_RSS_BYTES")
+        .ok()
+        .map(|v| v.parse::<u64>().unwrap());
+
+    for run in 0..3 {
+        let port = free_port();
+        let project = tempfile::tempdir().unwrap();
+        let data = project.path().join("data");
+        let (mut guard, metrics, host) =
+            boot_and_measure(project.path(), &repo, &data, port, Some(true));
+        guard.exit_diag().unwrap();
+        assert!(
+            metrics.indexed.as_millis() <= budget,
+            "run {run}: full static readiness took {:?} on {host}",
+            metrics.indexed,
+        );
+        // A readiness signal on an empty graph proves nothing: the
+        // server can report every repo `ready` with zero nodes if the
+        // index never ran. Assert the graph is populated.
+        let req = format!("GET /health HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+        let (status, body, _) = http_request(&host, &req);
+        assert_eq!(status, 200, "run {run}: /health HTTP {status}: {body}");
+        let parsed: serde_json::Value = serde_json::from_str(&body)
+            .unwrap_or_else(|e| panic!("run {run}: /health not JSON: {e}\n{body}"));
+        let graph_nodes = parsed["graph_nodes"].as_u64().unwrap_or(0);
+        assert!(
+            graph_nodes > 0,
+            "run {run}: expected graph_nodes > 0 after indexing, got {parsed}"
+        );
+        match check_peak_rss_budget(run, metrics.peak_rss_bytes, baseline_rss) {
+            Ok(PeakRssBudget::NotConfigured) => {}
+            Ok(PeakRssBudget::Unavailable) => eprintln!(
+                "run {run}: peak RSS unavailable on this platform; \
+                 skipping the peak-RSS budget"
+            ),
+            Ok(PeakRssBudget::Within(_)) => {}
+            Err(message) => panic!("{message}"),
+        }
+        eprintln!(
+            "startup run={run} listening={:?} indexed={:?} peak_rss={:?}",
+            metrics.listening, metrics.indexed, metrics.peak_rss_bytes,
+        );
+        drop(guard);
+    }
 }

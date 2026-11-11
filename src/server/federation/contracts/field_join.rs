@@ -1310,6 +1310,7 @@ mod tests {
             chain: chain.parse().unwrap(),
             exact,
             origin: crate::federation::contracts::model::FieldReadOrigin::FieldAccess,
+            operation: None,
         })];
         node
     }

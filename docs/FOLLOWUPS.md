@@ -4,21 +4,22 @@ Current work deliberately deferred from changes already merged to `dev`.
 Completed plans, audits, and implementation notes live in Git history rather
 than this file.
 
-Last verified against `dev` on 2026-09-21.
+Last verified against `dev` on 2026-11-10. Entries from before
+v0.12.0 were re-checked against the shipped tags.
 
 ## Distribution: Windows clean-room install
 
-- **Status:** fix landed in tree; awaiting the next release tag.
+- **Status:** the corrected archive has shipped since v0.12.0
+  (verified in the v0.12.0 and v0.14.0 tags' `release.yml`); the
+  clean-room install verification is the open part.
 - **Evidence:** `release.yml::build-windows` packages every
   `*.dll` from `target/x86_64-pc-windows-msvc/release/` alongside
   `lain.exe`, and the build fails loudly if `DirectML.dll` is
   missing. `npm-shim/scripts/install.test.js` has the
   `Windows install fails clearly when DirectML.dll is absent`
-  regression fixture. The published artifact is still the
-  pre-fix `lain.exe`-only archive until the next tag carries the
-  corrected packaging.
-- **Work:** ship the corrected archive in the next release and
-  verify it from a clean Windows runner.
+  regression fixture.
+- **Work:** verify the published archive from a clean Windows
+  runner.
 - **Acceptance:** all six scheduled user/automation lanes pass and
   the release gate remains green for all three release targets.
 

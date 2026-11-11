@@ -23,6 +23,17 @@
 //! `add_workspaces` refused) falls back to the historical private
 //! `lain mcp` server, so an agent is never worse off than before.
 //!
+//! ## Identity contract (2026-11-05)
+//! One exception: a daemon whose build identity differs from the
+//! client's is not a failure path but a refusal. `lain/daemon_info`
+//! reports `version`, `build_commit` and `index_build_id`; a client
+//! bridges only when all three match its own. A mismatch — or a
+//! daemon too old to report them — is an error naming the socket and
+//! both identities, and the client starts NO daemon beside it: a
+//! second indexer would burn CPU answering with a different build.
+//! The operator restarts the daemon, or asks for a private instance
+//! with `--no-share` / `LAIN_MCP_NO_SHARE=1`.
+//!
 //! ## No-share instances (2026-10-18)
 //! A daemon whose own config carries `share: false` is isolated:
 //! discovery skips it (`daemon_info` reports `shared: false`), it
@@ -60,6 +71,7 @@ fn start_wait_budget() -> Duration {
 }
 
 /// What a live daemon reports on `lain/daemon_info`.
+#[derive(Debug, Clone)]
 pub struct DaemonInfo {
     pub pid: u32,
     pub workspaces: Vec<PathBuf>,
@@ -68,7 +80,77 @@ pub struct DaemonInfo {
     /// discovery must skip it. Missing field (older daemon) reads as
     /// `true` — the shipped default.
     pub shared: bool,
+    /// The daemon's release version. `None` on a daemon that predates
+    /// the field.
+    pub version: Option<String>,
+    /// The daemon's build commit (`GIT_SHA`). `None` on a daemon that
+    /// predates the field.
+    pub build_commit: Option<String>,
+    /// The daemon's indexing-code identity (`INDEX_BUILD_ID`). `None`
+    /// on a daemon that predates the field.
+    pub index_build_id: Option<String>,
 }
+
+/// The build identity a client and a daemon must share before the
+/// client bridges to it. All three parts matter: the version says
+/// which release, the commit which source, and the index build id
+/// which indexing code wrote the graph.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DaemonIdentity {
+    version: String,
+    build_commit: String,
+    index_build_id: String,
+}
+
+impl DaemonIdentity {
+    /// The identity of the running client binary.
+    fn current() -> Self {
+        Self {
+            version: crate::server::build_info::VERSION.into(),
+            build_commit: crate::server::build_info::GIT_SHA.into(),
+            index_build_id: crate::server::build_info::INDEX_BUILD_ID.into(),
+        }
+    }
+}
+
+/// The reason a daemon is not compatible with this client, or `None`
+/// when it is. A daemon that reports no identity at all (an older
+/// build) is NOT compatible: it is unknown, not trusted.
+///
+/// The message names both the expected and the actual values, so an
+/// operator can see which side moved. Shared with `lain oneshot` (the
+/// other client of a shared daemon), so both refuse a stale daemon the
+/// same way.
+pub(crate) fn compatibility_error(info: &DaemonInfo) -> Option<String> {
+    let expected = DaemonIdentity::current();
+    let matches = info.version.as_deref() == Some(expected.version.as_str())
+        && info.build_commit.as_deref() == Some(expected.build_commit.as_str())
+        && info.index_build_id.as_deref() == Some(expected.index_build_id.as_str());
+    (!matches).then(|| format!(
+        "incompatible shared daemon: expected version={} build_commit={} index_build_id={}; actual version={:?} build_commit={:?} index_build_id={:?}",
+        expected.version, expected.build_commit, expected.index_build_id,
+        info.version, info.build_commit, info.index_build_id,
+    ))
+}
+
+/// The actionable refusal for a daemon whose identity differs from
+/// this client's: it names the socket, both identities, and how to
+/// recover. `recovery` is the caller's remedy text (the `lain mcp`
+/// bridge offers `--no-share`, `lain oneshot` its own env override).
+pub(crate) fn incompatible_daemon_error(
+    info: &DaemonInfo,
+    socket: &Path,
+    recovery: &str,
+) -> anyhow::Error {
+    anyhow!(
+        "{} at {}; {recovery}",
+        compatibility_error(info).unwrap_or_else(|| "incompatible shared daemon".into()),
+        socket.display(),
+    )
+}
+
+/// The remedy text for a client that can serve a private instance.
+const NO_SHARE_RECOVERY: &str = "restart the daemon or use --no-share";
 
 /// One newline-framed JSON-RPC round trip on a short-lived connection.
 /// Returns the `result` payload of the reply to `id`. Any timeout or
@@ -137,6 +219,18 @@ pub fn query_daemon_info(socket_path: &Path) -> Option<DaemonInfo> {
             .get("shared")
             .and_then(Value::as_bool)
             .unwrap_or(true),
+        version: result
+            .get("version")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        build_commit: result
+            .get("build_commit")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        index_build_id: result
+            .get("index_build_id")
+            .and_then(Value::as_str)
+            .map(str::to_string),
     })
 }
 
@@ -164,6 +258,10 @@ pub enum Discovery {
         socket: PathBuf,
         missing: Vec<PathBuf>,
     },
+    /// A live daemon whose build identity differs from this client's.
+    /// Bridging to it would answer with stale code, so the client
+    /// refuses instead of attaching or starting a rival indexer.
+    Incompatible { socket: PathBuf, info: DaemonInfo },
     /// No live daemon in the runtime dir.
     None,
 }
@@ -200,16 +298,32 @@ fn candidate_sockets() -> Vec<PathBuf> {
 /// No-share daemons (`shared: false`) are not candidates at all: they
 /// are neither covering nor partial, so they are never attached to and
 /// never grown.
+///
+/// A daemon whose build identity differs from this client's is neither
+/// covering nor partial either: the scan keeps the FIRST such daemon
+/// and keeps looking, because a compatible daemon (covering or
+/// partial) always wins. Only when no compatible daemon exists does
+/// the scan report [`Discovery::Incompatible`].
 pub fn discover(workspaces: &[PathBuf]) -> Discovery {
     let needed = canonical_set(workspaces);
     let mut covering: Vec<(PathBuf, usize)> = Vec::new(); // (socket, served size)
     let mut partial: Option<(PathBuf, usize, Vec<PathBuf>)> = None; // (socket, overlap, missing)
+    let mut incompatible: Option<(PathBuf, DaemonInfo)> = None; // (socket, reported identity)
 
     for socket in candidate_sockets() {
         let Some(info) = query_daemon_info(&socket) else {
             continue;
         };
         if !info.shared {
+            continue;
+        }
+        if compatibility_error(&info).is_some() {
+            // Stale code behind the socket: never bridged to. Keep the
+            // first one and keep scanning — a compatible daemon may
+            // still be live beside it.
+            if incompatible.is_none() {
+                incompatible = Some((socket, info));
+            }
             continue;
         }
         let served = canonical_set(&info.workspaces);
@@ -241,7 +355,10 @@ pub fn discover(workspaces: &[PathBuf]) -> Discovery {
     }
     match partial {
         Some((socket, _, missing)) => Discovery::Partial { socket, missing },
-        None => Discovery::None,
+        None => match incompatible {
+            Some((socket, info)) => Discovery::Incompatible { socket, info },
+            None => Discovery::None,
+        },
     }
 }
 
@@ -386,18 +503,24 @@ pub async fn run_stdio_bridge(stream: tokio::net::UnixStream) {
 
 /// Phase A entry point: attach to (or start) the resident shared
 /// daemon for `workspaces` and return the connection to bridge on.
-/// `None` means "cannot or should not share" — the caller serves
+/// `Ok(None)` means "cannot or should not share" — the caller serves
 /// privately exactly as before. A no-share caller (`no_share` flag or
 /// `LAIN_MCP_NO_SHARE`) never attaches and never starts a shared
 /// daemon: it serves privately on the fallback path.
+///
+/// `Err` means the client found a daemon it must not use — its build
+/// identity differs — and refuses to bridge to it. The error names the
+/// socket and both identities. No rival daemon is started in that
+/// case: the operator restarts the daemon or asks for a private
+/// instance.
 pub fn attach_or_start(
     workspaces: &[PathBuf],
     embedding_model: Option<&Path>,
     reindex_timeout: Option<std::time::Duration>,
     no_share: bool,
-) -> Option<UnixStream> {
+) -> anyhow::Result<Option<UnixStream>> {
     if no_share || sharing_opt_out() {
-        return None;
+        return Ok(None);
     }
     let socket_key = crate::config::shared_socket_path(workspaces);
     if !path_fits(&socket_key) {
@@ -405,7 +528,7 @@ pub fn attach_or_start(
             "shared daemon socket path {} is too long; serving privately",
             socket_key.display()
         );
-        return None;
+        return Ok(None);
     }
     match discover(workspaces) {
         Discovery::Covering { socket } => match UnixStream::connect(&socket) {
@@ -422,15 +545,17 @@ pub fn attach_or_start(
                     "covering daemon at {} vanished ({e}); starting one",
                     socket.display()
                 );
-                start_detached_daemon(
-                    workspaces,
+                finish_start(
+                    start_detached_daemon(
+                        workspaces,
+                        &socket_key,
+                        start_wait_budget(),
+                        embedding_model,
+                        reindex_timeout,
+                        no_share,
+                    ),
                     &socket_key,
-                    start_wait_budget(),
-                    embedding_model,
-                    reindex_timeout,
-                    no_share,
                 )
-                .and_then(|stream| only_shared(stream, &socket_key))
             }
         },
         Discovery::Partial { socket, missing } => {
@@ -465,15 +590,17 @@ pub fn attach_or_start(
                                 "daemon at {} vanished after add_workspaces ({e}); starting one",
                                 socket.display()
                             );
-                            start_detached_daemon(
-                                workspaces,
+                            finish_start(
+                                start_detached_daemon(
+                                    workspaces,
+                                    &socket_key,
+                                    start_wait_budget(),
+                                    embedding_model,
+                                    reindex_timeout,
+                                    no_share,
+                                ),
                                 &socket_key,
-                                start_wait_budget(),
-                                embedding_model,
-                                reindex_timeout,
-                                no_share,
                             )
-                            .and_then(|stream| only_shared(stream, &socket_key))
                         }
                     }
                 }
@@ -482,32 +609,39 @@ pub fn attach_or_start(
                         "handing config to the daemon at {} failed ({e}); starting a dedicated daemon",
                         socket.display()
                     );
-                    start_detached_daemon(
-                        workspaces,
+                    finish_start(
+                        start_detached_daemon(
+                            workspaces,
+                            &socket_key,
+                            start_wait_budget(),
+                            embedding_model,
+                            reindex_timeout,
+                            no_share,
+                        ),
                         &socket_key,
-                        start_wait_budget(),
-                        embedding_model,
-                        reindex_timeout,
-                        no_share,
                     )
-                    .and_then(|stream| only_shared(stream, &socket_key))
                 }
             }
+        }
+        Discovery::Incompatible { socket, info } => {
+            Err(incompatible_daemon_error(&info, &socket, NO_SHARE_RECOVERY))
         }
         Discovery::None => {
             tracing::info!(
                 "lain mcp: no shared daemon; starting one at {}",
                 socket_key.display()
             );
-            start_detached_daemon(
-                workspaces,
+            finish_start(
+                start_detached_daemon(
+                    workspaces,
+                    &socket_key,
+                    start_wait_budget(),
+                    embedding_model,
+                    reindex_timeout,
+                    no_share,
+                ),
                 &socket_key,
-                start_wait_budget(),
-                embedding_model,
-                reindex_timeout,
-                no_share,
             )
-            .and_then(|stream| only_shared(stream, &socket_key))
         }
     }
 }
@@ -521,15 +655,166 @@ pub fn attach_or_start(
 /// connection we already hold is live, and silence is not evidence of
 /// no-share. (Discovery's treatment of silent sockets is different in
 /// kind: it skips them as candidates rather than picking one.)
-fn only_shared(stream: UnixStream, socket: &Path) -> Option<UnixStream> {
+///
+/// The same probe also re-checks the build identity: the winner of a
+/// bind race may be an older daemon than the one the scan saw, and
+/// bridging to it would answer with stale code.
+fn only_shared(stream: UnixStream, socket: &Path) -> anyhow::Result<Option<UnixStream>> {
     match query_daemon_info(socket) {
         Some(info) if !info.shared => {
             tracing::warn!(
                 "daemon at {} is a no-share instance; serving privately",
                 socket.display()
             );
-            None
+            Ok(None)
         }
-        _ => Some(stream),
+        Some(info) => match compatibility_error(&info) {
+            Some(_) => Err(incompatible_daemon_error(&info, socket, NO_SHARE_RECOVERY)),
+            None => Ok(Some(stream)),
+        },
+        None => Ok(Some(stream)),
+    }
+}
+
+/// [`start_detached_daemon`] still answers with an `Option`; this
+/// adapter folds it into the `Result` shape of the attach path and
+/// runs the shared-daemon check on the stream it produced.
+fn finish_start(start: Option<UnixStream>, socket: &Path) -> anyhow::Result<Option<UnixStream>> {
+    match start {
+        Some(stream) => only_shared(stream, socket),
+        None => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::{compatibility_error, DaemonIdentity, DaemonInfo};
+    use std::path::Path;
+
+    #[test]
+    fn identity_mismatch_names_the_actual_and_expected_values() {
+        let mut actual = DaemonIdentity::current();
+        actual.index_build_id = "stale-index".into();
+        let error = compatibility_error(&DaemonInfo {
+            pid: 1,
+            workspaces: vec![],
+            open_connections: 0,
+            shared: true,
+            version: Some(actual.version),
+            build_commit: Some(actual.build_commit),
+            index_build_id: Some(actual.index_build_id),
+        })
+        .unwrap();
+        assert!(error.contains("stale-index"));
+        assert!(error.contains(crate::server::build_info::INDEX_BUILD_ID));
+    }
+
+    #[test]
+    fn legacy_missing_identity_is_rejected() {
+        let error = compatibility_error(&DaemonInfo {
+            pid: 1,
+            workspaces: vec![],
+            open_connections: 0,
+            shared: true,
+            version: Some(crate::server::build_info::VERSION.into()),
+            build_commit: None,
+            index_build_id: None,
+        })
+        .unwrap();
+        assert!(error.contains("build_commit"));
+        assert!(error.contains("index_build_id"));
+    }
+
+    /// A daemon whose identity matches the client's exactly is
+    /// compatible: no error, so the bridge proceeds as before.
+    #[test]
+    fn matching_identity_is_compatible() {
+        let current = DaemonIdentity::current();
+        assert!(compatibility_error(&DaemonInfo {
+            pid: 1,
+            workspaces: vec![],
+            open_connections: 0,
+            shared: true,
+            version: Some(current.version),
+            build_commit: Some(current.build_commit),
+            index_build_id: Some(current.index_build_id),
+        })
+        .is_none());
+    }
+
+    /// Each identity field on its own is enough to refuse the daemon.
+    #[test]
+    fn every_identity_field_is_compared() {
+        let current = DaemonIdentity::current();
+        for (label, info) in [
+            (
+                "version",
+                DaemonInfo {
+                    pid: 1,
+                    workspaces: vec![],
+                    open_connections: 0,
+                    shared: true,
+                    version: Some("0.0.1".into()),
+                    build_commit: Some(current.build_commit.clone()),
+                    index_build_id: Some(current.index_build_id.clone()),
+                },
+            ),
+            (
+                "build_commit",
+                DaemonInfo {
+                    pid: 1,
+                    workspaces: vec![],
+                    open_connections: 0,
+                    shared: true,
+                    version: Some(current.version.clone()),
+                    build_commit: Some("0000000".into()),
+                    index_build_id: Some(current.index_build_id.clone()),
+                },
+            ),
+            (
+                "index_build_id",
+                DaemonInfo {
+                    pid: 1,
+                    workspaces: vec![],
+                    open_connections: 0,
+                    shared: true,
+                    version: Some(current.version.clone()),
+                    build_commit: Some(current.build_commit.clone()),
+                    index_build_id: Some("stale-index".into()),
+                },
+            ),
+        ] {
+            let error = compatibility_error(&info)
+                .unwrap_or_else(|| panic!("{label} mismatch must be refused"));
+            assert!(error.contains(label), "{label}: {error}");
+        }
+    }
+
+    /// A daemon that reports no identity at all is not trusted: a
+    /// missing field is unknown, not a match.
+    #[test]
+    fn missing_version_is_rejected() {
+        let error = compatibility_error(&DaemonInfo {
+            pid: 1,
+            workspaces: vec![],
+            open_connections: 0,
+            shared: true,
+            version: None,
+            build_commit: Some(crate::server::build_info::GIT_SHA.into()),
+            index_build_id: Some(crate::server::build_info::INDEX_BUILD_ID.into()),
+        })
+        .unwrap();
+        assert!(error.contains("version"), "{error}");
+    }
+
+    /// An unreachable daemon is not a refusal: the connection the
+    /// client already holds is live, and silence is not evidence of
+    /// anything. The stream is kept.
+    #[test]
+    fn an_unavailable_probe_keeps_the_stream() {
+        let (stream, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let kept = super::only_shared(stream, Path::new("/nonexistent/lain-mcp.sock"))
+            .expect("an unreachable probe is not an error");
+        assert!(kept.is_some(), "the stream must survive a failed probe");
     }
 }

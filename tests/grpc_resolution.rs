@@ -599,6 +599,7 @@ service Orders {
         chain: JsonPath(vec![PathSegment::Name("status".to_string())]),
         exact: true,
         origin: lain::server::federation::contracts::model::FieldReadOrigin::FieldAccess,
+        operation: None,
     })];
 
     let reads_from_edge = GraphEdge::new(EdgeType::ReadsFrom, field_ref_id, consumer.id.clone());

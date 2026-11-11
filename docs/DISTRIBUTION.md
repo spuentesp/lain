@@ -5,20 +5,19 @@ package. Run this in order when cutting a release tag. The checks preserve
 lessons from the 2026-09-16 incident, when npm `latest` contained the old
 launcher and the matching GitHub release had no `SHA256SUMS` asset.
 
-## Current known issue
+## Windows clean-room install
 
-As of 2026-09-22, the Windows clean-room install repair is in
-tree but not yet released. `release.yml::build-windows` packages
-every `*.dll` from `target/x86_64-pc-windows-msvc/release/`
-alongside `lain.exe`, and the build fails loudly if `DirectML.dll`
-is missing. Release packaging and CI both call
-`scripts/package-windows-release.sh`, so the release PR's Windows
-job checks the archive contract against a real Cargo build before
-the tag exists. `scripts/test_package_windows_release.py` covers
-missing-DLL and missing-sidecar failures, while
-`npm-shim/scripts/install.test.js` covers the install side. The
-actual release that carries the fix is the next release PR — until
-the next tag, the published artifact still ships `lain.exe` alone.
+The Windows packaging repair (shipped since v0.12.0) is in tree and
+in every release from v0.12.0 on. `release.yml::build-windows` packages
+every `*.dll` from `target/x86_64-pc-windows-msvc/release/` alongside
+`lain.exe`, and the build fails loudly if `DirectML.dll` is missing.
+Release packaging and CI both call `scripts/package-windows-release.sh`,
+so the release PR's Windows job checks the archive contract against a
+real Cargo build before the tag exists.
+`scripts/test_package_windows_release.py` covers missing-DLL and
+missing-sidecar failures, while `npm-shim/scripts/install.test.js`
+covers the install side. Still open: a clean-room install verification
+from a fresh Windows runner (see `FOLLOWUPS.md`).
 Unfinished work deferred from merged PRs is tracked in the issue tracker.
 
 ## What the runtime needs
@@ -74,13 +73,15 @@ These run automatically as part of the release workflow
 (`.github/workflows/release.yml`), but the human who cuts the tag
 should verify each completed step before announcing the release.
 
-- [ ] **`build-{linux,macos-arm64,windows}` green.** Three
-      per-target binaries, each with its own SBOM, signed
-      provenance, and cosign keyless signature.
+- [ ] **`build-{linux,windows}` green.** Two per-target binaries, each
+      with its own SBOM, signed provenance, and cosign keyless
+      signature. There is no macOS build job: the macOS ARM64 target
+      was dropped in v0.14.0 (an unresolvable ONNX Runtime linker
+      error) and has not returned.
 - [ ] **`sha256sums` job green.** A single `SHA256SUMS` file
       attached to the release, containing one line per binary.
       `gh release view v0.x.y --json assets` should list
-      `SHA256SUMS` alongside the three tarballs.
+      `SHA256SUMS` alongside the two tarballs.
 - [ ] **`publish-server-json` green.** `server.json` on the
       release is regenerated from `docs/METADATA.toml` and the
       release tag; every `"version":` field (top-level AND
@@ -99,6 +100,18 @@ should verify each completed step before announcing the release.
 
 ## After the release lands
 
+- [ ] **Fill the Formula checksums.** The artifacts are not
+      bit-reproducible, so their hashes cannot be known before the
+      tag is published; the release PR ships placeholders. Run
+      `python3 scripts/fill-formula-sha256.py --tag v<tag>` and
+      commit the result. Verify with
+      `python3 scripts/fill-formula-sha256.py --tag v<tag> --check`.
+      v0.14.0 skipped this step, so `brew install lain` failed
+      checksum verification — do not skip it again.
+- [ ] **Bump the health-badge default.** Set `lain-version` in
+      `.github/actions/lain-health-badge/action.yml` to the new tag.
+      The `version-drift` job compares it against the latest GitHub
+      release, so it must point at a release that exists.
 - [ ] **`npx @spuentesp/lain-mcp@<tag> --version`** on a clean
       machine prints `lain <version>`. This is what
       `runtime.js::verifyBinary` already does; the smoke is a

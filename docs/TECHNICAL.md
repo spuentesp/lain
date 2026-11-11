@@ -91,11 +91,12 @@ workspaces; tools that need one fall back to active.
 
 petgraph directed graph at `.lain/graph.bin`.
 
-### Node types (18)
+### Node types (24)
 
 `File`, `Namespace`, `Module`, `Package`, `Class`, `Interface`,
 `Struct`, `Enum`, `Trait`, `Function`, `Method`, `Property`,
-`Variable`, `Constant`, `HttpRoute`, `Topic`, `Resource`, `Schema`.
+`Variable`, `Constant`, `HttpRoute`, `Topic`, `Resource`, `Schema`,
+`HttpClientCall`, `Field`, `FieldRef`, `Synthetic`, `Table`, `Column`.
 
 (Order matches the enum declaration in `src/server/schema.rs`.)
 
@@ -104,7 +105,7 @@ petgraph directed graph at `.lain/graph.bin`.
 builds its node-type list from `NodeType::all()` so the documented
 schema cannot drift from the graph.
 
-### Edge types (12)
+### Edge types (35)
 
 | Edge | Meaning | Source |
 |------|---------|--------|
@@ -117,6 +118,16 @@ schema cannot drift from the graph.
 | `Pattern` | Cross-boundary pattern | tree-sitter |
 | `CallsHttp` / `Produces` / `Consumes` / `DeployedTo` | Cross-runtime | indexers |
 | `CrossRepoSameSymbol` | Federation only | `find_cross_repo_matches` |
+| `DynamicDispatch` / `BusTopic` / `RouteMatches` | Heuristic reach (dispatch, bus, router) | dispatch/HTTP sensors |
+| `RuntimeCall` | Observed call | runtime traces |
+| `SendsHttp` / `CallsGraphql` | Outbound HTTP / GraphQL call sites | HTTP/GraphQL sensors |
+| `RequestSchema` / `ResponseSchema` / `PayloadSchema` | Payload shape binding | OpenAPI/payload sensors |
+| `HasField` / `ReadsField` / `ReadsFrom` | Field-level schema and response reads | field-access sensor |
+| `Binds` | Consumer → provider contract link | contract joiner |
+| `ReadsTable` / `WritesTable` | SQL/ORM table access | SQL + ORM sensors |
+| `MapsTo` / `HasColumn` | ORM model → table / column mapping | ORM sensors (evidence from migrations) |
+| `ReadsColumn` / `WritesColumn` | ORM column-level access | ORM sensors |
+| `Renders` / `Stores` / `Forwards` / `Discards` | Frontend value disposition | frontend sensor (evidence-based) |
 
 ### `fan_in` vs `calls_in`
 
@@ -319,6 +330,15 @@ Two fields exist so an agent can tell whether to trust the answer:
 | `LAIN_URL` / `LAIN_SERVER_URL` | (none) | Used by hooks |
 | `LAIN_PARENT_AGENT_ID` | (none) | Subagent inheritance |
 | `LAIN_AGENT_NAME` | (none) | Override agent name |
+| `LAIN_REQUIRE_STARTUP_CACHE` | (unset) | Prepared-cache-only launch: refuse to start without a validated startup cache |
+| `LAIN_INDEX_TIMEOUT` | (built-in) | Cap on one workspace's index pass |
+| `LAIN_MCP_NO_SHARE` | (unset) | `lain mcp`: never attach to a shared daemon; serve privately |
+| `LAIN_ONESHOT_NO_SHARE` | (unset) | `lain oneshot`: same, for the one-shot path |
+| `LAIN_MODEL_DIR` | (platform default) | Where the embedding model is installed/looked up |
+| `LAIN_SKIP_MODEL_INSTALL` | (unset) | Installer-side: `install.sh` / npm skip the default model download |
+| `LAIN_DISABLE_LSP` | (unset) | No language servers; tree-sitter/sensors only (saves memory) |
+| `LAIN_LSP_LEAN` | (unset) | Lean language-server profile (bounded memory) |
+| `LAIN_TRACE_TTL_SECS` | (built-in) | Runtime-trace retention window |
 | `RUST_LOG` | `info` | tracing level |
 
 ## Persistence

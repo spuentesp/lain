@@ -1,0 +1,21 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["symbol", "ambiguous", "source", "annotations", "occupancy"],
+  "properties": {
+    "symbol": {"type": "object"},
+    "ambiguous": {"type": "boolean"},
+    "source": {"type": ["string", "null"]},
+    "callers": {"type": "array", "items": {"type": "object"}},
+    "callees": {"type": "array", "items": {"type": "object"}},
+    "co_change_partners": {"type": "array", "items": {"type": "object"}},
+    "annotations": {"type": "string"},
+    "occupancy": {
+      "type": "object",
+      "required": ["active_agents"],
+      "properties": {
+        "active_agents": {"type": "array", "items": {"type": "object"}}
+      }
+    }
+  }
+}

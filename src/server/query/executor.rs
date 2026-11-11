@@ -158,19 +158,23 @@ impl<'a> Executor<'a> {
         // reported nodes — filters, `limit`, and the default cap included.
         let mut current_paths: HashMap<String, GraphPath> = HashMap::new();
         let mut groups: Option<Vec<QueryGroup>> = None;
+        let mut explicitly_sorted = false;
 
         for op in &spec.ops {
             match op {
                 crate::query::spec::GraphOp::Find(find) => {
                     current_nodes = self.execute_find(find)?;
+                    explicitly_sorted = false;
                     // A find replaces the working set, so no reported node
                     // came from a walk and there is nothing left to report.
                     current_paths.clear();
                 }
                 crate::query::spec::GraphOp::Connect(connect) => {
-                    let (nodes, paths) = self.execute_connect(&current_nodes, connect)?;
+                    let (nodes, paths) =
+                        self.execute_connect(&current_nodes, &current_paths, connect)?;
                     current_nodes = nodes;
                     current_paths = paths;
+                    explicitly_sorted = false;
                 }
                 crate::query::spec::GraphOp::Filter(filter) => {
                     self.apply_filter(&mut current_nodes, filter);
@@ -183,6 +187,7 @@ impl<'a> Executor<'a> {
                 }
                 crate::query::spec::GraphOp::Sort(sort) => {
                     self.apply_sort(&mut current_nodes, sort);
+                    explicitly_sorted = true;
                 }
                 crate::query::spec::GraphOp::Limit(limit) => {
                     self.apply_limit(&mut current_nodes, limit);
@@ -190,20 +195,49 @@ impl<'a> Executor<'a> {
             }
         }
 
-        // Apply the configured default cap when the query did not set its
-        // own `limit`. `ingestion.default_query_limit` is documented as
-        // "Default query result limit when not specified" and was never
-        // read, so `{"op":"find","type":"Function"}` returned every match
-        // — on this repo alone that is well over a thousand nodes into the
-        // caller's context. The trim is reported in `meta` rather than
-        // applied silently.
         let asked_for_a_limit = spec
             .ops
             .iter()
             .any(|op| matches!(op, crate::query::spec::GraphOp::Limit(_)));
         let matched = current_nodes.len();
+        let mut next_cursor = None;
         let mut truncated = false;
-        if !asked_for_a_limit && self.default_limit > 0 && matched > self.default_limit {
+        let paginated = spec.limit.is_some() || spec.cursor.is_some();
+        let default_capped =
+            !asked_for_a_limit && self.default_limit > 0 && matched > self.default_limit;
+        if !explicitly_sorted && (paginated || default_capped) {
+            current_nodes.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
+        }
+        if paginated {
+            let start = match &spec.cursor {
+                Some(raw) => {
+                    let after = decode_cursor(spec, raw)?;
+                    current_nodes
+                        .iter()
+                        .position(|node| node.id == after)
+                        .map(|index| index + 1)
+                        .ok_or_else(|| {
+                            LainError::InvalidArgument(
+                                "cursor anchor is not present in this query's results".into(),
+                            )
+                        })?
+                }
+                None => 0,
+            };
+            let page_limit = spec.limit.unwrap_or(self.default_limit);
+            let end = if page_limit == 0 {
+                current_nodes.len()
+            } else {
+                start.saturating_add(page_limit).min(current_nodes.len())
+            };
+            if end < current_nodes.len() {
+                if let Some(last) = current_nodes.get(end.saturating_sub(1)) {
+                    next_cursor = Some(encode_cursor(spec, &last.id));
+                }
+                truncated = true;
+            }
+            current_nodes = current_nodes[start..end].to_vec();
+        } else if default_capped {
             current_nodes.truncate(self.default_limit);
             truncated = true;
         }
@@ -244,6 +278,7 @@ impl<'a> Executor<'a> {
                 nodes_visited: self.nodes_visited,
                 truncated,
                 matched_before_limit: truncated.then_some(matched),
+                next_cursor,
             }),
             groups,
         })
@@ -276,19 +311,7 @@ impl<'a> Executor<'a> {
 
         self.nodes_visited += nodes.len();
 
-        let results = nodes
-            .into_iter()
-            .map(|n| GraphNodeRef {
-                id: n.id.clone(),
-                node_type: n.node_type.to_string(),
-                name: n.name.clone(),
-                // Surface the node's query label, not just `deprecated`:
-                // producers attach `test` and attribute-derived labels too,
-                // and a `filter` on one of those needs to see them. The old
-                // mapping collapsed everything else to `None`.
-                label: n.query_label().map(str::to_string),
-            })
-            .collect();
+        let results = nodes.into_iter().map(|n| GraphNodeRef::from(&n)).collect();
 
         Ok(results)
     }
@@ -296,6 +319,7 @@ impl<'a> Executor<'a> {
     fn execute_connect(
         &mut self,
         start_nodes: &[GraphNodeRef],
+        start_paths: &HashMap<String, GraphPath>,
         connect: &ConnectOp,
     ) -> Result<(Vec<GraphNodeRef>, HashMap<String, GraphPath>), LainError> {
         if start_nodes.is_empty() {
@@ -363,8 +387,15 @@ impl<'a> Executor<'a> {
         let mut paths = HashMap::with_capacity(order.len());
         for id in order {
             if let Some(cand) = best.remove(&id) {
+                let path = cand
+                    .path
+                    .nodes
+                    .first()
+                    .and_then(|seed| start_paths.get(&seed.id))
+                    .map(|prefix| compose_paths(prefix, &cand.path))
+                    .unwrap_or(cand.path);
                 nodes.push(cand.node);
-                paths.insert(id, cand.path);
+                paths.insert(id, path);
             }
         }
         Ok((nodes, paths))
@@ -455,12 +486,7 @@ impl<'a> Executor<'a> {
                 continue;
             };
             found.push(TraversalCandidate {
-                node: GraphNodeRef {
-                    id: node.id.clone(),
-                    node_type: node.node_type.to_string(),
-                    name: node.name.clone(),
-                    label: node.query_label().map(str::to_string),
-                },
+                node: GraphNodeRef::from(&node),
                 hops: depth,
                 seed_id: start_id.to_string(),
                 direction,
@@ -536,12 +562,7 @@ impl<'a> Executor<'a> {
             let Some(node) = self.graph.get_node(id)? else {
                 return Err(LainError::Graph(format!("path node {id} vanished")));
             };
-            nodes.push(GraphNodeRef {
-                id: node.id.clone(),
-                node_type: node.node_type.to_string(),
-                name: node.name.clone(),
-                label: node.query_label().map(str::to_string),
-            });
+            nodes.push(GraphNodeRef::from(&node));
         }
         Ok(GraphPath {
             nodes,
@@ -683,7 +704,11 @@ impl<'a> Executor<'a> {
                 |a: &GraphNodeRef, b: &GraphNodeRef| b.label.cmp(&a.label)
             }
         };
-        nodes.sort_by(cmp);
+        nodes.sort_by(|a, b| {
+            cmp(a, b)
+                .then_with(|| a.name.cmp(&b.name))
+                .then_with(|| a.id.cmp(&b.id))
+        });
     }
 
     fn apply_limit(&self, nodes: &mut Vec<GraphNodeRef>, limit: &LimitOp) {
@@ -711,15 +736,56 @@ impl From<Direction> for PetDirection {
     }
 }
 
+fn compose_paths(prefix: &GraphPath, segment: &GraphPath) -> GraphPath {
+    let mut nodes = prefix.nodes.clone();
+    nodes.extend(segment.nodes.iter().skip(1).cloned());
+    let mut edges = prefix.edges.clone();
+    edges.extend(segment.edges.iter().cloned());
+    GraphPath { nodes, edges }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct QueryCursor {
+    fingerprint: String,
+    after: String,
+}
+
+fn query_fingerprint(spec: &QuerySpec) -> Result<String, LainError> {
+    let mut canonical = spec.clone();
+    canonical.cursor = None;
+    let bytes = serde_json::to_vec(&canonical).map_err(LainError::Json)?;
+    Ok(blake3::hash(&bytes).to_hex().to_string())
+}
+
+fn encode_cursor(spec: &QuerySpec, after: &str) -> String {
+    let cursor = QueryCursor {
+        fingerprint: query_fingerprint(spec).unwrap_or_default(),
+        after: after.to_string(),
+    };
+    let bytes = serde_json::to_vec(&cursor).unwrap_or_default();
+    format!("q1_{}", hex::encode(bytes))
+}
+
+fn decode_cursor(spec: &QuerySpec, raw: &str) -> Result<String, LainError> {
+    let encoded = raw
+        .strip_prefix("q1_")
+        .ok_or_else(|| LainError::InvalidArgument("malformed query cursor".to_string()))?;
+    let bytes = hex::decode(encoded)
+        .map_err(|_| LainError::InvalidArgument("malformed query cursor".to_string()))?;
+    let cursor: QueryCursor = serde_json::from_slice(&bytes)
+        .map_err(|_| LainError::InvalidArgument("malformed query cursor".to_string()))?;
+    if cursor.fingerprint != query_fingerprint(spec)? {
+        return Err(LainError::InvalidArgument(
+            "cursor was created for a different query".to_string(),
+        ));
+    }
+    Ok(cursor.after)
+}
+
 /// Wire ref for an edge: `id` is the `(from, to, type)` key, so the same
 /// physical edge always carries the same id wherever it appears.
 fn edge_ref(edge: &GraphEdge) -> GraphEdgeRef {
-    GraphEdgeRef {
-        id: format!("{}->{}:{}", edge.source_id, edge.target_id, edge.edge_type),
-        edge_type: edge.edge_type.to_string(),
-        from: edge.source_id.clone(),
-        to: edge.target_id.clone(),
-    }
+    GraphEdgeRef::from(edge)
 }
 
 /// Reject node type names that do not exist instead of matching nothing.

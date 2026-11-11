@@ -9,7 +9,7 @@ use crate::server::ingest::ingestion::index_one_repo;
 use crate::server::overlay::VolatileOverlay;
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::sync::Mutex as AsyncMutex;
@@ -89,6 +89,8 @@ where
 }
 
 pub struct RepoIndex {
+    reference_cache_dir: parking_lot::RwLock<PathBuf>,
+    analysis_key_path: PathBuf,
     source: Box<dyn RepoSource>,
     db: GraphDatabase,
     lsp: LspPool,
@@ -317,6 +319,8 @@ impl RepoIndex {
             .presence
             .repo_cycle_threshold_secs;
         Ok(Self {
+            reference_cache_dir: parking_lot::RwLock::new(data_dir.join("static-ref-cache")),
+            analysis_key_path: data_dir.join("analysis-inputs.txt"),
             source,
             db,
             lsp,
@@ -513,6 +517,27 @@ impl RepoIndex {
         !self.overlay_paths.lock().is_empty()
     }
 
+    /// Whether the repository has commits the indexer has not seen.
+    ///
+    /// The canonical "caught up with HEAD" signal is
+    /// `db.last_commit == git HEAD` (see the note in
+    /// [`Self::sync_overlay`]); anything else means the graph may
+    /// predate code the repository already has, so an answer about that
+    /// member is provisional. A repository with no HEAD at all counts as
+    /// behind: the indexer has never had a commit to catch up with.
+    pub fn index_is_behind_head(&self) -> bool {
+        let Ok((head, _)) = self.git.get_latest_commit_info() else {
+            return true;
+        };
+        match self.db.get_last_commit() {
+            Ok(Some(last)) => last != head,
+            // No last commit recorded: the graph has never been indexed
+            // against a known revision.
+            Ok(None) => true,
+            Err(_) => true,
+        }
+    }
+
     pub fn nodes(&self) -> Vec<GraphNode> {
         self.db.all_nodes()
     }
@@ -563,7 +588,52 @@ impl RepoIndex {
     /// git2 call — from holding the git mutex forever. When the timeout
     /// fires we transition to `Degraded` so the watcher (if any) keeps
     /// polling rather than wedging the federation.
+    fn invalidate_analysis_checkpoint(&self) -> Result<(), LainError> {
+        match std::fs::remove_file(&self.analysis_key_path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => {
+                self.set_health(RepoHealth::Degraded);
+                Err(error.into())
+            }
+        }
+    }
+
+    pub(crate) fn analysis_checkpoint_current(&self) -> Result<bool, LainError> {
+        let Some(source) =
+            crate::federation::startup_cache::source_key(self.local_path(), &self.git)?
+        else {
+            return Ok(false);
+        };
+        let key =
+            crate::federation::startup_cache::analysis_key(self.local_path(), &self.git, &source)?;
+        Ok(std::fs::read_to_string(&self.analysis_key_path)
+            .ok()
+            .as_deref()
+            == Some(&key))
+    }
+
+    pub(crate) fn set_reference_cache_dir(&self, path: PathBuf) {
+        *self.reference_cache_dir.write() = path;
+    }
+
     pub async fn index(self: &Arc<Self>) -> Result<(), LainError> {
+        self.index_inner(true).await
+    }
+
+    pub(crate) async fn index_local(self: &Arc<Self>) -> Result<(), LainError> {
+        self.index_inner(false).await
+    }
+
+    pub fn restore_startup_readiness(&self) {
+        *self.last_indexed.write() = SystemTime::now();
+        self.mark_ready();
+        self.indexed_at_least_once
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.indexed.notify_one();
+    }
+
+    async fn index_inner(self: &Arc<Self>, cross_repo: bool) -> Result<(), LainError> {
         let path = self.source.local_path().to_path_buf();
         // Borrow `self.db` directly instead of cloning. `GraphDatabase`
         // derives Clone but `DashMap` clones its shards independently —
@@ -581,6 +651,34 @@ impl RepoIndex {
         // against any concurrent `index()` call (e.g. from the watcher).
         let _index_guard = self.index_lock.lock().await;
 
+        let reference_key = crate::federation::startup_cache::source_key(&path, &self.git)
+            .ok()
+            .flatten();
+        if !db.has_cached_static_refs()
+            && db.was_written_by_build(crate::server::build_info::INDEX_BUILD_ID)
+        {
+            if let Some(key) = reference_key.as_deref() {
+                if let Some(refs) = crate::federation::startup_cache::read_references(
+                    &self.reference_cache_dir.read(),
+                    key,
+                ) {
+                    db.set_cached_static_refs(refs);
+                    tracing::info!("static reference cache hit for {}", self.source.id());
+                }
+            }
+        }
+        let analysis_key = reference_key.as_deref().and_then(|source| {
+            crate::federation::startup_cache::analysis_key(&path, &self.git, source).ok()
+        });
+        let analysis_changed = analysis_key.as_deref().is_none_or(|key| {
+            std::fs::read_to_string(&self.analysis_key_path)
+                .ok()
+                .as_deref()
+                != Some(key)
+        });
+        // A crash or dirty pass must not leave an old context stamp certifying
+        // partially refreshed output. An unchanged successful pass restores it.
+        self.invalidate_analysis_checkpoint()?;
         let pipeline = async {
             let overlay = self.server_overlay.lock().clone();
             let resolver = self.cross_repo_resolver.lock().clone();
@@ -593,10 +691,12 @@ impl RepoIndex {
                 lsp_pool: Some(&lsp),
                 git: &self.git,
                 overlay: Some(&overlay),
-                resolver: resolver_ref,
+                resolver: if cross_repo { resolver_ref } else { None },
                 source_repo: Some(source_repo),
                 namespace: &self.id_namespace,
-                force: false,
+                force: !self.git.get_uncommitted_changes()?.is_empty()
+                    || analysis_changed
+                    || (!cross_repo && !db.has_cached_static_refs()),
                 cancel: &self.cancel,
                 mode: crate::server::ingest::ingestion::IndexMode::Live,
             })
@@ -629,6 +729,29 @@ impl RepoIndex {
             return Err(result.unwrap_err());
         }
 
+        if let Some(key) = reference_key {
+            if crate::federation::startup_cache::source_key(&path, &self.git)
+                .ok()
+                .flatten()
+                .as_ref()
+                == Some(&key)
+            {
+                if let Some(analysis_key) = analysis_key {
+                    if let Err(error) = std::fs::write(&self.analysis_key_path, analysis_key) {
+                        tracing::warn!("analysis context checkpoint failed: {error}");
+                    }
+                }
+                if let Some(refs) = db.get_cached_static_refs() {
+                    if let Err(error) = crate::federation::startup_cache::write_references(
+                        &self.reference_cache_dir.read(),
+                        &key,
+                        refs,
+                    ) {
+                        tracing::warn!("static reference cache write failed: {error}");
+                    }
+                }
+            }
+        }
         *self.last_indexed.write() = SystemTime::now();
         *self.last_index_error.write() = None;
         self.mark_ready();
@@ -715,6 +838,7 @@ impl RepoIndex {
         }
 
         let _index_guard = self.index_lock.lock().await;
+        self.invalidate_analysis_checkpoint()?;
 
         let pipeline = async {
             let overlay = self.server_overlay.lock().clone();

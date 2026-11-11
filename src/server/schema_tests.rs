@@ -649,6 +649,14 @@ fn test_edge_type_bincode_discriminants_are_append_only() {
         EdgeType::ReadsTable,
         EdgeType::WritesTable,
         EdgeType::CallsGraphql,
+        EdgeType::MapsTo,
+        EdgeType::HasColumn,
+        EdgeType::ReadsColumn,
+        EdgeType::WritesColumn,
+        EdgeType::Renders,
+        EdgeType::Stores,
+        EdgeType::Forwards,
+        EdgeType::Discards,
     ];
     assert_eq!(EdgeType::all(), &expected);
     for (idx, variant) in expected.iter().enumerate() {

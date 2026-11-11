@@ -636,6 +636,81 @@ fn rule_4_exempts_localhost() {
 }
 
 #[test]
+fn convention_based_env_default_host_stays_unresolved_without_service_attribution() {
+    // The nat-ui HTTP_PROXY_PATH pattern (`constants/index.js`:
+    // `process.env.HTTP_PUBLIC_PATH || '/api'`). The `||` fallback is a
+    // convention-based default, not a runtime fact: the analyzer reports
+    // the host as the alias expression and must not attribute the call
+    // to a service. A statically-known path stays `no_match` (unknown
+    // target, no invented service); a runtime-selected path is
+    // `unnormalized` — uncertain, not a confirmed absence of a route.
+    let p = provider_node(
+        "orders",
+        "src/orders.py",
+        "do_it",
+        10,
+        HttpMethod::Get,
+        "/api/orders",
+    );
+    let known = consumer_node(
+        "orders-ui",
+        "components/Display.tsx",
+        "poll",
+        1,
+        MethodSpec::Known(HttpMethod::Get),
+        url_with_host_method(
+            HostPart::Expr("HTTP_PROXY_PATH".into()),
+            Some("/update-data-stream"),
+        ),
+        CallVia::Library {
+            name: "fetch".into(),
+        },
+    );
+    let dynamic = consumer_node(
+        "orders-ui",
+        "components/Chat.tsx",
+        "send",
+        2,
+        MethodSpec::Known(HttpMethod::Post),
+        url_with_host_method(HostPart::Expr("HTTP_PROXY_PATH".into()), None),
+        CallVia::Library {
+            name: "fetch".into(),
+        },
+    );
+    let mut cfg = default_config();
+    cfg.services.clear(); // no env / hosts entry can claim the expression
+    let out = ContractJoiner::run(&[p, known.clone(), dynamic.clone()], &[], &cfg);
+    assert!(
+        out.binds.is_empty(),
+        "a convention-based host must not bind"
+    );
+    let known_id = GlobalId::parse(&known.id).unwrap();
+    let dynamic_id = GlobalId::parse(&dynamic.id).unwrap();
+    let known_res = out.index.consumer(&known_id).expect("known resolution");
+    match &known_res.target {
+        Some(ConsumerTarget::Unresolved {
+            reason: UnresolvedReason::NoMatch,
+            target_service,
+        }) => assert!(
+            target_service.is_none(),
+            "no service attribution without evidence, got {target_service:?}"
+        ),
+        other => panic!("expected Unresolved/NoMatch, got {other:?}"),
+    }
+    let dynamic_res = out.index.consumer(&dynamic_id).expect("dynamic resolution");
+    match &dynamic_res.target {
+        Some(ConsumerTarget::Unresolved { reason, .. }) => assert!(
+            matches!(
+                reason,
+                UnresolvedReason::Unnormalized | UnresolvedReason::NoMatch
+            ),
+            "runtime-selected path stays uncertain, got {reason:?}"
+        ),
+        other => panic!("expected Unresolved, got {other:?}"),
+    }
+}
+
+#[test]
 fn known_target_with_dynamic_path_lands_in_unresolved_no_route_in_service() {
     // Row-order regression pin. The §7.3 table fires rule 3
     // (target service known) BEFORE rule 5 (template=None →
@@ -3022,6 +3097,7 @@ fn topic_payload_schema_and_consumer_field_read_binds() {
         chain: "order_id".parse::<JsonPath>().unwrap(),
         exact: true,
         origin: crate::federation::contracts::model::FieldReadOrigin::FieldAccess,
+        operation: None,
     })];
 
     let has_field_edge = GraphEdge::new(EdgeType::HasField, schema.id.clone(), field.id.clone());

@@ -1,0 +1,30 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["query", "mode", "fell_back", "results", "count"],
+  "properties": {
+    "query": {"type": "string"},
+    "mode": {"type": "string", "enum": ["lexical", "semantic"]},
+    "fell_back": {"type": "boolean"},
+    "results": {"type": "array", "items": {"$ref": "#/$defs/result"}},
+    "count": {"type": "integer", "minimum": 0}
+  },
+  "$defs": {
+    "result": {
+      "type": "object",
+      "required": ["id", "type", "name", "path", "score", "score_kind"],
+      "properties": {
+        "id": {"type": "string"},
+        "type": {"type": "string"},
+        "name": {"type": "string"},
+        "path": {"type": "string"},
+        "line_start": {"type": ["integer", "null"]},
+        "line_end": {"type": ["integer", "null"]},
+        "commit": {"type": ["string", "null"]},
+        "repo_id": {"type": ["string", "null"]},
+        "score": {"type": "number"},
+        "score_kind": {"type": "string", "enum": ["lexical", "sim", "rerank"]}
+      }
+    }
+  }
+}

@@ -66,6 +66,7 @@ use crate::graph::{graph_path, GraphDatabase, SensorOwner};
 use crate::schema::{
     EdgeProvenance, EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace, StaticSource,
 };
+use crate::server::sensors::orm_model_sensor::django::{DjangoModelMap, ModelMap, TableRes};
 use crate::server::sensors::patterns::{DjangoOrmShapes, Patterns};
 use crate::server::sensors::SensorEntry;
 use std::borrow::Cow;
@@ -217,23 +218,17 @@ pub fn analyze_workspace(root: &Path) -> Analysis {
     let shapes = patterns.django_orm_shapes();
     let py = |p: &Path| (p.extension().and_then(|e| e.to_str()) == Some("py")).then_some(());
 
-    let mut classes: Vec<ClassDef> = Vec::new();
-    for (path, content, ()) in crate::server::sensors::util::scan_files(root, py) {
-        let gp = graph_path(root, &path);
-        let masked = mask_python(&content);
-        classes.extend(collect_classes(&gp, &content, &masked));
-    }
-    let models = ModelMap::build(classes, shapes);
+    let models = DjangoModelMap::load(root, shapes);
 
     let mut out = Analysis {
         models_total: models.is_model.iter().filter(|m| **m).count(),
         ..Default::default()
     };
-    for (i, c) in models.classes.iter().enumerate() {
+    for (i, c) in models.models.iter().enumerate() {
         if !models.is_model[i] {
             continue;
         }
-        if let TableRes::Table(t) = models.table_of(i, 0) {
+        if let TableRes::Table(t) = models.table_of(i) {
             out.tables.entry(t).or_insert_with(|| TableDef {
                 path: c.path.clone(),
                 line: c.line,
@@ -342,319 +337,6 @@ fn ident_at(s: &str, from: usize) -> &str {
 
 fn upper_first(s: &str) -> bool {
     s.chars().next().is_some_and(|c| c.is_ascii_uppercase())
-}
-
-// ─── Model map ─────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum DbTable {
-    Default,
-    Literal(String),
-    Dynamic,
-}
-
-#[derive(Debug, Clone)]
-struct ClassDef {
-    name: String,
-    path: String,
-    /// 1-based line of the `class` statement.
-    line: u32,
-    /// 1-based inclusive last line of the class body.
-    end_line: u32,
-    bases: Vec<String>,
-    abstract_: bool,
-    proxy: bool,
-    db_table: DbTable,
-    app_label: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum TableRes {
-    Table(String),
-    Abstract,
-    Unresolved(&'static str),
-}
-
-struct ModelMap {
-    classes: Vec<ClassDef>,
-    by_name: BTreeMap<String, Vec<usize>>,
-    is_model: Vec<bool>,
-}
-
-/// The app label Django would derive for a module path: the directory of
-/// `models.py`, or the directory above a `models/` package.
-fn app_of_path(path: &str) -> String {
-    let comps: Vec<&str> = path.split('/').collect();
-    let dirs = &comps[..comps.len().saturating_sub(1)];
-    if let Some(pos) = dirs.iter().rposition(|c| *c == "models") {
-        if pos > 0 {
-            return dirs[pos - 1].to_string();
-        }
-    }
-    dirs.last().map(|s| s.to_string()).unwrap_or_default()
-}
-
-impl ModelMap {
-    fn build(classes: Vec<ClassDef>, shapes: &DjangoOrmShapes) -> Self {
-        let mut by_name: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-        for (i, c) in classes.iter().enumerate() {
-            by_name.entry(c.name.clone()).or_default().push(i);
-        }
-        let mut is_model = vec![false; classes.len()];
-        loop {
-            let mut changed = false;
-            for i in 0..classes.len() {
-                if is_model[i] {
-                    continue;
-                }
-                let hit = classes[i].bases.iter().any(|b| {
-                    shapes.has_model_base(b)
-                        || by_name
-                            .get(b)
-                            .is_some_and(|v| v.iter().any(|&j| j != i && is_model[j]))
-                });
-                if hit {
-                    is_model[i] = true;
-                    changed = true;
-                }
-            }
-            if !changed {
-                break;
-            }
-        }
-        Self {
-            classes,
-            by_name,
-            is_model,
-        }
-    }
-
-    fn app_of(&self, i: usize) -> String {
-        let c = &self.classes[i];
-        c.app_label.clone().unwrap_or_else(|| app_of_path(&c.path))
-    }
-
-    /// The table of model `i`. `depth` bounds proxy chains.
-    fn table_of(&self, i: usize, depth: u8) -> TableRes {
-        let c = &self.classes[i];
-        if c.abstract_ {
-            return TableRes::Abstract;
-        }
-        if c.proxy {
-            if depth >= 4 {
-                return TableRes::Unresolved("proxy chain too deep");
-            }
-            let parents: BTreeSet<TableRes> = c
-                .bases
-                .iter()
-                .filter_map(|b| self.by_name.get(b))
-                .flatten()
-                .filter(|&&j| j != i && self.is_model[j] && !self.classes[j].abstract_)
-                .map(|&j| self.table_of(j, depth + 1))
-                .collect();
-            return match parents.len() {
-                1 => parents.into_iter().next().unwrap(),
-                _ => TableRes::Unresolved("proxy parent not unique"),
-            };
-        }
-        match &c.db_table {
-            DbTable::Literal(t) => TableRes::Table(t.clone()),
-            DbTable::Dynamic => TableRes::Unresolved("non-literal db_table"),
-            DbTable::Default => TableRes::Table(format!(
-                "{}_{}",
-                self.app_of(i).to_lowercase(),
-                c.name.to_lowercase()
-            )),
-        }
-    }
-}
-
-impl PartialOrd for TableRes {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-impl Ord for TableRes {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        format!("{self:?}").cmp(&format!("{other:?}"))
-    }
-}
-
-/// Top-level classes of one file, with the `Meta` facts that decide the
-/// table. `orig` and `masked` have identical offsets.
-fn collect_classes(path: &str, orig: &str, masked: &str) -> Vec<ClassDef> {
-    let ml: Vec<&str> = masked.lines().collect();
-    let ol: Vec<&str> = orig.lines().collect();
-    let mut out = Vec::new();
-    let mut idx = 0;
-    while idx < ml.len() {
-        let line = ml[idx];
-        let Some(rest) = line.strip_prefix("class ") else {
-            idx += 1;
-            continue;
-        };
-        let name = ident_at(rest, 0).to_string();
-        if name.is_empty() {
-            idx += 1;
-            continue;
-        }
-        // Bases: from `(` to its match, possibly across lines.
-        let mut bases_text = String::new();
-        let mut body_from = idx + 1;
-        let after = &rest[name.len()..];
-        if after.trim_start().starts_with('(') {
-            let mut depth = 0i32;
-            let mut j = idx;
-            let mut first = true;
-            'outer: loop {
-                let l = if first { after } else { ml[j] };
-                for ch in l.chars() {
-                    match ch {
-                        '(' => {
-                            depth += 1;
-                            if depth == 1 {
-                                continue;
-                            }
-                        }
-                        ')' => {
-                            depth -= 1;
-                            if depth == 0 {
-                                break 'outer;
-                            }
-                        }
-                        _ => {}
-                    }
-                    if depth >= 1 {
-                        bases_text.push(ch);
-                    }
-                }
-                bases_text.push(' ');
-                first = false;
-                j += 1;
-                if j >= ml.len() {
-                    break;
-                }
-            }
-            body_from = j + 1;
-        }
-        let bases: Vec<String> = split_top_level(&bases_text)
-            .into_iter()
-            .filter(|p| !p.contains('='))
-            .map(|p| {
-                let p = p.split('[').next().unwrap_or("").trim();
-                p.rsplit('.').next().unwrap_or("").to_string()
-            })
-            .filter(|p| !p.is_empty())
-            .collect();
-        // Body: until the next non-blank line at indent 0.
-        let mut end = body_from;
-        while end < ml.len() && (ml[end].trim().is_empty() || indent_of(ml[end]) > 0) {
-            end += 1;
-        }
-        let mut c = ClassDef {
-            name,
-            path: path.to_string(),
-            line: (idx + 1) as u32,
-            end_line: end as u32,
-            bases,
-            abstract_: false,
-            proxy: false,
-            db_table: DbTable::Default,
-            app_label: None,
-        };
-        parse_meta(
-            &ml[body_from.min(ml.len())..end.min(ml.len())],
-            &ol,
-            body_from,
-            &mut c,
-        );
-        out.push(c);
-        idx = end.max(idx + 1);
-    }
-    out
-}
-
-fn split_top_level(s: &str) -> Vec<String> {
-    let mut parts = Vec::new();
-    let mut depth = 0i32;
-    let mut cur = String::new();
-    for ch in s.chars() {
-        match ch {
-            '(' | '[' | '{' => depth += 1,
-            ')' | ']' | '}' => depth -= 1,
-            ',' if depth == 0 => {
-                parts.push(std::mem::take(&mut cur));
-                continue;
-            }
-            _ => {}
-        }
-        cur.push(ch);
-    }
-    if !cur.trim().is_empty() {
-        parts.push(cur);
-    }
-    parts
-        .into_iter()
-        .map(|p| p.trim().to_string())
-        .filter(|p| !p.is_empty())
-        .collect()
-}
-
-/// Read `abstract` / `proxy` / `db_table` / `app_label` from the class
-/// body's `class Meta:`. `body` is masked; literals are read back from
-/// the original line (same offsets).
-fn parse_meta(body: &[&str], orig_lines: &[&str], body_from: usize, c: &mut ClassDef) {
-    let mut i = 0;
-    while i < body.len() {
-        let t = body[i].trim();
-        if t.starts_with("class Meta") {
-            let m_indent = indent_of(body[i]);
-            let mut j = i + 1;
-            while j < body.len() && (body[j].trim().is_empty() || indent_of(body[j]) > m_indent) {
-                let line = body[j];
-                if let Some((k, v)) = line.split_once('=') {
-                    let key = k.trim();
-                    let val = v.trim();
-                    match key {
-                        "abstract" => c.abstract_ = val == "True",
-                        "proxy" => c.proxy = val == "True",
-                        "db_table" | "app_label" => {
-                            let lit = literal_value(orig_lines.get(body_from + j), line);
-                            if key == "db_table" {
-                                c.db_table = lit.map_or(DbTable::Dynamic, DbTable::Literal);
-                            } else if let Some(l) = lit {
-                                c.app_label = Some(l);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                j += 1;
-            }
-            i = j;
-        } else {
-            i += 1;
-        }
-    }
-}
-
-/// The string literal on the right of `=` in `masked`, read from `orig`
-/// (same offsets). `None` when the right-hand side is not one plain
-/// literal (a `%`, `+`, call, name… is dynamic).
-fn literal_value(orig: Option<&&str>, masked: &str) -> Option<String> {
-    let orig = orig?;
-    let eq = masked.find('=')?;
-    let rhs = &masked[eq + 1..];
-    let start = eq + 1 + (rhs.len() - rhs.trim_start().len());
-    let q = masked[start..].chars().next()?;
-    if q != '"' && q != '\'' {
-        return None;
-    }
-    let end = start + 1 + masked[start + 1..].find(q)?;
-    if !masked[end + 1..].trim().is_empty() {
-        return None;
-    }
-    orig.get(start + 1..end).map(str::to_string)
 }
 
 // ─── Per-file analysis ─────────────────────────────────────────────────
@@ -767,47 +449,50 @@ struct FileCtx<'a> {
     imports: Imports,
 }
 
-impl ModelMap {
-    fn resolve_class(&self, name: &str, qualifier: Option<&str>, ctx: &FileCtx) -> Resolved {
-        let (orig_name, import_app) = match ctx.imports.names.get(name) {
-            Some((m, o)) => (o.as_str(), app_of_module(m)),
-            None => (name, None),
-        };
-        let cands: Vec<usize> = self
-            .by_name
-            .get(orig_name)
-            .map(|v| v.iter().copied().filter(|&j| self.is_model[j]).collect())
-            .unwrap_or_default();
-        match cands.len() {
-            0 => return Resolved::NotModel,
-            1 => return Resolved::One(cands[0]),
-            _ => {}
-        }
-        let same_file: Vec<usize> = cands
+fn resolve_class(
+    models: &ModelMap,
+    name: &str,
+    qualifier: Option<&str>,
+    ctx: &FileCtx,
+) -> Resolved {
+    let (orig_name, import_app) = match ctx.imports.names.get(name) {
+        Some((m, o)) => (o.as_str(), app_of_module(m)),
+        None => (name, None),
+    };
+    let cands: Vec<usize> = models
+        .by_name
+        .get(orig_name)
+        .map(|v| v.iter().copied().filter(|&j| models.is_model[j]).collect())
+        .unwrap_or_default();
+    match cands.len() {
+        0 => return Resolved::NotModel,
+        1 => return Resolved::One(cands[0]),
+        _ => {}
+    }
+    let same_file: Vec<usize> = cands
+        .iter()
+        .copied()
+        .filter(|&j| models.models[j].path == ctx.path)
+        .collect();
+    if same_file.len() == 1 {
+        return Resolved::One(same_file[0]);
+    }
+    let hint = import_app.or_else(|| {
+        qualifier
+            .and_then(|q| ctx.imports.modules.get(q))
+            .and_then(|m| app_of_module(m))
+    });
+    if let Some(app) = hint {
+        let by_app: Vec<usize> = cands
             .iter()
             .copied()
-            .filter(|&j| self.classes[j].path == ctx.path)
+            .filter(|&j| models.app_of(j) == app)
             .collect();
-        if same_file.len() == 1 {
-            return Resolved::One(same_file[0]);
+        if by_app.len() == 1 {
+            return Resolved::One(by_app[0]);
         }
-        let hint = import_app.or_else(|| {
-            qualifier
-                .and_then(|q| ctx.imports.modules.get(q))
-                .and_then(|m| app_of_module(m))
-        });
-        if let Some(app) = hint {
-            let by_app: Vec<usize> = cands
-                .iter()
-                .copied()
-                .filter(|&j| self.app_of(j) == app)
-                .collect();
-            if by_app.len() == 1 {
-                return Resolved::One(by_app[0]);
-            }
-        }
-        Resolved::Ambiguous
     }
+    Resolved::Ambiguous
 }
 
 /// Parse `.name(args)` links starting at `i` (just after `.objects` or a
@@ -956,7 +641,7 @@ fn analyze_file(
 
     let record =
         |out: &mut Analysis, line: u32, model: usize, access: Vec<OrmAccess>, heuristic: bool| {
-            match models.table_of(model, 0) {
+            match models.table_of(model) {
                 TableRes::Table(t) => {
                     for a in access {
                         out.sites.push(OrmSite {
@@ -1011,7 +696,7 @@ fn analyze_file(
             continue;
         }
         let qualifier = (segs.len() >= 2).then(|| segs[segs.len() - 2]);
-        let model = match models.resolve_class(last, qualifier, &ctx) {
+        let model = match resolve_class(models, last, qualifier, &ctx) {
             Resolved::NotModel => continue,
             Resolved::Ambiguous => {
                 out.unresolved.push(OrmUnresolved {
@@ -1065,7 +750,7 @@ fn analyze_file(
             }
             let qualifier = (segs.len() >= 2).then(|| segs[segs.len() - 2]);
             let line = line_of(&starts, idx);
-            match models.resolve_class(last, qualifier, &ctx) {
+            match resolve_class(models, last, qualifier, &ctx) {
                 Resolved::NotModel => {}
                 Resolved::Ambiguous => out.unresolved.push(OrmUnresolved {
                     path: path.to_string(),
@@ -1083,7 +768,7 @@ fn analyze_file(
         }
     }
 
-    // Instance creation (`x = Model(...)`) and plain reassignments that
+    // Instance creation (`x = Model(...)`) and later assignments that
     // aren't already handled by `.objects` or `get_object_or_404`.
     for (idx, line_text) in m.lines().enumerate() {
         let line_no = (idx + 1) as u32;
@@ -1128,7 +813,7 @@ fn analyze_file(
                 let last = segs[segs.len() - 1];
                 if upper_first(last) {
                     let qualifier = (segs.len() >= 2).then(|| segs[segs.len() - 2]);
-                    match models.resolve_class(last, qualifier, &ctx) {
+                    match resolve_class(models, last, qualifier, &ctx) {
                         Resolved::One(j) => Some(j),
                         _ => None,
                     }
@@ -1148,7 +833,7 @@ fn analyze_file(
 
     // Pass B: `.save()` / `.delete()` on a resolved instance.
     let class_spans: Vec<(u32, u32, usize)> = models
-        .classes
+        .models
         .iter()
         .enumerate()
         .filter(|(i, c)| models.is_model[*i] && c.path == path)

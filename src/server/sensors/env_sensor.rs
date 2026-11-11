@@ -384,6 +384,24 @@ pub fn scan(root: &Path) -> Vec<EnvBinding> {
     scan_all(root).urls
 }
 
+/// Files that contribute environment analysis, including gitignored dotenv
+/// files. Startup certificates must observe the same discovery rules.
+pub(crate) fn analysis_input_paths(root: &Path) -> Vec<std::path::PathBuf> {
+    let mut paths: Vec<_> = [
+        env_file_candidates(root),
+        compose_file_candidates(root),
+        helm_file_candidates(root),
+        k8s_file_candidates(root),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|(path, _)| path)
+    .collect();
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
 /// Visit a YAML document and collect every env block's pairs, wherever the
 /// block sits (Helm's nested `env:`, k8s' `containers[*].env:`, compose
 /// `services[*].environment:`).

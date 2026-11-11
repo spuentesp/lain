@@ -16,7 +16,7 @@
 //!   linkage. `parent_span_id == None` means a root span.
 //!
 //! We deliberately model these as plain data, not as an OTLP protobuf
-//! type. The OTLP adapter (a future `otlp.rs`) is responsible for
+//! type. The OTLP adapter in `otlp.rs` is responsible for
 //! converting the wire format into `SpanRecord`; everything downstream
 //! of that boundary is independent of the OTLP encoding.
 

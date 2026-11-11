@@ -11,9 +11,8 @@
 //! - [`store::RuntimeTraceStore`] — in-memory map of runtime edges
 //!   keyed by `(source_id, target_id, trace_id)`, with per-edge TTL.
 //! - [`spans::SpanRecord`] — the data model produced by an ingest
-//!   adapter. OTLP gRPC / HTTP ingestion is the natural next step; the
-//!   store accepts `SpanRecord`s directly so tests can drive it
-//!   without spinning up an OTLP collector.
+//!   adapter. The store also accepts `SpanRecord`s directly so tests can
+//!   drive it without spinning up an OTLP collector.
 //! - [`otlp`] — minimal OTLP HTTP/JSON adapter. Parses the official
 //!   OTLP JSON shape (`{"resourceSpans": [...]}`) without pulling in
 //!   the `tonic` / `opentelemetry-proto` deps that the gRPC

@@ -13,6 +13,9 @@ single-repository setup, federation, and basic troubleshooting.
 - [Hot reload](hot-reload.md): config reload behavior
 - [Multiplayer](multiplayer.md): agent presence, claims, and coordination
 - [Pre-edit hooks](hooks.md): hook installation and behavior
+- [Startup cache](STARTUP_CACHE.md): federation checkpoint reuse on
+  unchanged startup, validation, and `LAIN_REQUIRE_STARTUP_CACHE`
+- [Demo video](VIDEO.md): recorded walkthrough of the capability suite
 
 ## Query Lain
 
@@ -40,6 +43,21 @@ single-repository setup, federation, and basic troubleshooting.
   automated guardrails
 - [Agent UX design record](AGENT_UX_ROADMAP.md): stable milestone vocabulary
   referenced by code and tool descriptions
+- [Rust gRPC contracts](RUST_GRPC_CONTRACTS.md) and
+  [candidates](RUST_GRPC_CANDIDATES.md): generated-client identity and
+  provider evidence
+- [Confirmed bindings (MCP)](CONFIRMED_BINDINGS_MCP.md) and
+  [RPC confirmation acceptance](RPC_CONFIRMATION_ACCEPTANCE.md): the
+  binding-confirmation workflow and its acceptance record
+- [NAT correctness audit](NAT_CORRECTNESS_AUDIT.md): HTTP consumer
+  attribution findings, including the analyzer-revision-10 remediation
+- [NVIDIA startup benchmark](NVIDIA_STARTUP_BENCHMARK.md): measured
+  startup medians and their raw artifacts
+- [Follow-ups](FOLLOWUPS.md): work deliberately deferred from merged
+  changes
+- [Parallax requirements report](PARALLAX_REQUIREMENTS_REPORT.md):
+  coverage of the external consumer contract, with the upgrade notes
+  past its version pin
 
 - [Vulnerability triage](VULNS.md): current OSV findings and remediation
 - [OpenSSF Scorecard](SCORECARD.md): current external score and process gaps
@@ -48,9 +66,9 @@ single-repository setup, federation, and basic troubleshooting.
 
 `METADATA.toml` belongs to the release workflow rather than the reading path.
 
-Completed plans, audits, review notes, and the academic SRS package live in Git
-history. Keeping them out of the current tree prevents old implementation notes
-from competing with maintained documentation.
+Completed implementation plans and retired working documents live in
+[`docs/archive/`](archive/) — in the tree, out of the maintained reading path.
+Older audits and review notes that were never promoted live in Git history.
 
 ## License
 

@@ -21,3 +21,41 @@
       (string
         (string_content) @path)))
   (#match? @path "^/"))
+
+; Keyword registrations, including multiline calls. The extractor groups
+; captures by @route_site so argument order is irrelevant. Each literal
+; method is captured separately; unresolved methods do not invent ANY routes.
+; Only plain, unescaped string literals qualify. In an f-string a captured
+; string_content can be just one suffix after a dynamic prefix. Prefixed or
+; escaped literals need language-aware evaluation before claiming a route.
+(
+  (call
+    function: (attribute attribute: (identifier) @_registration)
+    arguments: (argument_list
+      (keyword_argument
+        name: (identifier) @_path_key
+        value: (string (string_content) @path) @_path_literal))) @route_site
+  (#eq? @_registration "add_api_route")
+  (#eq? @_path_key "path")
+  (#match? @_path_literal "^[\"']")
+  (#not-match? @_path_literal "\\\\")
+  (#match? @path "^/"))
+(
+  (call
+    function: (attribute attribute: (identifier) @_registration)
+    arguments: (argument_list
+      (keyword_argument
+        name: (identifier) @_endpoint_key
+        value: [(identifier) (attribute)] @handler))) @route_site
+  (#eq? @_registration "add_api_route")
+  (#eq? @_endpoint_key "endpoint"))
+(
+  (call
+    function: (attribute attribute: (identifier) @_registration)
+    arguments: (argument_list
+      (keyword_argument
+        name: (identifier) @_methods_key
+        value: (list (string (string_content) @verb))))) @route_site
+  (#eq? @_registration "add_api_route")
+  (#eq? @_methods_key "methods")
+  (#match? @verb "(?i)^(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)$"))

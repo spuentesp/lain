@@ -39,6 +39,7 @@ fn register_declared_packages(fed: &FederatedIndex, config: &FederationConfig) {
 }
 
 pub async fn load_federation(config_path: &Path) -> Result<Arc<FederatedIndex>, LainError> {
+    let _load_timing = super::startup_cache::StartupTiming::start("loader_total");
     let config = resolve_data_dir(FederationConfig::load(config_path)?, config_path);
     // Symmetric with `repos_for_workspace`'s 0-member refusal: a config
     // that declares no repos would come up as a silently empty
@@ -70,6 +71,7 @@ pub async fn load_federation(config_path: &Path) -> Result<Arc<FederatedIndex>, 
     fed.set_service_params(config.effective_params());
 
     let sources = config.build_sources()?;
+    let repo_load_timing = super::startup_cache::StartupTiming::start("repo_loading");
     let semaphore = Arc::new(Semaphore::new(config.max_concurrent_indexers));
 
     // Cold-start orchestration (Codex finding #4). The previous
@@ -137,6 +139,7 @@ pub async fn load_federation(config_path: &Path) -> Result<Arc<FederatedIndex>, 
         h.await
             .map_err(|e| LainError::Other(format!("join: {e}")))??;
     }
+    drop(repo_load_timing);
     // Nothing loaded at all is still an error: a server with no
     // repositories can only mislead.
     let errors = fed.load_errors();
@@ -148,24 +151,39 @@ pub async fn load_federation(config_path: &Path) -> Result<Arc<FederatedIndex>, 
         )));
     }
 
-    // Phase 1: project all nodes.
-    for (repo_id, _) in fed.list_repos() {
-        fed.project_nodes(&repo_id).await?;
+    fed.prune_unregistered_nodes()?;
+    let restored = match crate::federation::startup_cache::restore(&fed, &config) {
+        Ok(hit) => hit,
+        Err(error) => {
+            tracing::warn!("federation startup cache unavailable: {error}");
+            false
+        }
+    };
+    if !restored
+        && std::env::var("LAIN_REQUIRE_STARTUP_CACHE").is_ok_and(|v| !v.is_empty() && v != "0")
+    {
+        return Err(LainError::Other("a valid completed federation cache is required; run lain server once without LAIN_REQUIRE_STARTUP_CACHE to prewarm it".into()));
     }
-    // Phase 2: project all edges.
-    for (repo_id, _) in fed.list_repos() {
-        fed.project_edges(&repo_id).await?;
-    }
+    if !restored {
+        // Phase 1: project all nodes.
+        for (repo_id, _) in fed.list_repos() {
+            fed.project_nodes(&repo_id).await?;
+        }
+        // Phase 2: project all edges.
+        for (repo_id, _) in fed.list_repos() {
+            fed.project_edges(&repo_id).await?;
+        }
 
-    // PR-7 (§5.3): every contract tool on `live` calls
-    // `rejoin_contracts_if_dirty` before reading, but the loader
-    // also kicks it once at the end of Phase 2 so any contract
-    // queries that land before the first user call see the
-    // already-joined state. Failures are non-fatal — the worst
-    // case is a tool sees a stale `Binds` set until the next
-    // dirty tick (which is no worse than the pre-PR-7 behavior).
-    if let Err(e) = fed.rejoin_contracts_if_dirty() {
-        tracing::warn!("federation: initial rejoin_contracts_if_dirty failed: {e}");
+        // PR-7 (§5.3): every contract tool on `live` calls
+        // `rejoin_contracts_if_dirty` before reading, but the loader
+        // also kicks it once at the end of Phase 2 so any contract
+        // queries that land before the first user call see the
+        // already-joined state. Failures are non-fatal — the worst
+        // case is a tool sees a stale `Binds` set until the next
+        // dirty tick (which is no worse than the pre-PR-7 behavior).
+        if let Err(e) = fed.rejoin_contracts_if_dirty() {
+            tracing::warn!("federation: initial rejoin_contracts_if_dirty failed: {e}");
+        }
     }
 
     // Persist the manifest on a best-effort basis: a save failure must not
@@ -266,6 +284,7 @@ pub async fn load_federation_with_workspace(
     workspaces_path: &Path,
     workspace_name: &str,
 ) -> Result<Arc<FederatedIndex>, LainError> {
+    let _load_timing = super::startup_cache::StartupTiming::start("loader_total");
     let config = resolve_data_dir(FederationConfig::load(config_path)?, config_path);
     let manifest_path = config.data_dir.join("federation_manifest.bin");
     let _manifest = FederationManifest::load_or_default(&manifest_path)?;
@@ -309,6 +328,7 @@ pub async fn load_federation_with_workspace(
     // (the indexing pass in `run_server` runs after this returns), so
     // Phase 1/2 are no-ops until that pass lands.
     let semaphore = Arc::new(Semaphore::new(config.max_concurrent_indexers));
+    let repo_load_timing = super::startup_cache::StartupTiming::start("repo_loading");
     let mut handles = Vec::with_capacity(picked.len());
     for repo_config in picked {
         let permit = semaphore
@@ -334,20 +354,36 @@ pub async fn load_federation_with_workspace(
         h.await
             .map_err(|e| LainError::Other(format!("join: {e}")))??;
     }
+    drop(repo_load_timing);
 
-    // Phase 1: project all nodes.
-    for (repo_id, _) in fed.list_repos() {
-        fed.project_nodes(&repo_id).await?;
+    fed.prune_unregistered_nodes()?;
+    let restored = match crate::federation::startup_cache::restore(&fed, &config) {
+        Ok(hit) => hit,
+        Err(error) => {
+            tracing::warn!("federation startup cache unavailable: {error}");
+            false
+        }
+    };
+    if !restored
+        && std::env::var("LAIN_REQUIRE_STARTUP_CACHE").is_ok_and(|v| !v.is_empty() && v != "0")
+    {
+        return Err(LainError::Other("a valid completed federation cache is required; run lain server once without LAIN_REQUIRE_STARTUP_CACHE to prewarm it".into()));
     }
-    // Phase 2: project all edges.
-    for (repo_id, _) in fed.list_repos() {
-        fed.project_edges(&repo_id).await?;
-    }
+    if !restored {
+        // Phase 1: project all nodes.
+        for (repo_id, _) in fed.list_repos() {
+            fed.project_nodes(&repo_id).await?;
+        }
+        // Phase 2: project all edges.
+        for (repo_id, _) in fed.list_repos() {
+            fed.project_edges(&repo_id).await?;
+        }
 
-    // PR-7 (§5.3): kick the joiner once at the end of Phase 2. See
-    // the mirror call in `load_federation` for the rationale.
-    if let Err(e) = fed.rejoin_contracts_if_dirty() {
-        tracing::warn!("federation: initial rejoin_contracts_if_dirty failed: {e}");
+        // PR-7 (§5.3): kick the joiner once at the end of Phase 2. See
+        // the mirror call in `load_federation` for the rationale.
+        if let Err(e) = fed.rejoin_contracts_if_dirty() {
+            tracing::warn!("federation: initial rejoin_contracts_if_dirty failed: {e}");
+        }
     }
 
     // Discarding this hid a failed save entirely: the federation came up

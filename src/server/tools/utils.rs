@@ -146,6 +146,12 @@ pub fn resolve_node(
     //     must round-trip: anything a tool hands back has to work as a
     //     handle for the next tool.
     if let Ok(gid) = GlobalId::parse(handle) {
+        if !graph.repo_scope_allows(gid.repo_id()) {
+            return Err(LainError::NotFound(format!(
+                "Node {handle} belongs to repository '{}', outside the requested repository scope",
+                gid.repo_id()
+            )));
+        }
         if let (Some(gname), Some(gpath)) = (gid.name(), gid.path()) {
             let by_path: Vec<GraphNode> = graph
                 .find_all_nodes_by_name(&gname)
@@ -165,7 +171,12 @@ pub fn resolve_node(
     }
     // 2. Try Graph by ID
     if let Ok(Some(n)) = graph.get_node(handle) {
-        return Ok(n);
+        if graph.in_symbol_repo_scope(&n) {
+            return Ok(n);
+        }
+        return Err(LainError::NotFound(format!(
+            "Node {handle} is outside the requested repository scope"
+        )));
     }
     // 3. Try Overlay by Name
     let overlay_names = overlay.find_nodes_by_name(handle);
@@ -793,6 +804,45 @@ pub fn read_body_summary(node: &GraphNode, max_chars: usize, workspace: &Path) -
     }
     let body = read_body_excerpt(workspace, &node.path, start, end, 30).ok()?;
     let trimmed: String = body.chars().take(max_chars).collect();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+pub fn read_body_summary_from_text(
+    node: &GraphNode,
+    max_chars: usize,
+    text: &str,
+) -> Option<String> {
+    let start = node.line_start?;
+    let end = node.line_end?;
+    if end <= start || (end - start) > 2000 {
+        return None;
+    }
+    let mut body = String::new();
+    for (line_no, line) in text.lines().enumerate() {
+        let line_no = line_no as u32;
+        if line_no < start {
+            continue;
+        }
+        if line_no > end || body.split_whitespace().count() >= 30 {
+            break;
+        }
+        if !body.is_empty() {
+            body.push(' ');
+        }
+        body.push_str(line);
+    }
+    let trimmed: String = body
+        .split_whitespace()
+        .take(30)
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(max_chars)
+        .collect();
     if trimmed.is_empty() {
         None
     } else {

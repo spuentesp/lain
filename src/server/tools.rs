@@ -2,6 +2,7 @@
 //!
 //! Follows SOLID and DRY principles by delegating logic to specialized handlers.
 
+pub mod answer_scope;
 pub mod capabilities;
 pub mod definitions;
 pub mod handlers;
@@ -20,7 +21,7 @@ use crate::graph::GraphDatabase;
 use crate::lsp::LspPool;
 use crate::nlp::NlpEmbedder;
 use crate::overlay::VolatileOverlay;
-use crate::server::tools::registry::{ToolContext, ToolContextDeps, ToolRegistry};
+use crate::server::tools::registry::{ToolContext, ToolContextDeps, ToolOutput, ToolRegistry};
 use crate::tuning::TuningConfig;
 use parking_lot::Mutex;
 use reqwest::Client;
@@ -96,6 +97,8 @@ pub struct BlastRadiusNode {
     pub path: String,
     pub depth: u32,
     pub is_direct: bool,
+    #[serde(default)]
+    pub is_heuristic: bool,
 }
 
 /// Tool executor - orchestrates MCP tool execution by delegating to specialized handlers.
@@ -440,6 +443,35 @@ impl ToolExecutor {
         return self.call_inner(name, arguments).await;
     }
 
+    pub async fn call_with_output(
+        &self,
+        name: &str,
+        arguments: Option<&Map<String, Value>>,
+    ) -> Result<ToolOutput, LainError> {
+        let special = matches!(
+            name,
+            "get_health"
+                | "get_capabilities"
+                | "get_agent_strategy"
+                | "install_language_server"
+                | "register_job_webhook"
+                | "get_job_status"
+                | "debug_sleep"
+                | "debug_panic"
+        ) || arguments.is_some_and(|args| {
+            args.get("background")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
+        });
+        if special {
+            let text = self.call(name, arguments).await?;
+            let structured = serde_json::from_str(&text).ok();
+            return Ok(ToolOutput { text, structured });
+        }
+        let args = arguments.cloned().unwrap_or_default();
+        ToolRegistry::dispatch_with_output(&self.ctx, name, &args).await
+    }
+
     async fn call_inner(
         &self,
         name: &str,
@@ -572,6 +604,7 @@ impl ToolExecutor {
             mirrors_state: CapabilityState,
             retry_after_ms: Option<u64>,
             semantic_stub: bool,
+            semantic_ready: bool,
             embeddings_running: bool,
         ) -> Capabilities {
             let mut symbols = Capability::new(structural, false);
@@ -588,9 +621,11 @@ impl ToolExecutor {
             }
             let semantic_search = if semantic_stub {
                 Capability::new(CapabilityState::UnavailableOptional, true)
-            } else if structural == CapabilityState::Ready && embeddings_running {
-                // Answers already, but from a partial embedding set that
-                // keeps changing until the background pass ends.
+            } else if structural == CapabilityState::Ready
+                && (!semantic_ready || embeddings_running)
+            {
+                // Model loading or the background embedding pass is still
+                // in flight, so semantic answers are not complete yet.
                 let mut c = Capability::new(CapabilityState::WarmingUp, true);
                 c.retry_after_ms = Some(5_000);
                 c
@@ -619,6 +654,42 @@ impl ToolExecutor {
             }
         }
 
+        fn engine_metadata(ctx: &ToolContext, structural: CapabilityState) -> serde_json::Value {
+            let state = serde_json::to_value(structural).unwrap_or_default();
+            let mut relations: Vec<serde_json::Value> = crate::schema::EdgeType::all()
+                .iter()
+                .map(|edge| {
+                    serde_json::json!({
+                        "name": edge.to_string(),
+                        "indexed": edge.is_indexed(),
+                        "state": state,
+                    })
+                })
+                .collect();
+            relations.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+            let mut emitters: Vec<serde_json::Value> =
+                inventory::iter::<crate::server::sensors::SensorEntry>()
+                    .map(|entry| {
+                        serde_json::json!({
+                            "name": entry.0.name(),
+                            "state": state,
+                        })
+                    })
+                    .collect();
+            emitters.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+            let snapshots_supported = ctx.snapshots.is_some();
+            serde_json::json!({
+                "relations": relations,
+                "emitters": emitters,
+                "snapshots": {
+                    "supported": snapshots_supported,
+                    "state": if snapshots_supported { state } else {
+                        serde_json::to_value(CapabilityState::UnavailableOptional).unwrap_or_default()
+                    },
+                }
+            })
+        }
+
         /// `call_graph` must mean "call answers are complete for the
         /// indexed commit". A pass replaces nodes (and their incident
         /// `Calls` edges) before its resolve phase re-inserts them, so
@@ -636,6 +707,7 @@ impl ToolExecutor {
         }
 
         let semantic_stub = self.ctx.embedder.is_stub();
+        let semantic_ready = self.ctx.embedder.is_ready();
         let embeddings_running = self
             .ctx
             .readiness
@@ -699,12 +771,16 @@ impl ToolExecutor {
                         structural,
                         snapshot.retry_after_ms,
                         semantic_stub,
+                        semantic_ready,
                         embeddings_running,
                     );
                     let r = readiness_by_id.get(id);
+                    let metadata = engine_metadata(&self.ctx, structural);
                     serde_json::json!({
                         "id": id.as_str(),
                         "capabilities": caps,
+                        "relations": metadata["relations"],
+                        "emitters": metadata["emitters"],
                         "indexed_signal": r.map(|r| r.indexed_signal).unwrap_or(false),
                         "last_indexed_commit": r.and_then(|r| r.last_indexed_commit.clone()),
                         "last_indexed_at_unix_ms": r.and_then(|r| r.last_indexed_at_unix_ms),
@@ -725,6 +801,7 @@ impl ToolExecutor {
                 worst,
                 worst_retry_after_ms,
                 semantic_stub,
+                semantic_ready,
                 embeddings_running,
             );
 
@@ -734,6 +811,7 @@ impl ToolExecutor {
                 "repository": self.ctx.workspace.file_name().map(|name| name.to_string_lossy()),
                 "capabilities": aggregate,
                 "repositories": repositories,
+                "snapshots": engine_metadata(&self.ctx, worst)["snapshots"],
             }))
             .map_err(Into::into);
         }
@@ -749,6 +827,7 @@ impl ToolExecutor {
             structural,
             lifecycle.retry_after_ms,
             semantic_stub,
+            semantic_ready,
             embeddings_running,
         );
         // Surface the active tool profile so an agent can self-
@@ -776,11 +855,15 @@ impl ToolExecutor {
                 // this at None, matching their actual surface.
                 self.ctx.workspaces.is_some(),
             );
+        let metadata = engine_metadata(&self.ctx, structural);
         serde_json::to_string(&serde_json::json!({
             "schema_version": SCHEMA_VERSION,
             "server_version": env!("CARGO_PKG_VERSION"),
             "repository": self.ctx.workspace.file_name().map(|name| name.to_string_lossy()),
             "capabilities": capabilities,
+            "relations": metadata["relations"],
+            "emitters": metadata["emitters"],
+            "snapshots": metadata["snapshots"],
             // New in PR3 (semantic-default tool profile).
             "tool_profile": {
                 "name": profile.as_str(),
@@ -1525,6 +1608,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn lazy_embedding_model_reports_semantic_warming_until_loaded() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("model.onnx"), b"not loaded yet").unwrap();
+        std::fs::write(tmp.path().join("tokenizer.json"), b"{}").unwrap();
+        let embedder = crate::nlp::NlpEmbedder::load_or_stub(Some(tmp.path()), 1);
+        assert!(!embedder.is_stub());
+        assert!(!embedder.is_ready());
+
+        let graph = crate::graph::GraphDatabase::empty_read_only();
+        let overlay = crate::overlay::VolatileOverlay::new();
+        let mut executor =
+            ToolExecutor::new_read_only(graph, overlay, std::path::PathBuf::from("."));
+        executor.ctx.embedder = embedder;
+        let value: serde_json::Value =
+            serde_json::from_str(&executor.get_capabilities().unwrap()).unwrap();
+        assert_eq!(
+            value["capabilities"]["semantic_search"]["state"],
+            "warming_up"
+        );
+        assert_eq!(
+            value["capabilities"]["semantic_search"]["retry_after_ms"],
+            5_000
+        );
+    }
+
+    fn assert_engine_lifecycle(repo: &serde_json::Value, state: &str) {
+        assert!(repo["relations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|relation| { relation["state"] == state && relation["indexed"].is_boolean() }));
+        assert!(repo["emitters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|emitter| { emitter["state"] == state && emitter["name"].is_string() }));
+    }
+
     /// AGENT_UX_ROADMAP.md M4 step 8: in federation mode, `get_capabilities`
     /// must report both each repo's own state (`repositories`) and a
     /// worst-of aggregate under the existing `capabilities` key, not the
@@ -1576,6 +1698,26 @@ mod tests {
         assert_eq!(repos[0]["capabilities"]["symbols"]["state"], "ready");
         assert_eq!(repos[1]["id"], "beta");
         assert_eq!(repos[1]["capabilities"]["symbols"]["state"], "warming_up");
+        assert_engine_lifecycle(&repos[1], "warming_up");
+
+        executor
+            .ctx
+            .federation
+            .as_ref()
+            .unwrap()
+            .get_repo(&RepoId::new("beta").unwrap())
+            .unwrap()
+            .set_health(RepoHealth::Unavailable);
+        let unavailable: serde_json::Value =
+            serde_json::from_str(&executor.get_capabilities().unwrap()).unwrap();
+        let beta = &unavailable["repositories"][1];
+        assert_engine_lifecycle(beta, "unavailable_error");
+        assert!(beta["relations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|relation| relation["indexed"].is_boolean()));
+        assert_eq!(unavailable["snapshots"]["state"], "unavailable_optional");
 
         drop(src_dirs);
     }

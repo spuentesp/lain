@@ -85,6 +85,63 @@ pub async fn get_blast_radius(
     include_weak_edges: bool,
     ui_sessions: crate::server::tools::UiLink<'_>,
 ) -> Result<String, LainError> {
+    get_blast_radius_scoped(
+        graph,
+        overlay,
+        workspace,
+        symbol,
+        include_coupling,
+        include_weak_edges,
+        ui_sessions,
+        false,
+    )
+    .await
+}
+
+pub struct BlastRadiusReport {
+    pub text: String,
+    pub nodes: Vec<BlastRadiusNode>,
+    pub heuristic_count: usize,
+    pub co_change_partners: Vec<(String, usize)>,
+    /// Why the answer cannot be read as "nothing depends on this", or
+    /// `None` when it can.
+    pub answer_scope: Option<crate::server::tools::answer_scope::IncompleteReason>,
+}
+
+pub async fn get_blast_radius_scoped(
+    graph: &GraphDatabase,
+    overlay: &VolatileOverlay,
+    workspace: &std::path::Path,
+    symbol: &str,
+    include_coupling: bool,
+    include_weak_edges: bool,
+    ui_sessions: crate::server::tools::UiLink<'_>,
+    historical: bool,
+) -> Result<String, LainError> {
+    get_blast_radius_report_scoped(
+        graph,
+        overlay,
+        workspace,
+        symbol,
+        include_coupling,
+        include_weak_edges,
+        ui_sessions,
+        historical,
+    )
+    .await
+    .map(|report| report.text)
+}
+
+pub async fn get_blast_radius_report_scoped(
+    graph: &GraphDatabase,
+    overlay: &VolatileOverlay,
+    workspace: &std::path::Path,
+    symbol: &str,
+    include_coupling: bool,
+    include_weak_edges: bool,
+    ui_sessions: crate::server::tools::UiLink<'_>,
+    historical: bool,
+) -> Result<BlastRadiusReport, LainError> {
     let (node, other_defs) =
         crate::server::tools::utils::resolve_node_ambiguous(graph, overlay, symbol)?;
 
@@ -98,11 +155,13 @@ pub async fn get_blast_radius(
     // last scan is. Emit the same precise per-file warning the other handlers
     // use (explain_symbol / get_call_sites), and say nothing when the file
     // backing this answer is unchanged since it was indexed.
-    let file_freshness = graph.freshness(workspace, &node.path);
-    if let crate::graph::Freshness::Dirty { .. } = file_freshness {
-        if let Some(note) = file_freshness.note(&node.path) {
-            output.push_str(&note);
-            output.push('\n');
+    if !historical {
+        let file_freshness = graph.freshness(workspace, &node.path);
+        if let crate::graph::Freshness::Dirty { .. } = file_freshness {
+            if let Some(note) = file_freshness.note(&node.path) {
+                output.push_str(&note);
+                output.push('\n');
+            }
         }
     }
     output.push_str(&format!(
@@ -184,6 +243,7 @@ pub async fn get_blast_radius(
                 // the `[depth N]` tags in the text report.
                 depth: depth + 1,
                 is_direct,
+                is_heuristic,
             });
 
             // Confidence: LSP sync = high confidence, tree-sitter only = fallback
@@ -297,10 +357,37 @@ pub async fn get_blast_radius(
     // resolvable caller); deriving it from `visited` instead drifted
     // whenever an edge pointed at an unresolvable node.
     let total_affected = affected_names.len();
+    // "No dependents found" is only a confirmed absence when the answer
+    // could have found them: the name matched one definition, the index
+    // is current for its file, and the symbol is not reached through a
+    // dispatcher. Otherwise say what is missing.
+    let scope = crate::server::tools::answer_scope::reason_for(
+        !other_defs.is_empty(),
+        !historical && crate::server::tools::answer_scope::is_stale(graph, workspace, &node.path),
+        crate::server::tools::answer_scope::dispatches_dynamically(graph, &node),
+    );
     if affected_names.is_empty() {
-        output.push_str("\n  (no dependents found — symbol may be a leaf or not yet indexed)");
+        match scope {
+            Some(reason) => output.push_str(&format!(
+                "\n  (no dependents found — {}; {})",
+                reason.wire_label(),
+                reason.explanation()
+            )),
+            None => output.push_str(
+                "\n  (no dependents found — the index is current for this file and no caller in the graph reaches the symbol)",
+            ),
+        }
         // Don't show total count when there are no names to show
     } else {
+        // A partial answer says so before the list, so a reader does not
+        // have to infer it from what is missing.
+        if let Some(reason) = scope {
+            output.push_str(&format!(
+                "\nNote: {} — {}.",
+                reason.wire_label(),
+                reason.explanation()
+            ));
+        }
         // Direct callers and transitive reach answer different questions and
         // must not collapse into one number. Reverse closure through a
         // central dispatcher is huge and still correct: this helper has
@@ -358,13 +445,15 @@ pub async fn get_blast_radius(
         ));
     }
 
-    if include_coupling {
-        let partners = graph.get_co_change_partners(&node.path)?;
-        if !partners.is_empty() {
-            output.push_str("\n\nCoupled Files (Git Co-Changes):\n");
-            for (p, c) in partners.iter().take(5) {
-                output.push_str(&format!("- {} (changed together {} times)\n", p, c));
-            }
+    let co_change_partners = if include_coupling {
+        graph.get_co_change_partners(&node.path)?
+    } else {
+        Vec::new()
+    };
+    if !co_change_partners.is_empty() {
+        output.push_str("\n\nCoupled Files (Git Co-Changes):\n");
+        for (p, c) in co_change_partners.iter().take(5) {
+            output.push_str(&format!("- {} (changed together {} times)\n", p, c));
         }
     }
 
@@ -372,7 +461,7 @@ pub async fn get_blast_radius(
     if let Some((sessions, port, ttl)) = ui_sessions {
         let data = UiSessionData::BlastRadius {
             symbol: symbol.to_string(),
-            nodes: session_nodes,
+            nodes: session_nodes.clone(),
         };
         store_ui_session_and_append_link(
             sessions,
@@ -388,7 +477,13 @@ pub async fn get_blast_radius(
             .push_str("\nClick nodes to mark approved, then describe your selection to the agent.");
     }
 
-    Ok(output)
+    Ok(BlastRadiusReport {
+        text: output,
+        nodes: session_nodes,
+        heuristic_count: heuristic_caller_count as usize,
+        co_change_partners,
+        answer_scope: scope,
+    })
 }
 
 pub async fn get_coupling_radar(
@@ -787,8 +882,15 @@ mod tests {
             "the warning must name the file, got:\n{output}"
         );
         assert!(
-            !output.contains("Overlay freshness") && !output.contains("stale"),
+            !output.contains("Overlay freshness"),
             "the bare overlay-age marker must be gone, got:\n{output}"
+        );
+        // The answer now names the reason it cannot be conclusive, in
+        // the shared vocabulary the other graph tools use.
+        assert!(
+            output.contains("stale_or_unindexed"),
+            "a file edited after its scan makes the answer provisional, and the \
+             answer must say so; got:\n{output}"
         );
     }
 

@@ -12,7 +12,7 @@ over `ContractKey` makes a new kind fail to compile until its row is
 declared here and there.
 
 The audit was taken 2026-10-18 against source
-(`docs/superpowers/plans/2026-10-18-topic-hub-and-protocol-coverage.md`,
+(`docs/archive/2026-10-18-topic-hub-and-protocol-coverage.md`,
 "Protocol coverage audit") and updated by the work that followed:
 topic hubs became canonical (Task 1), the dashboard view learned to
 show them (Task 2), and `check_binding` / `bindings` grew from
@@ -110,6 +110,14 @@ each kind and are backlog, not silence.
   GraphQL legs (`ReadsFrom`/`ReadsField` on selected fields,
   `HasField`/`ResponseSchema` on the provider) are outside the
   dashboard filter. **Backlog.**
+- **Payloads and frontend lineage.** Payload reads are scoped to the
+  operation: a `PayloadSchema` binds to the operation document that
+  produced it, not to the file it happens to sit in. Frontend
+  dispositions are evidence-based — `Renders`, `Stores`, `Forwards`,
+  and `Discards` edges are emitted only where the syntax evidence
+  shows the value being rendered, stored, forwarded, or dropped; a
+  dynamic or ambiguous lineage stays explicitly `Unresolved` on the
+  ledger instead of being guessed.
 - **Status.** Detected, joined, confirmable. The round trip
   (`entry → load_from_str → validate → apply_confirmed_binding →
   Binds/Confirmed`) is pinned by
@@ -140,6 +148,11 @@ each kind and are backlog, not silence.
   linked. All three are in the dashboard filter. The same
   `broker/topic` in two repos is two hubs: per-repo identity is
   kept, and the contract layer is what links them cross-repo.
+- **Payloads and frontend lineage.** Topic payload reads are scoped to
+  the publish/consume site. The evidence-based frontend dispositions
+  (`Renders` / `Stores` / `Forwards` / `Discards`) apply here as in
+  `## graphql`, and dynamic or ambiguous lineage stays explicitly
+  `Unresolved`.
 - **Status.** Complete. One caveat: same-repo cross-service pairs may
   need a hand-written binding when the hub's path lands in the
   consumer's service.
@@ -188,7 +201,7 @@ each kind and are backlog, not silence.
 
 - **Sensors.** `websocket_sensor` — client dials, server routes, and
   handler bindings (Tier-1 line-idiom walker over
-  `sensors/patterns/frameworks.yaml`).
+  `src/server/sensors/patterns/frameworks.yaml`).
 - **Resolver.** `resolve_websocket_consumer` — host evidence first,
   exactly like the RPC resolver: a literal host that names no
   configured service means the dial left the federation
@@ -216,7 +229,16 @@ each kind and are backlog, not silence.
   file and share the contract key with raw SQL on the same table name.
   A chain with only custom manager methods is a heuristic read
   (confidence 0.6); what it cannot resolve lands on the ledger as
-  `OrmDynamicQuery`. SQLAlchemy and Prisma are not covered.
+  `OrmDynamicQuery`. Coverage is first-class across six frameworks —
+  Django, SQLAlchemy, Prisma, Drizzle, TypeORM, and Sequelize
+  (`src/server/sensors/orm_model_sensor/{python,javascript,typescript,
+  migrations}.rs`): models map to tables and columns through `MapsTo`
+  and `HasColumn` edges, call sites emit `ReadsColumn` / `WritesColumn`
+  alongside the table-level edges, and schema migrations supply the
+  evidence for a model-to-table mapping. Carrying the new node and edge
+  types advanced `FEDERATION_GRAPH_VERSION` 4 → 5 — run `lain reindex`
+  once on upgrade (see `FEDERATION.md`, "Graph schema versioning and
+  recovery").
 - **Resolver.** `resolve_table_consumer` — tables are identified by
   name alone; ownership (which service's endpoint table a `Table`
   lands in) comes from `databases[]` in `repos.yaml`, widened by

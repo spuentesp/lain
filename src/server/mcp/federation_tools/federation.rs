@@ -296,21 +296,96 @@ pub fn get_cross_repo_blast_radius_for_repo(
     depth: Range<u32>,
 ) -> Result<CrossRepoBlastRadius, LainError> {
     let rid = RepoId::new(repo_id)?;
+    let (qualifier, name) = symbol
+        .rsplit_once("::")
+        .map_or((None, symbol), |(qualifier, name)| (Some(qualifier), name));
     // Look up the actual node by name + repo so we traverse from a real
     // global id. `backend.find_nodes_by_name` covers both repos added
     // through `add_repo` / `project_repo` and nodes inserted directly
     // into the backend (same fallback pattern `resolve_symbol` uses).
-    let seed = fed
+    let mut candidates = fed
         .backend()
-        .find_nodes_by_name(symbol)?
+        .find_nodes_by_name(name)?
         .into_iter()
-        .find(|n| match GlobalId::parse(&n.id) {
-            Ok(g) => g.repo_id() == rid.as_str(),
+        .filter(|n| match GlobalId::parse(&n.id) {
+            Ok(g) => {
+                g.repo_id() == rid.as_str()
+                    && qualifier.is_none_or(|q| n.container.as_deref() == Some(q))
+            }
             Err(_) => false,
         })
-        .ok_or_else(|| {
-            LainError::NotFound(format!("symbol {symbol} not found in repo {repo_id}"))
-        })?;
+        .collect::<Vec<_>>();
+    candidates.sort_by(|a, b| a.path.cmp(&b.path).then_with(|| a.id.cmp(&b.id)));
+    let seed = candidates.first().ok_or_else(|| {
+        LainError::NotFound(format!("symbol {symbol} not found in repo {repo_id}"))
+    })?;
+    // Repo selection does not disambiguate duplicate names within that repo.
+    // A missing/indexing member can also hide callers of an otherwise current
+    // seed, so federation readiness matters as well as the seed's file.
+    let stale = !fed.load_errors().is_empty()
+        || fed
+            .list_repos()
+            .iter()
+            .any(|(_, health)| *health != crate::federation::health::RepoHealth::Ready)
+        // A member that reports `Ready` can still have commits the
+        // indexer has not seen; its callers are invisible to the walk.
+        || fed
+            .list_repos()
+            .iter()
+            .any(|(member, _)| fed.get_repo(member).is_some_and(|r| r.index_is_behind_head()))
+        || fed.get_repo(&rid).is_some_and(|repo| {
+            crate::server::tools::answer_scope::is_stale(repo.db(), repo.local_path(), &seed.path)
+        });
+    // A heuristic edge pointing at the seed is the resolved-receiver
+    // form; the seed's file carrying a dispatch site is the unresolved
+    // one (the dispatch sensor emits `File -> Hub`, so a function target
+    // never carries such an edge itself). Either way the static walk
+    // cannot see every caller.
+    let mut dynamic = false;
+    for edge_type in [
+        crate::schema::EdgeType::DynamicDispatch,
+        crate::schema::EdgeType::BusTopic,
+        crate::schema::EdgeType::RouteMatches,
+    ] {
+        if !fed.backend().edges_to(&seed.id, edge_type)?.is_empty() {
+            dynamic = true;
+            break;
+        }
+    }
+    if !dynamic {
+        let file_id = fed
+            .backend()
+            .find_nodes_by_name(
+                std::path::Path::new(&seed.path)
+                    .file_name()
+                    .and_then(|f| f.to_str())
+                    .unwrap_or(&seed.path),
+            )
+            .unwrap_or_default()
+            .into_iter()
+            // The seed's own file only: paths are repo-relative, so a
+            // same-path file in another repo must not stand in for it
+            // (or lend it a dispatch site it does not have).
+            .find(|n| {
+                n.node_type == crate::schema::NodeType::File
+                    && n.path == seed.path
+                    && GlobalId::parse(&n.id).is_ok_and(|g| g.repo_id() == rid.as_str())
+            });
+        if let Some(file) = file_id {
+            for edge_type in [
+                crate::schema::EdgeType::DynamicDispatch,
+                crate::schema::EdgeType::BusTopic,
+                crate::schema::EdgeType::RouteMatches,
+            ] {
+                if !fed.backend().edges_from(&file.id, edge_type)?.is_empty() {
+                    dynamic = true;
+                    break;
+                }
+            }
+        }
+    }
+    let scope =
+        crate::server::tools::answer_scope::reason_for(candidates.len() > 1, stale, dynamic);
     // PR 4 (§5.2): rebuilt on `traverse_impact` so the impact table
     // (§5.2 propagation rules) is the single source of truth for which
     // edges contribute to a blast-radius walk. In PR 4 only `Calls`
@@ -365,6 +440,9 @@ pub fn get_cross_repo_blast_radius_for_repo(
         by_repo,
         total_count: total,
         truncated,
+        answer_scope: scope
+            .or(truncated
+                .then_some(crate::server::tools::answer_scope::IncompleteReason::Truncated)),
     })
 }
 
@@ -587,6 +665,510 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cross_repo_blast_radius_scopes_duplicate_names_within_a_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        for path in ["src/a.rs", "src/b.rs"] {
+            fed.backend()
+                .upsert_node_global(
+                    &format!("repo-a:Function:{path}:shared:0"),
+                    crate::schema::NodeType::Function,
+                    path,
+                    "shared",
+                )
+                .unwrap();
+        }
+        let result = get_cross_repo_blast_radius_for_repo(&fed, "repo-a", "shared", 1..3).unwrap();
+        assert_eq!(result.total_count, 0);
+        assert_eq!(
+            result.answer_scope.map(|s| s.wire_label()),
+            Some("ambiguous_target")
+        );
+    }
+
+    #[tokio::test]
+    async fn cross_repo_blast_radius_scopes_runtime_dispatch_without_static_callers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        let seed = "repo-a:Function:src/a.rs:shared:0";
+        let target = "repo-a:Function:src/b.rs:handler:0";
+        for (id, name) in [(seed, "shared"), (target, "handler")] {
+            fed.backend()
+                .upsert_node_global(id, crate::schema::NodeType::Function, "src/a.rs", name)
+                .unwrap();
+        }
+        for kind in [
+            crate::schema::EdgeType::DynamicDispatch,
+            crate::schema::EdgeType::BusTopic,
+            crate::schema::EdgeType::RouteMatches,
+        ] {
+            // The seed is the dynamically-reached target: the heuristic
+            // edge points at it, which is the shape the dispatch sensor
+            // produces when it can resolve a receiver.
+            // Whether the walk lists the heuristic caller depends on the
+            // impact table: `BusTopic` / `RouteMatches` propagate
+            // `Incoming`, `DynamicDispatch` stops.
+            let kind_label = format!("{:?}", kind);
+            let expected_callers = match kind {
+                crate::schema::EdgeType::DynamicDispatch => 0,
+                _ => 1,
+            };
+            let edge = crate::schema::GraphEdge::new(kind, target.into(), seed.into());
+            fed.backend().upsert_edge(edge.clone()).unwrap();
+            let result =
+                get_cross_repo_blast_radius_for_repo(&fed, "repo-a", "shared", 1..3).unwrap();
+            // Either way the answer must say the graph cannot see every
+            // caller rather than call the symbol a leaf.
+            assert_eq!(
+                result.total_count, expected_callers,
+                "{kind_label}: the impact table decides whether the heuristic caller is listed"
+            );
+            assert_eq!(
+                result.answer_scope.map(|s| s.wire_label()),
+                Some("dynamic_target")
+            );
+            fed.backend().remove_edges(&[edge]).unwrap();
+        }
+        // All three heuristic kinds at once. The per-kind loop above
+        // hides an inverted emptiness check: the kinds without an edge
+        // cover for it (their `edges_to` probe is empty either way).
+        // Only every kind present at once makes each probe observably
+        // non-empty.
+        let edges: Vec<crate::schema::GraphEdge> = [
+            crate::schema::EdgeType::DynamicDispatch,
+            crate::schema::EdgeType::BusTopic,
+            crate::schema::EdgeType::RouteMatches,
+        ]
+        .into_iter()
+        .map(|kind| crate::schema::GraphEdge::new(kind, target.into(), seed.into()))
+        .collect();
+        for edge in &edges {
+            fed.backend().upsert_edge(edge.clone()).unwrap();
+        }
+        let result = get_cross_repo_blast_radius_for_repo(&fed, "repo-a", "shared", 1..3).unwrap();
+        assert_eq!(result.total_count, 1);
+        assert_eq!(
+            result.answer_scope.map(|s| s.wire_label()),
+            Some("dynamic_target")
+        );
+        fed.backend().remove_edges(&edges).unwrap();
+    }
+
+    #[tokio::test]
+    async fn cross_repo_blast_radius_scopes_dispatch_declared_on_the_seed_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        let seed = "repo-a:Function:src/a.rs:shared:0";
+        fed.backend()
+            .upsert_node_global(
+                seed,
+                crate::schema::NodeType::Function,
+                "src/a.rs",
+                "shared",
+            )
+            .unwrap();
+        // The dispatch sensor emits `File -> Hub:<detector>` with the
+        // file node named after the file, so the probe finds the seed's
+        // file by name and then has to pick the right node. Decoys that
+        // share the file name but not the file's identity must not stand
+        // in for it: `find_all_nodes_by_name` orders by (path, id), so
+        // these decoys sort before the real file node and a predicate
+        // that matches the wrong node selects one of them.
+        let file = "repo-a:File:src/a.rs:a.rs:0";
+        // GlobalId encodes `:` as `%3A` in the name segment, so the
+        // sensor's `Hub:<detector>` name lands as `Hub%3A<detector>`
+        // in the id while the node's name keeps the literal colon.
+        let hub = "repo-a:Synthetic:__hub__:Hub%3Adynamic_dispatch_sensor:0";
+        for (id, node_type, path, name) in [
+            (
+                "repo-a:File:src/_decoy.rs:a.rs:0",
+                crate::schema::NodeType::File,
+                "src/_decoy.rs",
+                "a.rs",
+            ),
+            (file, crate::schema::NodeType::File, "src/a.rs", "a.rs"),
+            (
+                "repo-a:Function:src/a.rs:a.rs:0",
+                crate::schema::NodeType::Function,
+                "src/a.rs",
+                "a.rs",
+            ),
+            (
+                hub,
+                crate::schema::NodeType::Synthetic,
+                "",
+                "Hub:dynamic_dispatch_sensor",
+            ),
+        ] {
+            fed.backend()
+                .upsert_node_global(id, node_type, path, name)
+                .unwrap();
+        }
+        // Outgoing dispatch edges from the real file node only, all
+        // three kinds: an inverted emptiness check on any one of them is
+        // masked by the other two unless every kind is present.
+        for kind in [
+            crate::schema::EdgeType::DynamicDispatch,
+            crate::schema::EdgeType::BusTopic,
+            crate::schema::EdgeType::RouteMatches,
+        ] {
+            fed.backend()
+                .upsert_edge(crate::schema::GraphEdge::new(kind, file.into(), hub.into()))
+                .unwrap();
+        }
+        // No static caller, but the seed's file declares dynamic
+        // dispatch: the answer must say the graph cannot see every
+        // caller rather than call the symbol a leaf.
+        let result = get_cross_repo_blast_radius_for_repo(&fed, "repo-a", "shared", 1..3).unwrap();
+        assert_eq!(result.total_count, 0);
+        assert_eq!(
+            result.answer_scope.map(|s| s.wire_label()),
+            Some("dynamic_target")
+        );
+    }
+
+    /// The dispatch probe must read the seed's OWN file. Paths are
+    /// repo-relative, so two members can hold `src/a.rs` with the same
+    /// file name; a name-only lookup then picks whichever sorts first —
+    /// the other repo's file. Here the seed's file declares dispatch and
+    /// the same-path file in `alpha` (which sorts first) does not, so a
+    /// probe that reads the wrong file claims completeness it cannot
+    /// prove.
+    #[tokio::test]
+    async fn cross_repo_blast_radius_scopes_dispatch_from_the_seeds_own_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        let seed = "zeta:Function:src/a.rs:shared:0";
+        let zeta_file = "zeta:File:src/a.rs:a.rs:0";
+        let alpha_file = "alpha:File:src/a.rs:a.rs:0";
+        let hub = "zeta:Synthetic:__hub__:Hub%3Adynamic_dispatch_sensor:0";
+        for (id, node_type, path, name) in [
+            (
+                seed,
+                crate::schema::NodeType::Function,
+                "src/a.rs",
+                "shared",
+            ),
+            (zeta_file, crate::schema::NodeType::File, "src/a.rs", "a.rs"),
+            (
+                alpha_file,
+                crate::schema::NodeType::File,
+                "src/a.rs",
+                "a.rs",
+            ),
+            (
+                hub,
+                crate::schema::NodeType::Synthetic,
+                "",
+                "Hub:dynamic_dispatch_sensor",
+            ),
+        ] {
+            fed.backend()
+                .upsert_node_global(id, node_type, path, name)
+                .unwrap();
+        }
+        for kind in [
+            crate::schema::EdgeType::DynamicDispatch,
+            crate::schema::EdgeType::BusTopic,
+            crate::schema::EdgeType::RouteMatches,
+        ] {
+            fed.backend()
+                .upsert_edge(crate::schema::GraphEdge::new(
+                    kind,
+                    zeta_file.into(),
+                    hub.into(),
+                ))
+                .unwrap();
+        }
+        let result = get_cross_repo_blast_radius_for_repo(&fed, "zeta", "shared", 1..3).unwrap();
+        assert_eq!(result.total_count, 0);
+        assert_eq!(
+            result.answer_scope.map(|s| s.wire_label()),
+            Some("dynamic_target"),
+            "the seed's own file declares dispatch; another repo's \
+             same-path file must not stand in for it"
+        );
+    }
+
+    /// The mirror failure: the other repo's same-path file declares
+    /// dispatch and the seed's does not. The seed's answer is complete,
+    /// and the other repo's dispatch site must not leak into it.
+    #[tokio::test]
+    async fn cross_repo_blast_radius_ignores_dispatch_on_another_repos_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        let seed = "zeta:Function:src/a.rs:shared:0";
+        let zeta_file = "zeta:File:src/a.rs:a.rs:0";
+        let alpha_file = "alpha:File:src/a.rs:a.rs:0";
+        let hub = "alpha:Synthetic:__hub__:Hub%3Adynamic_dispatch_sensor:0";
+        for (id, node_type, path, name) in [
+            (
+                seed,
+                crate::schema::NodeType::Function,
+                "src/a.rs",
+                "shared",
+            ),
+            (zeta_file, crate::schema::NodeType::File, "src/a.rs", "a.rs"),
+            (
+                alpha_file,
+                crate::schema::NodeType::File,
+                "src/a.rs",
+                "a.rs",
+            ),
+            (
+                hub,
+                crate::schema::NodeType::Synthetic,
+                "",
+                "Hub:dynamic_dispatch_sensor",
+            ),
+        ] {
+            fed.backend()
+                .upsert_node_global(id, node_type, path, name)
+                .unwrap();
+        }
+        for kind in [
+            crate::schema::EdgeType::DynamicDispatch,
+            crate::schema::EdgeType::BusTopic,
+            crate::schema::EdgeType::RouteMatches,
+        ] {
+            fed.backend()
+                .upsert_edge(crate::schema::GraphEdge::new(
+                    kind,
+                    alpha_file.into(),
+                    hub.into(),
+                ))
+                .unwrap();
+        }
+        let result = get_cross_repo_blast_radius_for_repo(&fed, "zeta", "shared", 1..3).unwrap();
+        assert_eq!(result.total_count, 0);
+        assert_eq!(
+            result.answer_scope.map(|s| s.wire_label()),
+            None,
+            "another repo's dispatch site must not make the seed's answer provisional"
+        );
+    }
+
+    #[tokio::test]
+    async fn cross_repo_blast_radius_scopes_unindexed_files_and_missing_members() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        let src_dir = tempfile::tempdir().unwrap();
+        let src_repo = git2::Repository::init(src_dir.path()).unwrap();
+        // A real commit: "caught up with HEAD" is then a real comparison
+        // between the indexed commit and the repository's, not a test of
+        // an unborn repository.
+        std::fs::create_dir(src_dir.path().join("src")).unwrap();
+        std::fs::write(src_dir.path().join("src/a.rs"), "fn shared() {}\n").unwrap();
+        {
+            let mut idx = src_repo.index().unwrap();
+            idx.add_path(std::path::Path::new("src/a.rs")).unwrap();
+            let tree_id = idx.write_tree().unwrap();
+            let sig = git2::Signature::now("t", "t@e").unwrap();
+            let tree = src_repo.find_tree(tree_id).unwrap();
+            src_repo
+                .commit(Some("HEAD"), &sig, &sig, "fixture", &tree, &[])
+                .unwrap();
+        }
+        let head = src_repo.head().unwrap().target().unwrap().to_string();
+        let rid = RepoId::new("repo-a").unwrap();
+        let source = WorkspaceDirSource::new(rid.clone(), src_dir.path().to_path_buf()).unwrap();
+        fed.add_repo(Box::new(source), tmp.path()).await.unwrap();
+        fed.get_repo(&rid).unwrap().set_health(RepoHealth::Ready);
+        fed.backend()
+            .upsert_node_global(
+                "repo-a:Function:src/a.rs:shared:0",
+                crate::schema::NodeType::Function,
+                "src/a.rs",
+                "shared",
+            )
+            .unwrap();
+        let result = get_cross_repo_blast_radius_for_repo(&fed, "repo-a", "shared", 1..3).unwrap();
+        assert_eq!(result.total_count, 0);
+        assert_eq!(
+            result.answer_scope.map(|s| s.wire_label()),
+            Some("stale_or_unindexed")
+        );
+
+        std::fs::write(src_dir.path().join("src/a.rs"), "fn shared() {}\n").unwrap();
+        let mut node = crate::schema::GraphNode::new(
+            crate::schema::NodeType::Function,
+            "shared".into(),
+            "src/a.rs".into(),
+        );
+        // A deliberately old scan is stale without a timing-dependent sleep.
+        node.last_lsp_sync = Some(1);
+        let repo = fed.get_repo(&rid).unwrap();
+        repo.db().upsert_node(node.clone()).unwrap();
+        let result = get_cross_repo_blast_radius_for_repo(&fed, "repo-a", "shared", 1..3).unwrap();
+        assert_eq!(
+            result.answer_scope.map(|s| s.wire_label()),
+            Some("stale_or_unindexed")
+        );
+        node.last_lsp_sync = Some(crate::server::time::now_unix());
+        repo.db().upsert_node(node).unwrap();
+        // repo-a's own index caught up with its HEAD.
+        repo.db().set_last_commit(head.clone()).unwrap();
+        let result = get_cross_repo_blast_radius_for_repo(&fed, "repo-a", "shared", 1..3).unwrap();
+        assert_eq!(result.answer_scope, None);
+
+        for health in [
+            RepoHealth::Indexing,
+            RepoHealth::Degraded,
+            RepoHealth::Unavailable,
+            RepoHealth::Missing,
+        ] {
+            repo.set_health(health);
+            let result =
+                get_cross_repo_blast_radius_for_repo(&fed, "repo-a", "shared", 1..3).unwrap();
+            assert_eq!(
+                result.answer_scope.map(|s| s.wire_label()),
+                Some("stale_or_unindexed")
+            );
+        }
+        repo.set_health(RepoHealth::Ready);
+
+        // A different member can hide callers while the seed stays fresh.
+        let consumer_id = RepoId::new("consumer").unwrap();
+        let consumer_source =
+            WorkspaceDirSource::new(consumer_id.clone(), src_dir.path().to_path_buf()).unwrap();
+        fed.add_repo(Box::new(consumer_source), tmp.path())
+            .await
+            .unwrap();
+        let result = get_cross_repo_blast_radius_for_repo(&fed, "repo-a", "shared", 1..3).unwrap();
+        assert_eq!(
+            result.answer_scope.map(|s| s.wire_label()),
+            Some("stale_or_unindexed")
+        );
+        let consumer_repo = fed.get_repo(&consumer_id).unwrap();
+        consumer_repo.set_health(RepoHealth::Ready);
+        // The consumer's index also caught up with its HEAD, so the
+        // answer is complete rather than provisional.
+        consumer_repo.db().set_last_commit(head.clone()).unwrap();
+        let result = get_cross_repo_blast_radius_for_repo(&fed, "repo-a", "shared", 1..3).unwrap();
+        assert_eq!(result.answer_scope, None);
+
+        // A member that reports `Ready` but whose index never caught up
+        // with its HEAD can still hide callers. Health alone says the
+        // member is serving, not that the graph saw the code it has.
+        consumer_repo
+            .db()
+            .set_last_commit("0000000000000000000000000000000000000000".into())
+            .unwrap();
+        let result = get_cross_repo_blast_radius_for_repo(&fed, "repo-a", "shared", 1..3).unwrap();
+        assert_eq!(
+            result.answer_scope.map(|s| s.wire_label()),
+            Some("stale_or_unindexed"),
+            "a member whose index is behind HEAD must qualify the answer"
+        );
+        consumer_repo.db().set_last_commit(head).unwrap();
+        let result = get_cross_repo_blast_radius_for_repo(&fed, "repo-a", "shared", 1..3).unwrap();
+        assert_eq!(
+            result.answer_scope, None,
+            "a member whose index caught up with HEAD no longer qualifies the answer"
+        );
+
+        // Even a current seed cannot prove no callers in a member that failed
+        // to load. Use a backend-only seed so only the load error is at issue.
+        fed.backend()
+            .upsert_node_global(
+                "repo-b:Function:src/b.rs:other:0",
+                crate::schema::NodeType::Function,
+                "src/b.rs",
+                "other",
+            )
+            .unwrap();
+        fed.record_load_error("missing-consumer", "checkout unavailable".into());
+        let result = get_cross_repo_blast_radius_for_repo(&fed, "repo-b", "other", 1..3).unwrap();
+        assert_eq!(
+            result.answer_scope.map(|s| s.wire_label()),
+            Some("stale_or_unindexed")
+        );
+    }
+
+    #[tokio::test]
+    async fn cross_repo_blast_radius_reports_a_truncated_walk_as_incomplete() {
+        // A walk that stops at the depth limit returns a prefix of the
+        // real reach. The flag says so; the answer scope says what it
+        // means, so a reader does not have to know the cap to know that
+        // the list is not the whole answer.
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        for (name, path) in [
+            ("shared", "src/a.rs"),
+            ("mid", "src/b.rs"),
+            ("deep", "src/c.rs"),
+        ] {
+            fed.backend()
+                .upsert_node_global(
+                    &format!("repo-a:Function:{path}:{name}:0"),
+                    crate::schema::NodeType::Function,
+                    path,
+                    name,
+                )
+                .unwrap();
+        }
+        // shared <- mid <- deep (incoming calls: shared is called by mid,
+        // mid is called by deep).
+        fed.backend()
+            .upsert_edge(crate::schema::GraphEdge::new(
+                crate::schema::EdgeType::Calls,
+                "repo-a:Function:src/b.rs:mid:0".into(),
+                "repo-a:Function:src/a.rs:shared:0".into(),
+            ))
+            .unwrap();
+        fed.backend()
+            .upsert_edge(crate::schema::GraphEdge::new(
+                crate::schema::EdgeType::Calls,
+                "repo-a:Function:src/c.rs:deep:0".into(),
+                "repo-a:Function:src/b.rs:mid:0".into(),
+            ))
+            .unwrap();
+
+        // Depth 1..2 stops before `deep` is reached.
+        let result = get_cross_repo_blast_radius_for_repo(&fed, "repo-a", "shared", 1..2).unwrap();
+        assert!(
+            result.truncated,
+            "a walk that stops at the depth limit must say so"
+        );
+        assert_eq!(
+            result.answer_scope.map(|s| s.wire_label()),
+            Some("truncated"),
+            "a truncated walk is an incomplete answer, and must name itself"
+        );
+    }
+
+    #[tokio::test]
+    async fn cross_repo_blast_radius_reports_a_complete_walk_as_complete() {
+        // The counterpart: a walk that reaches the whole reach within
+        // the depth limit carries no reason — the list is the answer.
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        for (name, path) in [("shared", "src/a.rs"), ("mid", "src/b.rs")] {
+            fed.backend()
+                .upsert_node_global(
+                    &format!("repo-a:Function:{path}:{name}:0"),
+                    crate::schema::NodeType::Function,
+                    path,
+                    name,
+                )
+                .unwrap();
+        }
+        fed.backend()
+            .upsert_edge(crate::schema::GraphEdge::new(
+                crate::schema::EdgeType::Calls,
+                "repo-a:Function:src/b.rs:mid:0".into(),
+                "repo-a:Function:src/a.rs:shared:0".into(),
+            ))
+            .unwrap();
+        let result = get_cross_repo_blast_radius_for_repo(&fed, "repo-a", "shared", 1..3).unwrap();
+        assert!(!result.truncated);
+        assert_eq!(
+            result.answer_scope, None,
+            "a complete walk carries no reason"
+        );
+    }
+
+    #[tokio::test]
     async fn cross_repo_blast_radius_incoming_edges_group_by_repo() {
         // Wishlist #12c fix: blast radius now traverses INCOMING
         // `Calls` edges (callers of the seed), not outgoing. The
@@ -772,6 +1354,50 @@ mod tests {
             .by_repo
             .values()
             .any(|v| v.iter().any(|id| id.contains("caller_of_shared"))));
+    }
+
+    #[tokio::test]
+    async fn cross_repo_blast_radius_accepts_a_type_qualified_symbol() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        let backend = fed.backend();
+        let mut bytes_method = crate::schema::GraphNode::new(
+            crate::schema::NodeType::Method,
+            "from_static".into(),
+            "src/bytes.rs".into(),
+        );
+        bytes_method.id = "bytes:Method:src/bytes.rs:from_static:10".into();
+        bytes_method.container = Some("Bytes".into());
+        backend.upsert_node(bytes_method).unwrap();
+        let mut other_method = crate::schema::GraphNode::new(
+            crate::schema::NodeType::Method,
+            "from_static".into(),
+            "src/buf/uninit_slice.rs".into(),
+        );
+        other_method.id = "bytes:Method:src/buf/uninit_slice.rs:from_static:20".into();
+        other_method.container = Some("UninitSlice".into());
+        backend.upsert_node(other_method).unwrap();
+        backend
+            .upsert_node_global(
+                "tokio:Function:examples/connect_udp.rs:send:1",
+                crate::schema::NodeType::Function,
+                "examples/connect_udp.rs",
+                "send",
+            )
+            .unwrap();
+        backend
+            .upsert_edge(crate::schema::GraphEdge::new(
+                crate::schema::EdgeType::Calls,
+                "tokio:Function:examples/connect_udp.rs:send:1".into(),
+                "bytes:Method:src/bytes.rs:from_static:10".into(),
+            ))
+            .unwrap();
+
+        let result =
+            get_cross_repo_blast_radius_for_repo(&fed, "bytes", "Bytes::from_static", 1..2)
+                .unwrap();
+        assert_eq!(result.by_repo.get("tokio").map(Vec::len), Some(1));
+        assert_eq!(result.total_count, 1);
     }
 
     #[tokio::test]

@@ -1321,8 +1321,7 @@ impl SnapshotManager {
                     self.data_dir.join("mirrors").join(format!("{repo}.git")),
                 )?;
                 let tree = git.find_commit(git2::Oid::from_str(commit)?)?.tree()?;
-                let normalized_path = path.replace('\\', "/");
-                let entry = match tree.get_path(std::path::Path::new(&normalized_path)) {
+                let entry = match tree.get_path(std::path::Path::new(path)) {
                     Ok(e) => e,
                     Err(e) if e.code() == git2::ErrorCode::NotFound => return Ok(None),
                     Err(e) => return Err(e.into()),
@@ -3039,6 +3038,7 @@ repos:
 #[path = "manager_verification.rs"]
 mod verification;
 
-#[cfg(all(test, not(lain_loom)))]
+#[cfg(test)]
+#[cfg(not(lain_loom))]
 #[path = "manager_residency_verification.rs"]
 mod residency_verification;

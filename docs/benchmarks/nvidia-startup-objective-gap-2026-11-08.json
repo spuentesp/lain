@@ -1,0 +1,1668 @@
+{
+  "schema_version": 1,
+  "binary_build_commit": "e5087e4c-dirty",
+  "binary_version": "0.13.0",
+  "mode": "static-no-lsp",
+  "binary": "/data/agents/orca/workspaces/lain/booby/target/release/lain",
+  "binary_sha256": "c9764a93c36d96f0229bbb9c352e5d7d7960274279e65d5bbb9da17cb4a400c0",
+  "sidecar_binary": "/data/agents/orca/workspaces/lain/booby/target/release/lain-git-sidecar",
+  "sidecar_sha256": "1a179df0933d2504a591720e50eae6bb13a024e974024971d95d3b4c8034daa8",
+  "git_sensor": "sidecar",
+  "platform": "Linux-7.2.6-1-default-x86_64-with-glibc2.44",
+  "cpu_count": 12,
+  "inputs": {
+    "openshell": {
+      "path": "/data/agents/tmp-lain-tests/nvidia-eval/OpenShell",
+      "commit": "d4e32263eb4554c46c5bae702acada2f4af03eb0",
+      "dirty": false,
+      "tracked_files": 2129
+    },
+    "nemo-fabric": {
+      "path": "/data/agents/tmp-lain-tests/nvidia-eval/NeMo-Fabric",
+      "commit": "4fdf65a4b4c96024327501ae28243f2d206e7ec7",
+      "dirty": false,
+      "tracked_files": 1165
+    },
+    "nemoclaw": {
+      "path": "/data/agents/tmp-lain-tests/nvidia-eval/NemoClaw",
+      "commit": "37f1e4cb9942a3dc05c0c76995f86624261bc7b1",
+      "dirty": false,
+      "tracked_files": 6655
+    },
+    "nat": {
+      "path": "/data/agents/tmp-lain-tests/nvidia-eval/NeMo-Agent-Toolkit",
+      "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+      "dirty": false,
+      "tracked_files": 2776
+    },
+    "nat-ui": {
+      "path": "/data/agents/tmp-lain-tests/nvidia-eval/NeMo-Agent-Toolkit-UI",
+      "commit": "41cb8cf843091a24bd06d0a5f844a3cb824049d8",
+      "dirty": false,
+      "tracked_files": 175
+    },
+    "nat-examples": {
+      "path": "/data/agents/tmp-lain-tests/nvidia-eval/NeMo-Agent-Toolkit-Examples",
+      "commit": "eadbb7573b9ba12c01a9df85c601a32a886d7b25",
+      "dirty": false,
+      "tracked_files": 169
+    }
+  },
+  "concurrency": 1,
+  "requested_runs": 3,
+  "timeout_s": 900,
+  "digest_enabled": true,
+  "timings_enabled": false,
+  "graph_digest_algorithm": "blake3-tagged-record-multiset-v1",
+  "runs": [
+    {
+      "run": 1,
+      "phase": "cold",
+      "ready_s": 193.4200548810186,
+      "http_s": 1.619896741991397,
+      "tools_list_s": 1.6224218609859236,
+      "peak_parent_rss_mib": 2021.515625,
+      "status": "ready",
+      "host_loadavg_start": [
+        10.94970703125,
+        20.63671875,
+        32.2509765625
+      ],
+      "last_index_status": {
+        "repos": [
+          {
+            "health": "ready",
+            "id": "nemo-fabric"
+          },
+          {
+            "health": "ready",
+            "id": "nemoclaw"
+          },
+          {
+            "health": "ready",
+            "id": "openshell"
+          }
+        ]
+      },
+      "health": {
+        "federation": {
+          "git_sensor": {
+            "alive": true,
+            "child_pid": 1354787,
+            "consecutive_failures": 0,
+            "kind": "sidecar",
+            "last_call_duration_us": 8746,
+            "respawn_count": 0,
+            "respawns_in_window": 0
+          },
+          "memory_estimate_bytes": 51931600,
+          "repos": [
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 1354787,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 8746,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nemo-fabric"
+            },
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 1354790,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 43434,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nemoclaw"
+            },
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 1354785,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 14436,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "openshell"
+            }
+          ],
+          "total_edges": 317240,
+          "total_nodes": 101038
+        },
+        "git_sensor": {
+          "alive": true,
+          "child_pid": 1354804,
+          "consecutive_failures": 0,
+          "kind": "sidecar",
+          "last_call_duration_us": 0,
+          "respawn_count": 0,
+          "respawns_in_window": 0
+        },
+        "graph_edges": 0,
+        "graph_nodes": 0,
+        "lsp_prewarm": {},
+        "server": "lain",
+        "status": "ok",
+        "tools_count": 42,
+        "version": "0.13.0"
+      },
+      "elapsed_s": 193.53484473301796,
+      "host_loadavg_end": [
+        14.9912109375,
+        21.05859375,
+        30.45361328125
+      ],
+      "cache_hit": false,
+      "timing_log": [
+        "2026-11-08T18:04:23.480882Z  INFO lain::server::federation::federated_index: [federation] \"nemo-fabric\": projected 0 nodes",
+        "2026-11-08T18:04:23.480900Z  INFO lain::server::federation::federated_index: [federation] \"nemoclaw\": projected 0 nodes",
+        "2026-11-08T18:04:23.480902Z  INFO lain::server::federation::federated_index: [federation] \"openshell\": projected 0 nodes",
+        "2026-11-08T18:04:23.480907Z  INFO lain::server::federation::federated_index: [federation] \"nemo-fabric\": projected 0 edges (intra + external + peer)",
+        "2026-11-08T18:04:23.480916Z  INFO lain::server::federation::federated_index: [federation] \"nemoclaw\": projected 0 edges (intra + external + peer)",
+        "2026-11-08T18:04:23.480919Z  INFO lain::server::federation::federated_index: [federation] \"openshell\": projected 0 edges (intra + external + peer)",
+        "2026-11-08T18:04:31.250972Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"dynamic_dispatch\" phase=0 elapsed_ms=952 emitted=571",
+        "2026-11-08T18:04:33.209923Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"http\" phase=0 elapsed_ms=1744 emitted=308",
+        "2026-11-08T18:04:33.693185Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"websocket\" phase=0 elapsed_ms=478 emitted=4",
+        "2026-11-08T18:04:33.958410Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"django_orm\" phase=1 elapsed_ms=265 emitted=0",
+        "2026-11-08T18:04:42.956609Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"grpc_consumer\" phase=1 elapsed_ms=8977 emitted=139",
+        "2026-11-08T18:04:46.181619Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"http_client\" phase=1 elapsed_ms=3216 emitted=12",
+        "2026-11-08T18:04:46.647567Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"orm_models\" phase=1 elapsed_ms=465 emitted=0",
+        "2026-11-08T18:04:47.624996Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"event\" phase=2 elapsed_ms=667 emitted=0",
+        "2026-11-08T18:04:48.452998Z  INFO lain::server::ingest::ingestion: [federation] \"/data/agents/tmp-lain-tests/nvidia-eval/OpenShell\": fully indexed in 24.432143461s",
+        "2026-11-08T18:04:51.177311Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"http\" phase=0 elapsed_ms=465 emitted=28",
+        "2026-11-08T18:04:51.801288Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"django_orm\" phase=1 elapsed_ms=573 emitted=0",
+        "2026-11-08T18:04:52.138090Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"grpc_consumer\" phase=1 elapsed_ms=312 emitted=0",
+        "2026-11-08T18:04:52.825932Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"http_client\" phase=1 elapsed_ms=679 emitted=119",
+        "2026-11-08T18:04:55.070739Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"orm_models\" phase=1 elapsed_ms=2244 emitted=0",
+        "2026-11-08T18:04:55.458282Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"sql\" phase=1 elapsed_ms=387 emitted=0",
+        "2026-11-08T18:04:55.865791Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"event\" phase=2 elapsed_ms=312 emitted=258",
+        "2026-11-08T18:04:57.308018Z  INFO lain::server::ingest::ingestion: [federation] \"/data/agents/tmp-lain-tests/nvidia-eval/NeMo-Fabric\": fully indexed in 8.367081445s",
+        "2026-11-08T18:05:07.617426Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"dynamic_dispatch\" phase=0 elapsed_ms=2603 emitted=585",
+        "2026-11-08T18:05:14.695482Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"http\" phase=0 elapsed_ms=7072 emitted=31",
+        "2026-11-08T18:05:15.695584Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"websocket\" phase=0 elapsed_ms=981 emitted=56",
+        "2026-11-08T18:05:16.031531Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"django_orm\" phase=1 elapsed_ms=335 emitted=0",
+        "2026-11-08T18:05:16.753683Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"graphql_resolver_link\" phase=1 elapsed_ms=498 emitted=0",
+        "2026-11-08T18:06:41.424805Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"http_client\" phase=1 elapsed_ms=84602 emitted=1877",
+        "2026-11-08T18:06:55.018896Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"orm_models\" phase=1 elapsed_ms=13594 emitted=0",
+        "2026-11-08T18:06:55.420286Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"sql\" phase=1 elapsed_ms=401 emitted=39",
+        "2026-11-08T18:06:56.002273Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"entry_point\" phase=2 elapsed_ms=581 emitted=58",
+        "2026-11-08T18:06:56.779575Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"event\" phase=2 elapsed_ms=777 emitted=351",
+        "2026-11-08T18:07:04.123650Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"field_access\" phase=2 elapsed_ms=7344 emitted=11280",
+        "2026-11-08T18:07:18.436213Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"frontend_values\" phase=2 elapsed_ms=14312 emitted=466",
+        "2026-11-08T18:07:20.485243Z  INFO lain::server::ingest::ingestion: [federation] \"/data/agents/tmp-lain-tests/nvidia-eval/NemoClaw\": fully indexed in 142.846836222s",
+        "2026-11-08T18:07:21.431025Z  INFO lain::server::federation::federated_index: [federation] \"nemo-fabric\": projected 9490 nodes",
+        "2026-11-08T18:07:21.937301Z  INFO lain::server::federation::federated_index: [federation] \"nemoclaw\": projected 52030 nodes",
+        "2026-11-08T18:07:22.328349Z  INFO lain::server::federation::federated_index: [federation] \"openshell\": projected 39518 nodes",
+        "2026-11-08T18:07:22.683237Z  INFO lain::server::federation::federated_index: [federation] \"nemo-fabric\": projected 26486 edges (intra + external + peer)",
+        "2026-11-08T18:07:24.309625Z  INFO lain::server::federation::federated_index: [federation] \"nemoclaw\": projected 152708 edges (intra + external + peer)",
+        "2026-11-08T18:07:25.775657Z  INFO lain::server::federation::federated_index: [federation] \"openshell\": projected 129673 edges (intra + external + peer)",
+        "2026-11-08T18:07:26.567688Z  INFO lain::cli::server: lain server: linked 513 cross-repo edge(s) from 'nemo-fabric'",
+        "2026-11-08T18:07:27.538308Z  INFO lain::cli::server: lain server: linked 2754 cross-repo edge(s) from 'nemoclaw'",
+        "2026-11-08T18:07:32.165501Z  INFO lain::server::federation::federated_index: [federation] anchor miner: 6543 anchors, 4954 anchor edge(s), 0 cochange, 10 commit-ref, 0 retracted, 0 crowd(s) skipped"
+      ],
+      "graph_digest": "cf7130b1dfd3826ad5eb5f6a8b2673da47549126bb88fe3705d6ecb86b9a2c47",
+      "group": "openshell"
+    },
+    {
+      "run": 1,
+      "phase": "warm",
+      "ready_s": 4.93263096397277,
+      "http_s": 4.52734099997906,
+      "tools_list_s": 4.529079415020533,
+      "peak_parent_rss_mib": 762.77734375,
+      "status": "ready",
+      "host_loadavg_start": [
+        14.9912109375,
+        21.05859375,
+        30.45361328125
+      ],
+      "last_index_status": {
+        "repos": [
+          {
+            "health": "ready",
+            "id": "nemo-fabric"
+          },
+          {
+            "health": "ready",
+            "id": "nemoclaw"
+          },
+          {
+            "health": "ready",
+            "id": "openshell"
+          }
+        ]
+      },
+      "health": {
+        "federation": {
+          "git_sensor": {
+            "alive": true,
+            "child_pid": 1357899,
+            "consecutive_failures": 0,
+            "kind": "sidecar",
+            "last_call_duration_us": 156,
+            "respawn_count": 0,
+            "respawns_in_window": 0
+          },
+          "memory_estimate_bytes": 51931600,
+          "repos": [
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 1357899,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 156,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nemo-fabric"
+            },
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 1357905,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 62,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nemoclaw"
+            },
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 1357897,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 119,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "openshell"
+            }
+          ],
+          "total_edges": 317240,
+          "total_nodes": 101038
+        },
+        "git_sensor": {
+          "alive": true,
+          "child_pid": 1357948,
+          "consecutive_failures": 0,
+          "kind": "sidecar",
+          "last_call_duration_us": 0,
+          "respawn_count": 0,
+          "respawns_in_window": 0
+        },
+        "graph_edges": 0,
+        "graph_nodes": 0,
+        "lsp_prewarm": {},
+        "server": "lain",
+        "status": "ok",
+        "tools_count": 42,
+        "version": "0.13.0"
+      },
+      "elapsed_s": 4.997058199020103,
+      "host_loadavg_end": [
+        14.03076171875,
+        20.7587890625,
+        30.30615234375
+      ],
+      "cache_hit": true,
+      "timing_log": [],
+      "graph_digest": "cf7130b1dfd3826ad5eb5f6a8b2673da47549126bb88fe3705d6ecb86b9a2c47",
+      "group": "openshell"
+    },
+    {
+      "run": 2,
+      "phase": "cold",
+      "ready_s": 187.91732551698806,
+      "http_s": 1.0089639840298332,
+      "tools_list_s": 1.0512943420326337,
+      "peak_parent_rss_mib": 2050.9765625,
+      "status": "ready",
+      "host_loadavg_start": [
+        14.03076171875,
+        20.7587890625,
+        30.30615234375
+      ],
+      "last_index_status": {
+        "repos": [
+          {
+            "health": "ready",
+            "id": "nemo-fabric"
+          },
+          {
+            "health": "ready",
+            "id": "nemoclaw"
+          },
+          {
+            "health": "ready",
+            "id": "openshell"
+          }
+        ]
+      },
+      "health": {
+        "federation": {
+          "git_sensor": {
+            "alive": true,
+            "child_pid": 1357988,
+            "consecutive_failures": 0,
+            "kind": "sidecar",
+            "last_call_duration_us": 7954,
+            "respawn_count": 0,
+            "respawns_in_window": 0
+          },
+          "memory_estimate_bytes": 51931600,
+          "repos": [
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 1357988,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 7954,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nemo-fabric"
+            },
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 1357992,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 45112,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nemoclaw"
+            },
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 1357986,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 14234,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "openshell"
+            }
+          ],
+          "total_edges": 317240,
+          "total_nodes": 101038
+        },
+        "git_sensor": {
+          "alive": true,
+          "child_pid": 1358003,
+          "consecutive_failures": 0,
+          "kind": "sidecar",
+          "last_call_duration_us": 0,
+          "respawn_count": 0,
+          "respawns_in_window": 0
+        },
+        "graph_edges": 0,
+        "graph_nodes": 0,
+        "lsp_prewarm": {},
+        "server": "lain",
+        "status": "ok",
+        "tools_count": 42,
+        "version": "0.13.0"
+      },
+      "elapsed_s": 188.03223206900293,
+      "host_loadavg_end": [
+        11.44873046875,
+        18.05517578125,
+        27.62255859375
+      ],
+      "cache_hit": false,
+      "timing_log": [
+        "2026-11-08T18:07:41.391811Z  INFO lain::server::federation::federated_index: [federation] \"nemo-fabric\": projected 0 nodes",
+        "2026-11-08T18:07:41.391839Z  INFO lain::server::federation::federated_index: [federation] \"nemoclaw\": projected 0 nodes",
+        "2026-11-08T18:07:41.391843Z  INFO lain::server::federation::federated_index: [federation] \"openshell\": projected 0 nodes",
+        "2026-11-08T18:07:41.391850Z  INFO lain::server::federation::federated_index: [federation] \"nemo-fabric\": projected 0 edges (intra + external + peer)",
+        "2026-11-08T18:07:41.391864Z  INFO lain::server::federation::federated_index: [federation] \"nemoclaw\": projected 0 edges (intra + external + peer)",
+        "2026-11-08T18:07:41.391867Z  INFO lain::server::federation::federated_index: [federation] \"openshell\": projected 0 edges (intra + external + peer)",
+        "2026-11-08T18:07:49.727344Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"dynamic_dispatch\" phase=0 elapsed_ms=1633 emitted=571",
+        "2026-11-08T18:07:51.739154Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"http\" phase=0 elapsed_ms=1776 emitted=308",
+        "2026-11-08T18:07:58.370857Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"grpc_consumer\" phase=1 elapsed_ms=6311 emitted=139",
+        "2026-11-08T18:08:01.394005Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"http_client\" phase=1 elapsed_ms=3007 emitted=12",
+        "2026-11-08T18:08:01.900106Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"orm_models\" phase=1 elapsed_ms=506 emitted=0",
+        "2026-11-08T18:08:02.918371Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"event\" phase=2 elapsed_ms=713 emitted=0",
+        "2026-11-08T18:08:03.186044Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"field_access\" phase=2 elapsed_ms=267 emitted=19",
+        "2026-11-08T18:08:03.738664Z  INFO lain::server::ingest::ingestion: [federation] \"/data/agents/tmp-lain-tests/nvidia-eval/OpenShell\": fully indexed in 21.782715168s",
+        "2026-11-08T18:08:05.791404Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"http\" phase=0 elapsed_ms=485 emitted=28",
+        "2026-11-08T18:08:06.752699Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"django_orm\" phase=1 elapsed_ms=864 emitted=0",
+        "2026-11-08T18:08:07.126415Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"grpc_consumer\" phase=1 elapsed_ms=345 emitted=0",
+        "2026-11-08T18:08:07.828827Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"http_client\" phase=1 elapsed_ms=693 emitted=119",
+        "2026-11-08T18:08:10.156997Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"orm_models\" phase=1 elapsed_ms=2328 emitted=0",
+        "2026-11-08T18:08:10.851308Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"sql\" phase=1 elapsed_ms=694 emitted=0",
+        "2026-11-08T18:08:11.335363Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"event\" phase=2 elapsed_ms=356 emitted=258",
+        "2026-11-08T18:08:11.586064Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"field_access\" phase=2 elapsed_ms=250 emitted=1143",
+        "2026-11-08T18:08:12.939953Z  INFO lain::server::ingest::ingestion: [federation] \"/data/agents/tmp-lain-tests/nvidia-eval/NeMo-Fabric\": fully indexed in 8.706149671s",
+        "2026-11-08T18:08:24.667501Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"dynamic_dispatch\" phase=0 elapsed_ms=2473 emitted=585",
+        "2026-11-08T18:08:32.410394Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"http\" phase=0 elapsed_ms=7735 emitted=31",
+        "2026-11-08T18:08:32.985308Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"websocket\" phase=0 elapsed_ms=564 emitted=56",
+        "2026-11-08T18:08:33.566891Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"graphql_resolver_link\" phase=1 elapsed_ms=266 emitted=0",
+        "2026-11-08T18:09:53.439036Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"http_client\" phase=1 elapsed_ms=79823 emitted=1877",
+        "2026-11-08T18:10:09.892657Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"orm_models\" phase=1 elapsed_ms=16453 emitted=0",
+        "2026-11-08T18:10:10.334072Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"sql\" phase=1 elapsed_ms=441 emitted=39",
+        "2026-11-08T18:10:10.636272Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"entry_point\" phase=2 elapsed_ms=302 emitted=58",
+        "2026-11-08T18:10:11.490816Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"event\" phase=2 elapsed_ms=854 emitted=351",
+        "2026-11-08T18:10:18.654693Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"field_access\" phase=2 elapsed_ms=7163 emitted=11280",
+        "2026-11-08T18:10:31.603888Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"frontend_values\" phase=2 elapsed_ms=12949 emitted=466",
+        "2026-11-08T18:10:32.689727Z  INFO lain::server::ingest::ingestion: [federation] \"/data/agents/tmp-lain-tests/nvidia-eval/NemoClaw\": fully indexed in 139.369429106s",
+        "2026-11-08T18:10:33.724531Z  INFO lain::server::federation::federated_index: [federation] \"nemo-fabric\": projected 9490 nodes",
+        "2026-11-08T18:10:34.166238Z  INFO lain::server::federation::federated_index: [federation] \"nemoclaw\": projected 52030 nodes",
+        "2026-11-08T18:10:34.574089Z  INFO lain::server::federation::federated_index: [federation] \"openshell\": projected 39518 nodes",
+        "2026-11-08T18:10:34.985621Z  INFO lain::server::federation::federated_index: [federation] \"nemo-fabric\": projected 26486 edges (intra + external + peer)",
+        "2026-11-08T18:10:36.761723Z  INFO lain::server::federation::federated_index: [federation] \"nemoclaw\": projected 152708 edges (intra + external + peer)",
+        "2026-11-08T18:10:38.672700Z  INFO lain::server::federation::federated_index: [federation] \"openshell\": projected 129673 edges (intra + external + peer)",
+        "2026-11-08T18:10:39.600519Z  INFO lain::cli::server: lain server: linked 513 cross-repo edge(s) from 'nemo-fabric'",
+        "2026-11-08T18:10:40.700078Z  INFO lain::cli::server: lain server: linked 2754 cross-repo edge(s) from 'nemoclaw'",
+        "2026-11-08T18:10:44.856603Z  INFO lain::server::federation::federated_index: [federation] anchor miner: 6543 anchors, 4954 anchor edge(s), 0 cochange, 10 commit-ref, 0 retracted, 0 crowd(s) skipped"
+      ],
+      "graph_digest": "cf7130b1dfd3826ad5eb5f6a8b2673da47549126bb88fe3705d6ecb86b9a2c47",
+      "group": "openshell"
+    },
+    {
+      "run": 2,
+      "phase": "warm",
+      "ready_s": 6.776473597972654,
+      "http_s": 5.957150319009088,
+      "tools_list_s": 5.959101218963042,
+      "peak_parent_rss_mib": 753.22265625,
+      "status": "ready",
+      "host_loadavg_start": [
+        11.44873046875,
+        18.05517578125,
+        27.62255859375
+      ],
+      "last_index_status": {
+        "repos": [
+          {
+            "health": "ready",
+            "id": "nemo-fabric"
+          },
+          {
+            "health": "ready",
+            "id": "nemoclaw"
+          },
+          {
+            "health": "ready",
+            "id": "openshell"
+          }
+        ]
+      },
+      "health": {
+        "federation": {
+          "git_sensor": {
+            "alive": true,
+            "child_pid": 1361767,
+            "consecutive_failures": 0,
+            "kind": "sidecar",
+            "last_call_duration_us": 63,
+            "respawn_count": 0,
+            "respawns_in_window": 0
+          },
+          "memory_estimate_bytes": 51931600,
+          "repos": [
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 1361767,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 63,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nemo-fabric"
+            },
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 1361772,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 129,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nemoclaw"
+            },
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 1361765,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 78,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "openshell"
+            }
+          ],
+          "total_edges": 317240,
+          "total_nodes": 101038
+        },
+        "git_sensor": {
+          "alive": true,
+          "child_pid": 1361794,
+          "consecutive_failures": 0,
+          "kind": "sidecar",
+          "last_call_duration_us": 0,
+          "respawn_count": 0,
+          "respawns_in_window": 0
+        },
+        "graph_edges": 0,
+        "graph_nodes": 0,
+        "lsp_prewarm": {},
+        "server": "lain",
+        "status": "ok",
+        "tools_count": 42,
+        "version": "0.13.0"
+      },
+      "elapsed_s": 7.004405791987665,
+      "host_loadavg_end": [
+        10.4697265625,
+        17.62548828125,
+        27.3798828125
+      ],
+      "cache_hit": true,
+      "timing_log": [],
+      "graph_digest": "cf7130b1dfd3826ad5eb5f6a8b2673da47549126bb88fe3705d6ecb86b9a2c47",
+      "group": "openshell"
+    },
+    {
+      "run": 3,
+      "phase": "cold",
+      "ready_s": 178.86255743302172,
+      "http_s": 1.6231663170037791,
+      "tools_list_s": 1.6320994220441207,
+      "peak_parent_rss_mib": 2000.8203125,
+      "status": "ready",
+      "host_loadavg_start": [
+        10.4697265625,
+        17.62548828125,
+        27.3798828125
+      ],
+      "last_index_status": {
+        "repos": [
+          {
+            "health": "ready",
+            "id": "nemo-fabric"
+          },
+          {
+            "health": "ready",
+            "id": "nemoclaw"
+          },
+          {
+            "health": "ready",
+            "id": "openshell"
+          }
+        ]
+      },
+      "health": {
+        "federation": {
+          "git_sensor": {
+            "alive": true,
+            "child_pid": 1361984,
+            "consecutive_failures": 0,
+            "kind": "sidecar",
+            "last_call_duration_us": 8064,
+            "respawn_count": 0,
+            "respawns_in_window": 0
+          },
+          "memory_estimate_bytes": 51931600,
+          "repos": [
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 1361984,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 8064,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nemo-fabric"
+            },
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 1361988,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 43534,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nemoclaw"
+            },
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 1361965,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 26851,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "openshell"
+            }
+          ],
+          "total_edges": 317240,
+          "total_nodes": 101038
+        },
+        "git_sensor": {
+          "alive": true,
+          "child_pid": 1362028,
+          "consecutive_failures": 0,
+          "kind": "sidecar",
+          "last_call_duration_us": 0,
+          "respawn_count": 0,
+          "respawns_in_window": 0
+        },
+        "graph_edges": 0,
+        "graph_nodes": 0,
+        "lsp_prewarm": {},
+        "server": "lain",
+        "status": "ok",
+        "tools_count": 42,
+        "version": "0.13.0"
+      },
+      "elapsed_s": 178.9811045959941,
+      "host_loadavg_end": [
+        12.4072265625,
+        16.12109375,
+        25.12451171875
+      ],
+      "cache_hit": false,
+      "timing_log": [
+        "2026-11-08T18:10:56.603232Z  INFO lain::server::federation::federated_index: [federation] \"nemo-fabric\": projected 0 nodes",
+        "2026-11-08T18:10:56.603265Z  INFO lain::server::federation::federated_index: [federation] \"nemoclaw\": projected 0 nodes",
+        "2026-11-08T18:10:56.603269Z  INFO lain::server::federation::federated_index: [federation] \"openshell\": projected 0 nodes",
+        "2026-11-08T18:10:56.603278Z  INFO lain::server::federation::federated_index: [federation] \"nemo-fabric\": projected 0 edges (intra + external + peer)",
+        "2026-11-08T18:10:56.603296Z  INFO lain::server::federation::federated_index: [federation] \"nemoclaw\": projected 0 edges (intra + external + peer)",
+        "2026-11-08T18:10:56.603299Z  INFO lain::server::federation::federated_index: [federation] \"openshell\": projected 0 edges (intra + external + peer)",
+        "2026-11-08T18:11:04.234172Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"dynamic_dispatch\" phase=0 elapsed_ms=942 emitted=571",
+        "2026-11-08T18:11:06.254033Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"http\" phase=0 elapsed_ms=1814 emitted=308",
+        "2026-11-08T18:11:06.763652Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"websocket\" phase=0 elapsed_ms=496 emitted=4",
+        "2026-11-08T18:11:07.052244Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"django_orm\" phase=1 elapsed_ms=288 emitted=0",
+        "2026-11-08T18:11:12.300929Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"grpc_consumer\" phase=1 elapsed_ms=5230 emitted=139",
+        "2026-11-08T18:11:13.829766Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"http_client\" phase=1 elapsed_ms=1518 emitted=12",
+        "2026-11-08T18:11:14.246939Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"orm_models\" phase=1 elapsed_ms=417 emitted=0",
+        "2026-11-08T18:11:15.220226Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"event\" phase=2 elapsed_ms=673 emitted=0",
+        "2026-11-08T18:11:15.494655Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"field_access\" phase=2 elapsed_ms=274 emitted=19",
+        "2026-11-08T18:11:16.060579Z  INFO lain::server::ingest::ingestion: [federation] \"/data/agents/tmp-lain-tests/nvidia-eval/OpenShell\": fully indexed in 18.368276012s",
+        "2026-11-08T18:11:17.599157Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"http\" phase=0 elapsed_ms=351 emitted=28",
+        "2026-11-08T18:11:18.642099Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"django_orm\" phase=1 elapsed_ms=996 emitted=0",
+        "2026-11-08T18:11:19.313958Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"grpc_consumer\" phase=1 elapsed_ms=628 emitted=0",
+        "2026-11-08T18:11:20.680146Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"http_client\" phase=1 elapsed_ms=1349 emitted=119",
+        "2026-11-08T18:11:22.940967Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"orm_models\" phase=1 elapsed_ms=2260 emitted=0",
+        "2026-11-08T18:11:23.307644Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"sql\" phase=1 elapsed_ms=366 emitted=0",
+        "2026-11-08T18:11:23.721532Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"event\" phase=2 elapsed_ms=318 emitted=258",
+        "2026-11-08T18:11:25.157858Z  INFO lain::server::ingest::ingestion: [federation] \"/data/agents/tmp-lain-tests/nvidia-eval/NeMo-Fabric\": fully indexed in 8.700346163s",
+        "2026-11-08T18:11:36.083755Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"dynamic_dispatch\" phase=0 elapsed_ms=3280 emitted=585",
+        "2026-11-08T18:11:41.779564Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"http\" phase=0 elapsed_ms=5688 emitted=31",
+        "2026-11-08T18:11:42.190626Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"websocket\" phase=0 elapsed_ms=402 emitted=56",
+        "2026-11-08T18:11:42.760335Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"graphql_resolver_link\" phase=1 elapsed_ms=253 emitted=0",
+        "2026-11-08T18:12:59.056501Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"http_client\" phase=1 elapsed_ms=76262 emitted=1877",
+        "2026-11-08T18:13:14.766598Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"orm_models\" phase=1 elapsed_ms=15710 emitted=0",
+        "2026-11-08T18:13:15.251937Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"sql\" phase=1 elapsed_ms=485 emitted=39",
+        "2026-11-08T18:13:15.509619Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"entry_point\" phase=2 elapsed_ms=257 emitted=58",
+        "2026-11-08T18:13:16.032296Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"event\" phase=2 elapsed_ms=522 emitted=351",
+        "2026-11-08T18:13:23.574402Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"field_access\" phase=2 elapsed_ms=7542 emitted=11280",
+        "2026-11-08T18:13:37.199060Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"frontend_values\" phase=2 elapsed_ms=13624 emitted=466",
+        "2026-11-08T18:13:38.781949Z  INFO lain::server::ingest::ingestion: [federation] \"/data/agents/tmp-lain-tests/nvidia-eval/NemoClaw\": fully indexed in 133.204449938s",
+        "2026-11-08T18:13:39.603500Z  INFO lain::server::federation::federated_index: [federation] \"nemo-fabric\": projected 9490 nodes",
+        "2026-11-08T18:13:40.107114Z  INFO lain::server::federation::federated_index: [federation] \"nemoclaw\": projected 52030 nodes",
+        "2026-11-08T18:13:40.602907Z  INFO lain::server::federation::federated_index: [federation] \"openshell\": projected 39518 nodes",
+        "2026-11-08T18:13:40.901397Z  INFO lain::server::federation::federated_index: [federation] \"nemo-fabric\": projected 26486 edges (intra + external + peer)",
+        "2026-11-08T18:13:42.043422Z  INFO lain::server::federation::federated_index: [federation] \"nemoclaw\": projected 152708 edges (intra + external + peer)",
+        "2026-11-08T18:13:43.672953Z  INFO lain::server::federation::federated_index: [federation] \"openshell\": projected 129673 edges (intra + external + peer)",
+        "2026-11-08T18:13:44.436412Z  INFO lain::cli::server: lain server: linked 513 cross-repo edge(s) from 'nemo-fabric'",
+        "2026-11-08T18:13:45.709416Z  INFO lain::cli::server: lain server: linked 2754 cross-repo edge(s) from 'nemoclaw'",
+        "2026-11-08T18:13:51.605956Z  INFO lain::server::federation::federated_index: [federation] anchor miner: 6543 anchors, 4954 anchor edge(s), 0 cochange, 10 commit-ref, 0 retracted, 0 crowd(s) skipped"
+      ],
+      "graph_digest": "cf7130b1dfd3826ad5eb5f6a8b2673da47549126bb88fe3705d6ecb86b9a2c47",
+      "group": "openshell"
+    },
+    {
+      "run": 3,
+      "phase": "warm",
+      "ready_s": 5.451714887982234,
+      "http_s": 4.83286137500545,
+      "tools_list_s": 4.834639546985272,
+      "peak_parent_rss_mib": 761.54296875,
+      "status": "ready",
+      "host_loadavg_start": [
+        12.4072265625,
+        16.12109375,
+        25.12451171875
+      ],
+      "last_index_status": {
+        "repos": [
+          {
+            "health": "ready",
+            "id": "nemo-fabric"
+          },
+          {
+            "health": "ready",
+            "id": "nemoclaw"
+          },
+          {
+            "health": "ready",
+            "id": "openshell"
+          }
+        ]
+      },
+      "health": {
+        "federation": {
+          "git_sensor": {
+            "alive": true,
+            "child_pid": 1364016,
+            "consecutive_failures": 0,
+            "kind": "sidecar",
+            "last_call_duration_us": 62,
+            "respawn_count": 0,
+            "respawns_in_window": 0
+          },
+          "memory_estimate_bytes": 51931600,
+          "repos": [
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 1364016,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 62,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nemo-fabric"
+            },
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 1364021,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 91,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nemoclaw"
+            },
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 1364013,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 72,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "openshell"
+            }
+          ],
+          "total_edges": 317240,
+          "total_nodes": 101038
+        },
+        "git_sensor": {
+          "alive": true,
+          "child_pid": 1364039,
+          "consecutive_failures": 0,
+          "kind": "sidecar",
+          "last_call_duration_us": 0,
+          "respawn_count": 0,
+          "respawns_in_window": 0
+        },
+        "graph_edges": 0,
+        "graph_nodes": 0,
+        "lsp_prewarm": {},
+        "server": "lain",
+        "status": "ok",
+        "tools_count": 42,
+        "version": "0.13.0"
+      },
+      "elapsed_s": 5.621533403987996,
+      "host_loadavg_end": [
+        11.65380859375,
+        15.90283203125,
+        25.00537109375
+      ],
+      "cache_hit": true,
+      "timing_log": [],
+      "graph_digest": "cf7130b1dfd3826ad5eb5f6a8b2673da47549126bb88fe3705d6ecb86b9a2c47",
+      "group": "openshell"
+    },
+    {
+      "run": 1,
+      "phase": "cold",
+      "ready_s": 23.294322607980575,
+      "http_s": 1.2315281920018606,
+      "tools_list_s": 1.2440541870309971,
+      "peak_parent_rss_mib": 611.6640625,
+      "status": "ready",
+      "host_loadavg_start": [
+        11.65380859375,
+        15.90283203125,
+        25.00537109375
+      ],
+      "last_index_status": {
+        "repos": [
+          {
+            "health": "ready",
+            "id": "nat"
+          },
+          {
+            "health": "ready",
+            "id": "nat-examples"
+          },
+          {
+            "health": "ready",
+            "id": "nat-ui"
+          }
+        ]
+      },
+      "health": {
+        "federation": {
+          "git_sensor": {
+            "alive": true,
+            "child_pid": 1364094,
+            "consecutive_failures": 0,
+            "kind": "sidecar",
+            "last_call_duration_us": 21155,
+            "respawn_count": 0,
+            "respawns_in_window": 0
+          },
+          "memory_estimate_bytes": 11792500,
+          "repos": [
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 1364094,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 21155,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nat"
+            },
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 1364099,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 1103,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nat-examples"
+            },
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 1364096,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 1007,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nat-ui"
+            }
+          ],
+          "total_edges": 67857,
+          "total_nodes": 25034
+        },
+        "git_sensor": {
+          "alive": true,
+          "child_pid": 1364110,
+          "consecutive_failures": 0,
+          "kind": "sidecar",
+          "last_call_duration_us": 18,
+          "respawn_count": 0,
+          "respawns_in_window": 0
+        },
+        "graph_edges": 0,
+        "graph_nodes": 0,
+        "lsp_prewarm": {},
+        "server": "lain",
+        "status": "ok",
+        "tools_count": 42,
+        "version": "0.13.0"
+      },
+      "elapsed_s": 23.32684141898062,
+      "host_loadavg_end": [
+        14.99462890625,
+        16.53564453125,
+        25.02734375
+      ],
+      "cache_hit": false,
+      "timing_log": [
+        "2026-11-08T18:14:01.777838Z  INFO lain::server::federation::federated_index: [federation] \"nat\": projected 0 nodes",
+        "2026-11-08T18:14:01.777857Z  INFO lain::server::federation::federated_index: [federation] \"nat-examples\": projected 0 nodes",
+        "2026-11-08T18:14:01.777861Z  INFO lain::server::federation::federated_index: [federation] \"nat-ui\": projected 0 nodes",
+        "2026-11-08T18:14:01.777868Z  INFO lain::server::federation::federated_index: [federation] \"nat\": projected 0 edges (intra + external + peer)",
+        "2026-11-08T18:14:01.777877Z  INFO lain::server::federation::federated_index: [federation] \"nat-examples\": projected 0 edges (intra + external + peer)",
+        "2026-11-08T18:14:01.777880Z  INFO lain::server::federation::federated_index: [federation] \"nat-ui\": projected 0 edges (intra + external + peer)",
+        "2026-11-08T18:14:03.395811Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"http_client\" phase=1 elapsed_ms=319 emitted=54",
+        "2026-11-08T18:14:03.879648Z  INFO lain::server::ingest::ingestion: [federation] \"/data/agents/tmp-lain-tests/nvidia-eval/NeMo-Agent-Toolkit-UI\": fully indexed in 1.984170902s",
+        "2026-11-08T18:14:06.385866Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"http\" phase=0 elapsed_ms=656 emitted=19",
+        "2026-11-08T18:14:08.978045Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"django_orm\" phase=1 elapsed_ms=2383 emitted=0",
+        "2026-11-08T18:14:09.988944Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"http_client\" phase=1 elapsed_ms=757 emitted=145",
+        "2026-11-08T18:14:16.019496Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"orm_models\" phase=1 elapsed_ms=6030 emitted=1",
+        "2026-11-08T18:14:16.321380Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"sql\" phase=1 elapsed_ms=301 emitted=2",
+        "2026-11-08T18:14:16.574255Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"entry_point\" phase=2 elapsed_ms=252 emitted=78",
+        "2026-11-08T18:14:18.945050Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"event\" phase=2 elapsed_ms=2370 emitted=2",
+        "2026-11-08T18:14:19.751139Z  INFO lain::server::ingest::ingestion: [federation] \"/data/agents/tmp-lain-tests/nvidia-eval/NeMo-Agent-Toolkit\": fully indexed in 15.757283804s",
+        "2026-11-08T18:14:20.661439Z  INFO lain::server::ingest::ingestion: [federation] \"/data/agents/tmp-lain-tests/nvidia-eval/NeMo-Agent-Toolkit-Examples\": fully indexed in 689.376493ms",
+        "2026-11-08T18:14:20.990338Z  INFO lain::server::federation::federated_index: [federation] \"nat\": projected 23297 nodes",
+        "2026-11-08T18:14:21.051951Z  INFO lain::server::federation::federated_index: [federation] \"nat-examples\": projected 925 nodes",
+        "2026-11-08T18:14:21.106645Z  INFO lain::server::federation::federated_index: [federation] \"nat-ui\": projected 812 nodes",
+        "2026-11-08T18:14:21.584179Z  INFO lain::server::federation::federated_index: [federation] \"nat\": projected 64082 edges (intra + external + peer)",
+        "2026-11-08T18:14:22.659881Z  INFO lain::server::federation::federated_index: [federation] \"nat-examples\": projected 1775 edges (intra + external + peer)",
+        "2026-11-08T18:14:22.754856Z  INFO lain::server::federation::federated_index: [federation] \"nat-ui\": projected 1592 edges (intra + external + peer)",
+        "2026-11-08T18:14:22.983848Z  INFO lain::cli::server: lain server: linked 259 cross-repo edge(s) from 'nat-examples'",
+        "2026-11-08T18:14:23.691655Z  INFO lain::server::federation::federated_index: [federation] anchor miner: 537 anchors, 144 anchor edge(s), 0 cochange, 0 commit-ref, 0 retracted, 0 crowd(s) skipped"
+      ],
+      "graph_digest": "52ed179de72387a8c4409f02519f68a00bc6027d9e1edb43c40b0e632f18d218",
+      "group": "nat"
+    },
+    {
+      "run": 1,
+      "phase": "warm",
+      "ready_s": 2.1260655709775165,
+      "http_s": 2.021325990965124,
+      "tools_list_s": 2.023148660955485,
+      "peak_parent_rss_mib": 280.23828125,
+      "status": "ready",
+      "host_loadavg_start": [
+        14.99462890625,
+        16.53564453125,
+        25.02734375
+      ],
+      "last_index_status": {
+        "repos": [
+          {
+            "health": "ready",
+            "id": "nat"
+          },
+          {
+            "health": "ready",
+            "id": "nat-examples"
+          },
+          {
+            "health": "ready",
+            "id": "nat-ui"
+          }
+        ]
+      },
+      "health": {
+        "federation": {
+          "git_sensor": {
+            "alive": true,
+            "child_pid": 1364524,
+            "consecutive_failures": 0,
+            "kind": "sidecar",
+            "last_call_duration_us": 82,
+            "respawn_count": 0,
+            "respawns_in_window": 0
+          },
+          "memory_estimate_bytes": 11792500,
+          "repos": [
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 1364524,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 82,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nat"
+            },
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 1364529,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 109,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nat-examples"
+            },
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 1364526,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 98,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nat-ui"
+            }
+          ],
+          "total_edges": 67857,
+          "total_nodes": 25034
+        },
+        "git_sensor": {
+          "alive": true,
+          "child_pid": 1364542,
+          "consecutive_failures": 0,
+          "kind": "sidecar",
+          "last_call_duration_us": 20,
+          "respawn_count": 0,
+          "respawns_in_window": 0
+        },
+        "graph_edges": 0,
+        "graph_nodes": 0,
+        "lsp_prewarm": {},
+        "server": "lain",
+        "status": "ok",
+        "tools_count": 42,
+        "version": "0.13.0"
+      },
+      "elapsed_s": 2.142138362978585,
+      "host_loadavg_end": [
+        14.27392578125,
+        16.3603515625,
+        24.9248046875
+      ],
+      "cache_hit": true,
+      "timing_log": [],
+      "graph_digest": "52ed179de72387a8c4409f02519f68a00bc6027d9e1edb43c40b0e632f18d218",
+      "group": "nat"
+    },
+    {
+      "run": 2,
+      "phase": "cold",
+      "ready_s": 21.48564373498084,
+      "http_s": 0.40344735997496173,
+      "tools_list_s": 0.405091825989075,
+      "peak_parent_rss_mib": 621.62109375,
+      "status": "ready",
+      "host_loadavg_start": [
+        14.27392578125,
+        16.3603515625,
+        24.9248046875
+      ],
+      "last_index_status": {
+        "repos": [
+          {
+            "health": "ready",
+            "id": "nat"
+          },
+          {
+            "health": "ready",
+            "id": "nat-examples"
+          },
+          {
+            "health": "ready",
+            "id": "nat-ui"
+          }
+        ]
+      },
+      "health": {
+        "federation": {
+          "git_sensor": {
+            "alive": true,
+            "child_pid": 1364578,
+            "consecutive_failures": 0,
+            "kind": "sidecar",
+            "last_call_duration_us": 21834,
+            "respawn_count": 0,
+            "respawns_in_window": 0
+          },
+          "memory_estimate_bytes": 11792500,
+          "repos": [
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 1364578,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 21834,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nat"
+            },
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 1364584,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 1645,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nat-examples"
+            },
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 1364580,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 1012,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nat-ui"
+            }
+          ],
+          "total_edges": 67857,
+          "total_nodes": 25034
+        },
+        "git_sensor": {
+          "alive": true,
+          "child_pid": 1364591,
+          "consecutive_failures": 0,
+          "kind": "sidecar",
+          "last_call_duration_us": 21,
+          "respawn_count": 0,
+          "respawns_in_window": 0
+        },
+        "graph_edges": 0,
+        "graph_nodes": 0,
+        "lsp_prewarm": {},
+        "server": "lain",
+        "status": "ok",
+        "tools_count": 42,
+        "version": "0.13.0"
+      },
+      "elapsed_s": 21.55018017999828,
+      "host_loadavg_end": [
+        15.54345703125,
+        16.56640625,
+        24.81201171875
+      ],
+      "cache_hit": false,
+      "timing_log": [
+        "2026-11-08T18:14:26.517561Z  INFO lain::server::federation::federated_index: [federation] \"nat\": projected 0 nodes",
+        "2026-11-08T18:14:26.517578Z  INFO lain::server::federation::federated_index: [federation] \"nat-examples\": projected 0 nodes",
+        "2026-11-08T18:14:26.517580Z  INFO lain::server::federation::federated_index: [federation] \"nat-ui\": projected 0 nodes",
+        "2026-11-08T18:14:26.517584Z  INFO lain::server::federation::federated_index: [federation] \"nat\": projected 0 edges (intra + external + peer)",
+        "2026-11-08T18:14:26.517591Z  INFO lain::server::federation::federated_index: [federation] \"nat-examples\": projected 0 edges (intra + external + peer)",
+        "2026-11-08T18:14:26.517593Z  INFO lain::server::federation::federated_index: [federation] \"nat-ui\": projected 0 edges (intra + external + peer)",
+        "2026-11-08T18:14:27.691833Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"http_client\" phase=1 elapsed_ms=278 emitted=54",
+        "2026-11-08T18:14:28.097324Z  INFO lain::server::ingest::ingestion: [federation] \"/data/agents/tmp-lain-tests/nvidia-eval/NeMo-Agent-Toolkit-UI\": fully indexed in 1.539758693s",
+        "2026-11-08T18:14:31.157183Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"http\" phase=0 elapsed_ms=659 emitted=19",
+        "2026-11-08T18:14:32.909532Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"django_orm\" phase=1 elapsed_ms=1639 emitted=0",
+        "2026-11-08T18:14:33.840397Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"http_client\" phase=1 elapsed_ms=672 emitted=145",
+        "2026-11-08T18:14:39.937036Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"orm_models\" phase=1 elapsed_ms=6096 emitted=1",
+        "2026-11-08T18:14:40.402712Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"sql\" phase=1 elapsed_ms=465 emitted=2",
+        "2026-11-08T18:14:40.776443Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"entry_point\" phase=2 elapsed_ms=373 emitted=78",
+        "2026-11-08T18:14:43.324154Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"event\" phase=2 elapsed_ms=2547 emitted=2",
+        "2026-11-08T18:14:44.107757Z  INFO lain::server::ingest::ingestion: [federation] \"/data/agents/tmp-lain-tests/nvidia-eval/NeMo-Agent-Toolkit\": fully indexed in 15.909566864s",
+        "2026-11-08T18:14:45.031232Z  INFO lain::server::ingest::ingestion: [federation] \"/data/agents/tmp-lain-tests/nvidia-eval/NeMo-Agent-Toolkit-Examples\": fully indexed in 643.75196ms",
+        "2026-11-08T18:14:45.243667Z  INFO lain::server::federation::federated_index: [federation] \"nat\": projected 23297 nodes",
+        "2026-11-08T18:14:45.291174Z  INFO lain::server::federation::federated_index: [federation] \"nat-examples\": projected 925 nodes",
+        "2026-11-08T18:14:45.338140Z  INFO lain::server::federation::federated_index: [federation] \"nat-ui\": projected 812 nodes",
+        "2026-11-08T18:14:45.660112Z  INFO lain::server::federation::federated_index: [federation] \"nat\": projected 64082 edges (intra + external + peer)",
+        "2026-11-08T18:14:46.321736Z  INFO lain::server::federation::federated_index: [federation] \"nat-examples\": projected 1775 edges (intra + external + peer)",
+        "2026-11-08T18:14:46.419973Z  INFO lain::server::federation::federated_index: [federation] \"nat-ui\": projected 1592 edges (intra + external + peer)",
+        "2026-11-08T18:14:46.634585Z  INFO lain::cli::server: lain server: linked 259 cross-repo edge(s) from 'nat-examples'",
+        "2026-11-08T18:14:47.344728Z  INFO lain::server::federation::federated_index: [federation] anchor miner: 537 anchors, 144 anchor edge(s), 0 cochange, 0 commit-ref, 0 retracted, 0 crowd(s) skipped"
+      ],
+      "graph_digest": "52ed179de72387a8c4409f02519f68a00bc6027d9e1edb43c40b0e632f18d218",
+      "group": "nat"
+    },
+    {
+      "run": 2,
+      "phase": "warm",
+      "ready_s": 1.408398024039343,
+      "http_s": 1.408398024039343,
+      "tools_list_s": 1.4097653020289727,
+      "peak_parent_rss_mib": 282.734375,
+      "status": "ready",
+      "host_loadavg_start": [
+        15.54345703125,
+        16.56640625,
+        24.81201171875
+      ],
+      "last_index_status": {
+        "repos": [
+          {
+            "health": "ready",
+            "id": "nat"
+          },
+          {
+            "health": "ready",
+            "id": "nat-examples"
+          },
+          {
+            "health": "ready",
+            "id": "nat-ui"
+          }
+        ]
+      },
+      "health": {
+        "federation": {
+          "git_sensor": {
+            "alive": true,
+            "child_pid": 1365009,
+            "consecutive_failures": 0,
+            "kind": "sidecar",
+            "last_call_duration_us": 236,
+            "respawn_count": 0,
+            "respawns_in_window": 0
+          },
+          "memory_estimate_bytes": 11792500,
+          "repos": [
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 1365009,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 236,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nat"
+            },
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 1365014,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 151,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nat-examples"
+            },
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 1365011,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 152,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nat-ui"
+            }
+          ],
+          "total_edges": 67857,
+          "total_nodes": 25034
+        },
+        "git_sensor": {
+          "alive": true,
+          "child_pid": 1365026,
+          "consecutive_failures": 0,
+          "kind": "sidecar",
+          "last_call_duration_us": 0,
+          "respawn_count": 0,
+          "respawns_in_window": 0
+        },
+        "graph_edges": 0,
+        "graph_nodes": 0,
+        "lsp_prewarm": {},
+        "server": "lain",
+        "status": "ok",
+        "tools_count": 42,
+        "version": "0.13.0"
+      },
+      "elapsed_s": 1.441770698002074,
+      "host_loadavg_end": [
+        14.77880859375,
+        16.390625,
+        24.7109375
+      ],
+      "cache_hit": true,
+      "timing_log": [],
+      "graph_digest": "52ed179de72387a8c4409f02519f68a00bc6027d9e1edb43c40b0e632f18d218",
+      "group": "nat"
+    },
+    {
+      "run": 3,
+      "phase": "cold",
+      "ready_s": 22.887048151984345,
+      "http_s": 0.40424151899060234,
+      "tools_list_s": 0.4110014559701085,
+      "peak_parent_rss_mib": 609.375,
+      "status": "ready",
+      "host_loadavg_start": [
+        14.77880859375,
+        16.390625,
+        24.7109375
+      ],
+      "last_index_status": {
+        "repos": [
+          {
+            "health": "ready",
+            "id": "nat"
+          },
+          {
+            "health": "ready",
+            "id": "nat-examples"
+          },
+          {
+            "health": "ready",
+            "id": "nat-ui"
+          }
+        ]
+      },
+      "health": {
+        "federation": {
+          "git_sensor": {
+            "alive": true,
+            "child_pid": 1365064,
+            "consecutive_failures": 0,
+            "kind": "sidecar",
+            "last_call_duration_us": 21987,
+            "respawn_count": 0,
+            "respawns_in_window": 0
+          },
+          "memory_estimate_bytes": 11792500,
+          "repos": [
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 1365064,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 21987,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nat"
+            },
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 1365069,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 2091,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nat-examples"
+            },
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 1365066,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 4749,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nat-ui"
+            }
+          ],
+          "total_edges": 67857,
+          "total_nodes": 25034
+        },
+        "git_sensor": {
+          "alive": true,
+          "child_pid": 1365077,
+          "consecutive_failures": 0,
+          "kind": "sidecar",
+          "last_call_duration_us": 0,
+          "respawn_count": 0,
+          "respawns_in_window": 0
+        },
+        "graph_edges": 0,
+        "graph_nodes": 0,
+        "lsp_prewarm": {},
+        "server": "lain",
+        "status": "ok",
+        "tools_count": 42,
+        "version": "0.13.0"
+      },
+      "elapsed_s": 23.059445812017657,
+      "host_loadavg_end": [
+        13.02783203125,
+        15.91845703125,
+        24.38037109375
+      ],
+      "cache_hit": false,
+      "timing_log": [
+        "2026-11-08T18:14:49.482341Z  INFO lain::server::federation::federated_index: [federation] \"nat\": projected 0 nodes",
+        "2026-11-08T18:14:49.482364Z  INFO lain::server::federation::federated_index: [federation] \"nat-examples\": projected 0 nodes",
+        "2026-11-08T18:14:49.482367Z  INFO lain::server::federation::federated_index: [federation] \"nat-ui\": projected 0 nodes",
+        "2026-11-08T18:14:49.482375Z  INFO lain::server::federation::federated_index: [federation] \"nat\": projected 0 edges (intra + external + peer)",
+        "2026-11-08T18:14:49.482386Z  INFO lain::server::federation::federated_index: [federation] \"nat-examples\": projected 0 edges (intra + external + peer)",
+        "2026-11-08T18:14:49.482388Z  INFO lain::server::federation::federated_index: [federation] \"nat-ui\": projected 0 edges (intra + external + peer)",
+        "2026-11-08T18:14:50.498894Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"http_client\" phase=1 elapsed_ms=284 emitted=54",
+        "2026-11-08T18:14:50.940175Z  INFO lain::server::ingest::ingestion: [federation] \"/data/agents/tmp-lain-tests/nvidia-eval/NeMo-Agent-Toolkit-UI\": fully indexed in 1.417105922s",
+        "2026-11-08T18:14:53.842818Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"dynamic_dispatch\" phase=0 elapsed_ms=356 emitted=53",
+        "2026-11-08T18:14:55.161038Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"http\" phase=0 elapsed_ms=1309 emitted=19",
+        "2026-11-08T18:14:57.071093Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"django_orm\" phase=1 elapsed_ms=1747 emitted=0",
+        "2026-11-08T18:14:58.062436Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"http_client\" phase=1 elapsed_ms=728 emitted=145",
+        "2026-11-08T18:15:04.257703Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"orm_models\" phase=1 elapsed_ms=6195 emitted=1",
+        "2026-11-08T18:15:04.768450Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"entry_point\" phase=2 elapsed_ms=263 emitted=78",
+        "2026-11-08T18:15:07.553589Z  INFO lain::server::sensors: sensor finished (slow) sensor=\"event\" phase=2 elapsed_ms=2785 emitted=2",
+        "2026-11-08T18:15:08.357733Z  INFO lain::server::ingest::ingestion: [federation] \"/data/agents/tmp-lain-tests/nvidia-eval/NeMo-Agent-Toolkit\": fully indexed in 17.312234978s",
+        "2026-11-08T18:15:09.270314Z  INFO lain::server::ingest::ingestion: [federation] \"/data/agents/tmp-lain-tests/nvidia-eval/NeMo-Agent-Toolkit-Examples\": fully indexed in 688.514086ms",
+        "2026-11-08T18:15:09.495615Z  INFO lain::server::federation::federated_index: [federation] \"nat\": projected 23297 nodes",
+        "2026-11-08T18:15:09.535425Z  INFO lain::server::federation::federated_index: [federation] \"nat-examples\": projected 925 nodes",
+        "2026-11-08T18:15:09.568697Z  INFO lain::server::federation::federated_index: [federation] \"nat-ui\": projected 812 nodes",
+        "2026-11-08T18:15:09.903458Z  INFO lain::server::federation::federated_index: [federation] \"nat\": projected 64082 edges (intra + external + peer)",
+        "2026-11-08T18:15:10.609496Z  INFO lain::server::federation::federated_index: [federation] \"nat-examples\": projected 1775 edges (intra + external + peer)",
+        "2026-11-08T18:15:10.704088Z  INFO lain::server::federation::federated_index: [federation] \"nat-ui\": projected 1592 edges (intra + external + peer)",
+        "2026-11-08T18:15:10.920399Z  INFO lain::cli::server: lain server: linked 259 cross-repo edge(s) from 'nat-examples'",
+        "2026-11-08T18:15:11.647445Z  INFO lain::server::federation::federated_index: [federation] anchor miner: 537 anchors, 144 anchor edge(s), 0 cochange, 0 commit-ref, 0 retracted, 0 crowd(s) skipped"
+      ],
+      "graph_digest": "52ed179de72387a8c4409f02519f68a00bc6027d9e1edb43c40b0e632f18d218",
+      "group": "nat"
+    },
+    {
+      "run": 3,
+      "phase": "warm",
+      "ready_s": 1.931836318981368,
+      "http_s": 1.931836318981368,
+      "tools_list_s": 1.9331064730067737,
+      "peak_parent_rss_mib": 281.640625,
+      "status": "ready",
+      "host_loadavg_start": [
+        13.02783203125,
+        15.91845703125,
+        24.38037109375
+      ],
+      "last_index_status": {
+        "repos": [
+          {
+            "health": "ready",
+            "id": "nat"
+          },
+          {
+            "health": "ready",
+            "id": "nat-examples"
+          },
+          {
+            "health": "ready",
+            "id": "nat-ui"
+          }
+        ]
+      },
+      "health": {
+        "federation": {
+          "git_sensor": {
+            "alive": true,
+            "child_pid": 1365533,
+            "consecutive_failures": 0,
+            "kind": "sidecar",
+            "last_call_duration_us": 68,
+            "respawn_count": 0,
+            "respawns_in_window": 0
+          },
+          "memory_estimate_bytes": 11792500,
+          "repos": [
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 1365533,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 68,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nat"
+            },
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 1365538,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 217,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nat-examples"
+            },
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 1365535,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 154,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nat-ui"
+            }
+          ],
+          "total_edges": 67857,
+          "total_nodes": 25034
+        },
+        "git_sensor": {
+          "alive": true,
+          "child_pid": 1365550,
+          "consecutive_failures": 0,
+          "kind": "sidecar",
+          "last_call_duration_us": 0,
+          "respawn_count": 0,
+          "respawns_in_window": 0
+        },
+        "graph_edges": 0,
+        "graph_nodes": 0,
+        "lsp_prewarm": {},
+        "server": "lain",
+        "status": "ok",
+        "tools_count": 42,
+        "version": "0.13.0"
+      },
+      "elapsed_s": 1.9652880540234037,
+      "host_loadavg_end": [
+        12.384765625,
+        15.73681640625,
+        24.27587890625
+      ],
+      "cache_hit": true,
+      "timing_log": [],
+      "graph_digest": "52ed179de72387a8c4409f02519f68a00bc6027d9e1edb43c40b0e632f18d218",
+      "group": "nat"
+    }
+  ],
+  "summary": {
+    "openshell/cold": {
+      "n": 3,
+      "median_s": 187.91732551698806,
+      "min_s": 178.86255743302172,
+      "max_s": 193.4200548810186
+    },
+    "openshell/warm": {
+      "n": 3,
+      "median_s": 5.451714887982234,
+      "min_s": 4.93263096397277,
+      "max_s": 6.776473597972654
+    },
+    "nat/cold": {
+      "n": 3,
+      "median_s": 22.887048151984345,
+      "min_s": 21.48564373498084,
+      "max_s": 23.294322607980575
+    },
+    "nat/warm": {
+      "n": 3,
+      "median_s": 1.931836318981368,
+      "min_s": 1.408398024039343,
+      "max_s": 2.1260655709775165
+    }
+  },
+  "notes": [
+    "cold = fresh Lain data directory; OS page cache is not flushed",
+    "warm = restart using the preceding cold run's data directory",
+    "RSS samples cover the server parent only, at roughly 100ms plus probe latency",
+    "Readiness requires the exact repo roster ready after cross-repo linking"
+  ],
+  "source_commit": "e5087e4ca96bb987265b7e4ce5266f4cfb4c574f",
+  "started_utc": "2026-11-08T18:04:22Z",
+  "graph_digests_stable": {
+    "openshell": true,
+    "nat": true
+  }
+}

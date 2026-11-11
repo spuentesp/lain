@@ -40,6 +40,8 @@
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
@@ -451,6 +453,21 @@ fn two_clients_same_set_share_one_daemon() {
     // itself, so A + B + probe = 3: the old `>= 2` bound also held with
     // client B privately serving (A's bridge + this probe alone).
     let info = daemon_info(&sock);
+    assert_eq!(
+        info.pointer("/result/version")
+            .and_then(serde_json::Value::as_str),
+        Some(lain::server::build_info::VERSION)
+    );
+    assert_eq!(
+        info.pointer("/result/build_commit")
+            .and_then(serde_json::Value::as_str),
+        Some(lain::server::build_info::GIT_SHA)
+    );
+    assert_eq!(
+        info.pointer("/result/index_build_id")
+            .and_then(serde_json::Value::as_str),
+        Some(lain::server::build_info::INDEX_BUILD_ID)
+    );
     let open = info
         .pointer("/result/open_connections")
         .and_then(|v| v.as_u64())
@@ -1017,4 +1034,113 @@ fn no_share_client_serves_privately() {
     }
 
     iso.reap_daemons();
+}
+
+// ---------------------------------------------------------------------------
+// 7. incompatible_daemon_is_not_attached
+// ---------------------------------------------------------------------------
+
+/// A fake daemon behind a candidate-shaped socket: it answers
+/// `lain/daemon_info` with a STALE identity (`build_commit` and
+/// `index_build_id` from another build) and runs no indexer at all.
+///
+/// The probe loop runs until `stop` is set — the client has exited by
+/// then — so the fake can neither outlive nor hang the test, whatever
+/// number of probes the client decides to send.
+fn spawn_stale_info(
+    socket: &Path,
+    workspace: &Path,
+    stop: Arc<AtomicBool>,
+) -> std::thread::JoinHandle<()> {
+    use std::os::unix::net::UnixListener;
+    let listener = UnixListener::bind(socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let workspace = workspace.canonicalize().unwrap().display().to_string();
+    std::thread::spawn(move || {
+        while !stop.load(Ordering::SeqCst) {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    // A connection that carries no request (the bridge
+                    // connect) must not pin the fake forever.
+                    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                    let mut writer = stream.try_clone().unwrap();
+                    let mut reader = BufReader::new(stream);
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                        continue;
+                    }
+                    let Ok(request) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+                        continue;
+                    };
+                    let response = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": request["id"],
+                        "result": {
+                            "pid": 999,
+                            "version": lain::server::build_info::VERSION,
+                            "build_commit": "stale",
+                            "index_build_id": "stale",
+                            "workspaces": [workspace.clone()],
+                            "open_connections": 0,
+                            "shared": true,
+                        }
+                    });
+                    // The client hangs up as soon as it has its answer:
+                    // a broken pipe here is normal, not a failure.
+                    let _ = writeln!(writer, "{response}");
+                    let _ = writer.flush();
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(e) => panic!("fake daemon accept failed: {e}"),
+            }
+        }
+    })
+}
+
+/// A shared daemon whose build identity differs from the client's must
+/// NOT be bridged to. The client fails with an actionable error naming
+/// the socket and both identities, and it starts no competing indexer
+/// beside the stale daemon.
+#[test]
+fn incompatible_daemon_is_not_attached() {
+    let iso = Isolation::new();
+    let (_ws_tmp, workspace) = make_repo("stale");
+    std::fs::create_dir_all(iso.socket_dir()).unwrap();
+    let socket = iso.socket_dir().join("lain-mcp-0123456789abcdef.sock");
+    let stop = Arc::new(AtomicBool::new(false));
+    let fake = spawn_stale_info(&socket, &workspace, Arc::clone(&stop));
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lain"));
+    let child = child
+        .arg("mcp")
+        .arg("--workspace")
+        .arg(&workspace)
+        .env("XDG_RUNTIME_DIR", &iso.run)
+        .env("HOME", iso.home.path())
+        .env("XDG_STATE_HOME", iso.home.path().join("state"))
+        .env("XDG_CONFIG_HOME", iso.home.path().join("config"))
+        .env_remove("LAIN_WORKSPACE")
+        .env_remove("LAIN_MCP_NO_SHARE")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    stop.store(true, Ordering::SeqCst);
+    fake.join().unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("incompatible shared daemon"), "{stderr}");
+    assert!(stderr.contains("stale"), "{stderr}");
+    assert!(stderr.contains("--no-share"), "{stderr}");
+    // No competing indexer: the stale daemon is the only socket in the
+    // run dir — the client started nothing beside it.
+    assert_eq!(
+        iso.sockets(),
+        vec![socket.clone()],
+        "the client must not start a daemon beside the stale one"
+    );
 }

@@ -1,0 +1,63 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": [
+    "target",
+    "sites",
+    "count",
+    "ambiguous"
+  ],
+  "properties": {
+    "target": {
+      "type": "object"
+    },
+    "sites": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "caller",
+          "lines",
+          "exact"
+        ],
+        "properties": {
+          "caller": {
+            "type": "object"
+          },
+          "lines": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "exact": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "ambiguous": {
+      "type": "boolean"
+    },
+    "answer_scope": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        null,
+        "unresolved_name",
+        "ambiguous_target",
+        "dynamic_target",
+        "stale_or_unindexed",
+        "truncated"
+      ],
+      "description": "Why the answer cannot be read as complete, or null when it can. A null on an empty result is a confirmed absence (the index is current and nothing calls it)."
+    }
+  }
+}

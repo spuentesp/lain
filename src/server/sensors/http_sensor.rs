@@ -580,15 +580,27 @@ fn try_treesitter_extract(
     let mut path_idx: Option<u32> = None;
     let mut verb_idx: Option<u32> = None;
     let mut handler_idx: Option<u32> = None;
+    let mut site_idx: Option<u32> = None;
     for (i, name) in query.capture_names().iter().enumerate() {
         match *name {
             "path" => path_idx = Some(i as u32),
             "verb" => verb_idx = Some(i as u32),
             "handler" => handler_idx = Some(i as u32),
+            "route_site" => site_idx = Some(i as u32),
             _ => {}
         }
     }
 
+    // A query can collect keyword arguments in separate matches, grouped by
+    // an explicit @route_site boundary. Source ranges keep ordering stable
+    // and prevent nested registrations from donating arguments to each other.
+    #[derive(Default)]
+    struct GroupedRoute {
+        paths: std::collections::BTreeSet<(String, u32)>,
+        handlers: std::collections::BTreeSet<String>,
+        verbs: std::collections::BTreeSet<String>,
+    }
+    let mut grouped: BTreeMap<(usize, usize), GroupedRoute> = BTreeMap::new();
     while let Some(m) = matches.next() {
         let path_text = path_idx
             .and_then(|i| m.nodes_for_capture_index(i).next())
@@ -599,6 +611,25 @@ fn try_treesitter_extract(
         let handler_text = handler_idx
             .and_then(|i| m.nodes_for_capture_index(i).next())
             .and_then(|n| text_for_node(n, content));
+        let line = path_idx
+            .and_then(|i| m.nodes_for_capture_index(i).next())
+            .map(|n| n.start_position().row as u32 + 1)
+            .unwrap_or(1);
+        if let Some(site) = site_idx.and_then(|i| m.nodes_for_capture_index(i).next()) {
+            let group = grouped
+                .entry((site.start_byte(), site.end_byte()))
+                .or_default();
+            if let Some(text) = path_text {
+                group.paths.insert((strip_quotes(text), line));
+            }
+            if let Some(text) = handler_text {
+                group.handlers.insert(text.to_owned());
+            }
+            if let Some(text) = verb_text {
+                group.verbs.insert(text.to_uppercase());
+            }
+            continue;
+        }
         let (Some(path_text), Some(handler_text)) = (path_text, handler_text) else {
             continue;
         };
@@ -606,11 +637,6 @@ fn try_treesitter_extract(
         let method = verb_text
             .map(|v| HttpMethod::parse(&v.to_uppercase()).unwrap_or(HttpMethod::Any))
             .unwrap_or(HttpMethod::Any);
-
-        let line = path_idx
-            .and_then(|i| m.nodes_for_capture_index(i).next())
-            .map(|n| n.start_position().row as u32 + 1)
-            .unwrap_or(1);
 
         let (method, route_path) = split_method_prefix(method, strip_quotes(path_text));
         routes.push(HttpRoute {
@@ -620,6 +646,27 @@ fn try_treesitter_extract(
             handler_name: handler_text.to_string(),
             line,
         });
+    }
+
+    for group in grouped.into_values() {
+        // An ambiguous or incomplete registration is not a route claim.
+        if group.paths.len() != 1 || group.handlers.len() != 1 {
+            continue;
+        }
+        let (route_path, line) = group.paths.into_iter().next().unwrap();
+        let handler = group.handlers.into_iter().next().unwrap();
+        for verb in group.verbs {
+            let Some(method) = HttpMethod::parse(&verb) else {
+                continue;
+            };
+            routes.push(HttpRoute {
+                method,
+                path: route_path.clone(),
+                handler_path: path.to_string_lossy().into_owned(),
+                handler_name: handler.clone(),
+                line,
+            });
+        }
     }
 
     Some(routes)
@@ -1516,6 +1563,80 @@ async def list_orders():
             "APIRouter prefix must be prepended: got {:?}",
             r[0].path
         );
+    }
+
+    #[test]
+    fn fastapi_keyword_registrations_preserve_paths_methods_and_handlers() {
+        let source = r#"
+app.add_api_route(
+    path="/mcp/client/tool/list",
+    endpoint=get_mcp_clients,
+    methods=["GET"],
+)
+app.add_api_route(endpoint=per_user, methods=["GET", "POST"], path="/mcp/client/tool/list/per_user")
+"#;
+        let routes = scan_file_for_routes(
+            std::path::Path::new("routes.py"),
+            source,
+            Patterns::patterns(),
+        );
+        let observed: std::collections::BTreeSet<_> = routes
+            .iter()
+            .map(|r| {
+                (
+                    method_to_str(r.method),
+                    r.path.as_str(),
+                    r.handler_name.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            observed,
+            std::collections::BTreeSet::from([
+                ("GET", "/mcp/client/tool/list", "get_mcp_clients"),
+                ("GET", "/mcp/client/tool/list/per_user", "per_user"),
+                ("POST", "/mcp/client/tool/list/per_user", "per_user"),
+            ])
+        );
+    }
+
+    #[test]
+    fn incomplete_fastapi_registrations_do_not_borrow_other_calls_arguments() {
+        let source = r#"
+app.add_api_route(path="/first", endpoint=first, methods=["GET"])
+app.add_api_route(path="/dynamic-method", endpoint=second, methods=methods)
+app.add_api_route(path=path, endpoint=third, methods=["POST"])
+app.add_api_route(path="/missing-handler", methods=["PUT"])
+"#;
+        let routes = scan_file_for_routes(
+            std::path::Path::new("routes.py"),
+            source,
+            Patterns::patterns(),
+        );
+        assert_eq!(routes.len(), 1, "{routes:?}");
+        assert_eq!(routes[0].path, "/first");
+        assert_eq!(routes[0].method, HttpMethod::Get);
+        assert_eq!(routes[0].handler_name, "first");
+    }
+
+    #[test]
+    fn formatted_or_escaped_python_paths_do_not_emit_literal_fragments() {
+        let source = r#"
+app.add_api_route(path=f"{prefix}/jobs", endpoint=jobs, methods=["GET"])
+app.add_api_route(path=f"{prefix}/job/{{job_id}}", endpoint=job, methods=["GET"])
+app.add_api_route(path=f"/job/{{job_id}}", endpoint=job, methods=["GET"])
+app.add_api_route(path="/escaped\u002fpath", endpoint=escaped, methods=["GET"])
+app.add_api_route(path=r"/raw/path", endpoint=raw, methods=["GET"])
+app.add_api_route(path="/literal/{id}", endpoint=literal, methods=["GET"])
+"#;
+        let routes = scan_file_for_routes(
+            std::path::Path::new("routes.py"),
+            source,
+            Patterns::patterns(),
+        );
+        assert_eq!(routes.len(), 1, "{routes:?}");
+        assert_eq!(routes[0].path, "/literal/{id}");
+        assert_eq!(routes[0].handler_name, "literal");
     }
 
     #[test]

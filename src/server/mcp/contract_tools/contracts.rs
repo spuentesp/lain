@@ -377,17 +377,7 @@ async fn run_get_contract(
             }
         }
         let consumers = collect_consumers_for_endpoint(&view, endpoint_id);
-        let providers: Vec<Value> = endpoint
-            .providers
-            .iter()
-            .map(|p| {
-                evidence_ref(
-                    &p.node_id,
-                    &p.node_id.path().unwrap_or_default(),
-                    p.node_id.line_start().unwrap_or(0),
-                )
-            })
-            .collect();
+        let providers: Vec<Value> = endpoint.providers.iter().map(provider_evidence).collect();
         items.push(json!({
             "endpoint": {"service": endpoint_id.0 .0, "key": endpoint_id.1.to_string()},
             "providers": providers,
@@ -457,7 +447,9 @@ async fn run_list_unresolved(
                 continue;
             }
         }
-        let candidates = candidate_endpoints_for(&view, call_id, resolution);
+        let backend = resolved.backend();
+        let fact_keys = consumer_fact_keys(backend.as_ref(), call_id);
+        let candidates = candidate_endpoints_for_keys(&view, call_id, resolution, &fact_keys);
         let mut item = json!({
             "consumer": evidence_ref_from_call(call_id),
             "url_expr": url_expr_for(call_id),
@@ -468,6 +460,22 @@ async fn run_list_unresolved(
             "target_service": target_service.as_ref().map(|s| s.0.clone()),
             "candidates": candidates,
         });
+        if let Ok(Some(node)) = backend.get_node(call_id.as_str()) {
+            for fact in &node.contract {
+                if let crate::federation::contracts::model::ContractFact::Consumer(call) = fact {
+                    item["url_expr"] = json!(call.url_expr);
+                    item["template"] = json!(call.url.template);
+                    item["host"] = json!(match &call.url.host {
+                        crate::federation::contracts::model::HostPart::Literal(host)
+                        | crate::federation::contracts::model::HostPart::Expr(host) =>
+                            Some(host.clone()),
+                        crate::federation::contracts::model::HostPart::Env(names) =>
+                            Some(format!("env:{}", names.join(","))),
+                        crate::federation::contracts::model::HostPart::None => None,
+                    });
+                }
+            }
+        }
         if let Some(detail) = view.rust_rpcs.get(call_id) {
             item["rpc"] = json!(detail);
             item["consumer"]["commit"] = json!(resolved
@@ -1064,6 +1072,22 @@ fn evidence_ref(id: &GlobalId, path: &str, line: u32) -> Value {
     })
 }
 
+fn provider_evidence(provider: &crate::federation::contracts::index::EndpointProvider) -> Value {
+    let mut value = evidence_ref(
+        &provider.node_id,
+        &provider.node_id.path().unwrap_or_default(),
+        provider.node_id.line_start().unwrap_or(0),
+    );
+    if let Some(handler) = provider.handler.as_ref() {
+        value["handlers"] = json!([{
+            "repo": provider.node_id.repo_id(),
+            "file": handler.path,
+            "symbol": handler.name,
+        }]);
+    }
+    value
+}
+
 fn evidence_ref_from_call(call_id: &GlobalId) -> Value {
     json!({
         "id": call_id.as_str(),
@@ -1116,7 +1140,13 @@ pub(crate) fn unresolved_reason_label(r: UnresolvedReason) -> &'static str {
         // Joinder verdict (Phase A review §S1 — unified model).
         NoRouteInService => "no_route_in_service",
         NoMatch => "no_match",
-        Unnormalized => "no_route_in_service",
+        // A dynamic path is its own reason: the target is chosen at
+        // runtime, so "no route in service" would claim the service was
+        // checked and had no such route — which is not what happened.
+        // The NAT audit recorded exactly this confusion (sites moving
+        // between `no_match` and `no_route_in_service` for a path that
+        // was never static).
+        Unnormalized => "dynamic_target",
         WrapperUnconfigured => "wrapper_unconfigured",
         EnvUnmapped => "env_unmapped",
         EnvAmbiguous => "env_ambiguous",
@@ -1132,6 +1162,7 @@ pub(crate) fn unresolved_reason_label(r: UnresolvedReason) -> &'static str {
         DynamicSql => "dynamic_sql",
         OrmDynamicQuery => "orm_dynamic_query",
         ExternalSchemaRef => "external_schema_ref",
+        FrontendValueUnclassified => "frontend_value_unclassified",
     }
 }
 
@@ -1192,10 +1223,20 @@ fn provenance_to_json(p: &EdgeProvenance) -> Value {
     out
 }
 
+#[cfg(test)]
 fn candidate_endpoints_for(
     view: &ContractIndex,
     call_id: &GlobalId,
     resolution: &ConsumerResolution,
+) -> Vec<Value> {
+    candidate_endpoints_for_keys(view, call_id, resolution, &[])
+}
+
+fn candidate_endpoints_for_keys(
+    view: &ContractIndex,
+    call_id: &GlobalId,
+    resolution: &ConsumerResolution,
+    fact_keys: &[ContractKey],
 ) -> Vec<Value> {
     // §9.7 gating: a `target_service` the resolver named (HTTP
     // `no_route_in_service`, GraphQL `route_owner`) means the
@@ -1210,6 +1251,25 @@ fn candidate_endpoints_for(
         Some(ts) => &ep_id.0 == ts,
         None => true,
     };
+    // Fact-keyed protocols must never fall through to the HTTP wildcard
+    // suggestions. Prefix fallback supports legacy WebSocket call-site IDs.
+    let websocket = call_id
+        .name()
+        .is_some_and(|n| n.starts_with(crate::server::sensors::util::WS_CLIENT_PREFIX));
+    if websocket
+        || fact_keys.iter().any(|k| {
+            matches!(
+                k,
+                ContractKey::WebSocket { .. }
+                    | ContractKey::Topic { .. }
+                    | ContractKey::Table { .. }
+            )
+        })
+    {
+        return view.endpoints.keys().filter(|id| in_target(id) && (
+            (websocket && matches!(id.1, ContractKey::WebSocket { .. })) || fact_keys.iter().any(|k| std::mem::discriminant(k) == std::mem::discriminant(&id.1))
+        )).map(|id| json!({"endpoint": {"service": id.0.0, "key": id.1.to_string()}, "reason": if fact_keys.contains(&id.1) {"same_key"} else {"pattern"}})).collect();
+    }
     if let Some(detail) = view.rust_rpcs.get(call_id) {
         return rust_rpc_candidates(view, detail);
     }
@@ -1499,6 +1559,33 @@ mod tests {
     use crate::federation::repo_id::RepoId;
 
     #[test]
+    fn get_contract_provider_includes_its_handler_identity() {
+        let provider = crate::federation::contracts::index::EndpointProvider {
+            node_id: GlobalId::new(
+                &RepoId::new("orders").unwrap(),
+                crate::schema::NodeType::HttpRoute,
+                "src/orders/label.rs",
+                "GET /api/orders/{}/label",
+                Some(3),
+            ),
+            origin: crate::federation::contracts::model::ProviderOrigin::Code,
+            handler: Some(crate::federation::contracts::model::SymbolKey {
+                repo: RepoId::new("http-sensor").unwrap(),
+                path: "src/orders/label.rs".into(),
+                container: None,
+                name: "get_order_label".into(),
+            }),
+            operation_id: None,
+        };
+        let value = provider_evidence(&provider);
+        assert_eq!(value["repo"], "orders");
+        assert_eq!(value["handlers"].as_array().map(Vec::len), Some(1));
+        assert_eq!(value["handlers"][0]["repo"], "orders");
+        assert_eq!(value["handlers"][0]["file"], "src/orders/label.rs");
+        assert_eq!(value["handlers"][0]["symbol"], "get_order_label");
+    }
+
+    #[test]
     fn parse_consumer_call_shape_extracts_method_and_template() {
         let id = GlobalId::new(
             &RepoId::new("orders").unwrap(),
@@ -1545,7 +1632,7 @@ mod tests {
         );
         assert_eq!(
             unresolved_reason_label(UnresolvedReason::Unnormalized),
-            "no_route_in_service"
+            "dynamic_target"
         );
         assert_eq!(
             unresolved_reason_label(UnresolvedReason::WrapperUnconfigured),
@@ -1740,6 +1827,49 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    #[test]
+    fn fact_keyed_protocol_candidates_never_suggest_http() {
+        let mut view = ContractIndex::default();
+        insert_ep(&mut view, "backend", http_key(HttpMethod::Get, "/chat"));
+        let protocols = [
+            ContractKey::WebSocket {
+                route: "/chat".into(),
+            },
+            ContractKey::Topic {
+                broker: "kafka".into(),
+                name: "events".into(),
+            },
+            ContractKey::Table {
+                name: "objects".into(),
+            },
+        ];
+        for key in &protocols {
+            insert_ep(&mut view, "backend", key.clone());
+        }
+        let id = call_id("ui", "opaque-consumer");
+        let resolution = ConsumerResolution {
+            call_id: id.clone(),
+            service: ServiceName("ui".into()),
+            target: Some(ConsumerTarget::Unresolved {
+                reason: UnresolvedReason::NoMatch,
+                target_service: None,
+            }),
+            bound_endpoints: vec![],
+            reads_complete: true,
+        };
+        for key in &protocols {
+            let got =
+                candidate_endpoints_for_keys(&view, &id, &resolution, std::slice::from_ref(key));
+            assert_eq!(got.len(), 1);
+            assert_eq!(got[0]["endpoint"]["key"], key.to_string());
+            assert_eq!(got[0]["reason"], "same_key");
+        }
+        let ws = call_id("ui", "ws:client:ws://localhost/chat");
+        let got = candidate_triples(&view, &ws);
+        assert_eq!(got.len(), 1);
+        assert!(got[0].1.starts_with("websocket:"));
     }
 
     /// A `graphql-call:{op}:{field}` consumer must see the GraphQL

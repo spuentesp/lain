@@ -28,6 +28,10 @@
         "limit": {
           "type": "integer"
         },
+        "snapshot": {
+          "description": "Named snapshot id, or 'live' for the current graph",
+          "type": "string"
+        },
         "symbol": {
           "type": "string"
         }
@@ -37,7 +41,100 @@
       ],
       "type": "object"
     },
-    "name": "assess_change"
+    "name": "assess_change",
+    "outputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "answer_scope": {
+          "description": "Why the answer cannot be read as complete, or null when it can. A null on an empty result is a confirmed absence (the index is current and nothing calls it).",
+          "enum": [
+            null,
+            "unresolved_name",
+            "ambiguous_target",
+            "dynamic_target",
+            "stale_or_unindexed",
+            "truncated"
+          ],
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "co_change_partners": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "counts": {
+          "properties": {
+            "direct": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "heuristic": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "transitive": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "direct",
+            "transitive"
+          ],
+          "type": "object"
+        },
+        "direct_dependents": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "heuristic_dependents": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "risk": {
+          "enum": [
+            "low",
+            "low* — heuristic-only (see ~ N heuristic caller(s) below)",
+            "medium",
+            "high"
+          ],
+          "type": "string"
+        },
+        "target": {
+          "type": "object"
+        },
+        "transitive_dependents": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "untested_dependents": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "target",
+        "risk",
+        "direct_dependents",
+        "transitive_dependents",
+        "untested_dependents",
+        "co_change_partners",
+        "counts"
+      ],
+      "type": "object"
+    }
   },
   {
     "description": "Compares stability and coupling metrics between two modules",
@@ -71,6 +168,10 @@
     "description": "Synthesises static callers, heuristic edges, runtime edges, and co-change partners for a symbol and returns a single verdict. Use this instead of `get_blast_radius` when an empty blast radius might mean 'static graph cannot see the dispatcher' rather than 'no callers'. The verdict field is `insufficient_evidence` exactly when every signal is empty — that is the case Tier 1 teaches agents to refuse to treat as safe.",
     "inputSchema": {
       "properties": {
+        "snapshot": {
+          "description": "Named snapshot id, or 'live' for the current graph",
+          "type": "string"
+        },
         "symbol": {
           "type": "string"
         }
@@ -80,12 +181,91 @@
       ],
       "type": "object"
     },
-    "name": "explain_dispatch"
+    "name": "explain_dispatch",
+    "outputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "answer_scope": {
+          "description": "Why the answer cannot be read as complete, or null when it can. A null on an empty result is a confirmed absence (the index is current and nothing calls it).",
+          "enum": [
+            null,
+            "unresolved_name",
+            "ambiguous_target",
+            "dynamic_target",
+            "stale_or_unindexed",
+            "truncated"
+          ],
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "co_change_partners": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "heuristic_callers": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "runtime_callers": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "static_callers": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "symbol": {
+          "type": "string"
+        },
+        "target_id": {
+          "type": "string"
+        },
+        "target_path": {
+          "type": "string"
+        },
+        "verdict": {
+          "enum": [
+            "static_only",
+            "static_and_heuristic",
+            "heuristic_only",
+            "runtime_only",
+            "runtime_confirmed",
+            "insufficient_evidence"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "symbol",
+        "target_id",
+        "target_path",
+        "static_callers",
+        "heuristic_callers",
+        "runtime_callers",
+        "co_change_partners",
+        "verdict"
+      ],
+      "type": "object"
+    }
   },
   {
     "description": "Combines signatures, docstrings, and metrics into a human-readable architectural summary",
     "inputSchema": {
       "properties": {
+        "snapshot": {
+          "description": "Named snapshot id, or 'live' for the current graph",
+          "type": "string"
+        },
         "symbol": {
           "type": "string"
         }
@@ -95,7 +275,67 @@
       ],
       "type": "object"
     },
-    "name": "explain_symbol"
+    "name": "explain_symbol",
+    "outputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "ambiguous": {
+          "type": "boolean"
+        },
+        "annotations": {
+          "type": "string"
+        },
+        "callees": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "callers": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "co_change_partners": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "occupancy": {
+          "properties": {
+            "active_agents": {
+              "items": {
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "active_agents"
+          ],
+          "type": "object"
+        },
+        "source": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "symbol": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "symbol",
+        "ambiguous",
+        "source",
+        "annotations",
+        "occupancy"
+      ],
+      "type": "object"
+    }
   },
   {
     "description": "Returns a high-level tree of files and modules up to a specific depth",
@@ -172,6 +412,10 @@
         "path_hint": {
           "type": "string"
         },
+        "snapshot": {
+          "description": "Named snapshot id, or 'live' for the current graph",
+          "type": "string"
+        },
         "type_filter": {
           "enum": [
             "function",
@@ -192,7 +436,80 @@
       ],
       "type": "object"
     },
-    "name": "find_symbol"
+    "name": "find_symbol",
+    "outputSchema": {
+      "$defs": {
+        "node": {
+          "properties": {
+            "commit": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "id": {
+              "type": "string"
+            },
+            "line_end": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "line_start": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "name": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            },
+            "repo_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "type",
+            "name",
+            "path"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "ambiguous": {
+          "type": "boolean"
+        },
+        "count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "symbols": {
+          "items": {
+            "$ref": "#/$defs/node"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "symbols",
+        "count",
+        "ambiguous"
+      ],
+      "type": "object"
+    }
   },
   {
     "description": "Identifies functions that may lack test coverage based on call graph analysis",
@@ -278,6 +595,10 @@
     "description": "Finds all callers of a given symbol",
     "inputSchema": {
       "properties": {
+        "snapshot": {
+          "description": "Named snapshot id, or 'live' for the current graph",
+          "type": "string"
+        },
         "symbol": {
           "type": "string"
         }
@@ -287,7 +608,70 @@
       ],
       "type": "object"
     },
-    "name": "get_call_sites"
+    "name": "get_call_sites",
+    "outputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "ambiguous": {
+          "type": "boolean"
+        },
+        "answer_scope": {
+          "description": "Why the answer cannot be read as complete, or null when it can. A null on an empty result is a confirmed absence (the index is current and nothing calls it).",
+          "enum": [
+            null,
+            "unresolved_name",
+            "ambiguous_target",
+            "dynamic_target",
+            "stale_or_unindexed",
+            "truncated"
+          ],
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sites": {
+          "items": {
+            "properties": {
+              "caller": {
+                "type": "object"
+              },
+              "exact": {
+                "type": "boolean"
+              },
+              "lines": {
+                "items": {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "caller",
+              "lines",
+              "exact"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "target": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "target",
+        "sites",
+        "count",
+        "ambiguous"
+      ],
+      "type": "object"
+    }
   },
   {
     "description": "Reads a file with surrounding context around a specific line",
@@ -332,6 +716,10 @@
           "minimum": 0,
           "type": "integer"
         },
+        "snapshot": {
+          "description": "Named snapshot id, or 'live' for the current graph",
+          "type": "string"
+        },
         "symbol": {
           "type": "string"
         }
@@ -341,7 +729,44 @@
       ],
       "type": "object"
     },
-    "name": "get_context"
+    "name": "get_context",
+    "outputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "annotations": {
+          "type": "string"
+        },
+        "callees": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "callers": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "definition": {
+          "type": "object"
+        },
+        "source": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "definition",
+        "callers",
+        "callees",
+        "source",
+        "annotations"
+      ],
+      "type": "object"
+    }
   },
   {
     "description": "Calculates layers of abstraction from the entry point for a symbol",
@@ -410,6 +835,10 @@
       "properties": {
         "node_id": {
           "type": "string"
+        },
+        "snapshot": {
+          "description": "Named snapshot id, or 'live' for the current graph",
+          "type": "string"
         }
       },
       "required": [
@@ -417,7 +846,60 @@
       ],
       "type": "object"
     },
-    "name": "get_cross_runtime_callers"
+    "name": "get_cross_runtime_callers",
+    "outputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "availability": {
+          "properties": {
+            "graphql": {
+              "type": "boolean"
+            },
+            "http": {
+              "type": "boolean"
+            },
+            "rpc": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "http",
+            "rpc",
+            "graphql"
+          ],
+          "type": "object"
+        },
+        "graphql_resolvers": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "http_routes": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "rpc_services": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "target": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "target",
+        "http_routes",
+        "rpc_services",
+        "graphql_resolvers",
+        "availability"
+      ],
+      "type": "object"
+    }
   },
   {
     "description": "Shows uncommitted changes (staged and unstaged)",
@@ -502,12 +984,351 @@
       "properties": {
         "query": {
           "type": "object"
+        },
+        "snapshot": {
+          "description": "Named snapshot id, or 'live' for the current graph",
+          "type": "string"
         }
       },
       "required": [],
       "type": "object"
     },
-    "name": "query_graph"
+    "name": "query_graph",
+    "outputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "definitions": {
+        "edge_detail": {
+          "properties": {
+            "route_match": {
+              "enum": [
+                "Exact",
+                "Pattern",
+                "PrefixStripped",
+                null
+              ],
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "stripped_prefix": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "route_match",
+            "stripped_prefix"
+          ],
+          "type": "object"
+        },
+        "edge_provenance": {
+          "oneOf": [
+            {
+              "properties": {
+                "Static": {
+                  "properties": {
+                    "source": {
+                      "enum": [
+                        "TreeSitter",
+                        "Lsp",
+                        "Regex"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "source"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "Static"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "Heuristic": {
+                  "properties": {
+                    "confidence": {
+                      "maximum": 1,
+                      "minimum": 0,
+                      "type": "number"
+                    },
+                    "detector": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "detector",
+                    "confidence"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "Heuristic"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "Runtime": {
+                  "properties": {
+                    "last_seen_unix": {
+                      "type": "integer"
+                    },
+                    "trace_id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "trace_id",
+                    "last_seen_unix"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "Runtime"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "Confirmed": {
+                  "properties": {
+                    "source": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "source"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "Confirmed"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "graph_edge": {
+          "properties": {
+            "confidence": {
+              "type": "number"
+            },
+            "detail": {
+              "$ref": "#/definitions/edge_detail"
+            },
+            "from": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "provenance": {
+              "$ref": "#/definitions/edge_provenance"
+            },
+            "site": {
+              "$ref": "#/definitions/source_site"
+            },
+            "to": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "type",
+            "from",
+            "to"
+          ],
+          "type": "object"
+        },
+        "graph_node": {
+          "properties": {
+            "commit": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "label": {
+              "type": "string"
+            },
+            "line_end": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "line_start": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "name": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            },
+            "repo_id": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "type",
+            "name"
+          ],
+          "type": "object"
+        },
+        "source_site": {
+          "properties": {
+            "line": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "path",
+            "line"
+          ],
+          "type": "object"
+        }
+      },
+      "properties": {
+        "count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "edges": {
+          "items": {
+            "$ref": "#/definitions/graph_edge"
+          },
+          "type": "array"
+        },
+        "groups": {
+          "items": {
+            "properties": {
+              "count": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "key": {
+                "type": "string"
+              },
+              "nodes": {
+                "items": {
+                  "$ref": "#/definitions/graph_node"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "key",
+              "nodes",
+              "count"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "legacy": {
+          "type": "boolean"
+        },
+        "meta": {
+          "properties": {
+            "exec_us": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "matched_before_limit": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "next_cursor": {
+              "type": "string"
+            },
+            "nodes_visited": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "truncated": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "exec_us",
+            "nodes_visited"
+          ],
+          "type": "object"
+        },
+        "nodes": {
+          "items": {
+            "$ref": "#/definitions/graph_node"
+          },
+          "type": "array"
+        },
+        "occupancy": {
+          "properties": {
+            "active_agents": {
+              "items": {
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "active_agents"
+          ],
+          "type": "object"
+        },
+        "paths": {
+          "items": {
+            "properties": {
+              "edges": {
+                "items": {
+                  "$ref": "#/definitions/graph_edge"
+                },
+                "type": "array"
+              },
+              "nodes": {
+                "items": {
+                  "$ref": "#/definitions/graph_node"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "nodes",
+              "edges"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "count",
+        "legacy",
+        "occupancy"
+      ],
+      "type": "object"
+    }
   },
   {
     "description": "Runs cargo build (optionally release) and returns build output and status",
@@ -593,7 +1414,105 @@
       ],
       "type": "object"
     },
-    "name": "search_code"
+    "name": "search_code",
+    "outputSchema": {
+      "$defs": {
+        "result": {
+          "properties": {
+            "commit": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "id": {
+              "type": "string"
+            },
+            "line_end": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "line_start": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "name": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            },
+            "repo_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "score": {
+              "type": "number"
+            },
+            "score_kind": {
+              "enum": [
+                "lexical",
+                "sim",
+                "rerank"
+              ],
+              "type": "string"
+            },
+            "type": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "type",
+            "name",
+            "path",
+            "score",
+            "score_kind"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "fell_back": {
+          "type": "boolean"
+        },
+        "mode": {
+          "enum": [
+            "lexical",
+            "semantic"
+          ],
+          "type": "string"
+        },
+        "query": {
+          "type": "string"
+        },
+        "results": {
+          "items": {
+            "$ref": "#/$defs/result"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "query",
+        "mode",
+        "fell_back",
+        "results",
+        "count"
+      ],
+      "type": "object"
+    }
   },
   {
     "description": "Identifies 'God Objects' and high-debt refactor targets based on complexity and stability",
@@ -1294,7 +2213,8 @@
             "reason": {
               "enum": [
                 "no_route_in_service",
-                "no_match"
+                "no_match",
+                "dynamic_target"
               ],
               "type": "string"
             },
@@ -2151,6 +3071,12 @@
             "dirty": {
               "type": "boolean"
             },
+            "handlers": {
+              "items": {
+                "$ref": "#/$defs/Handler"
+              },
+              "type": "array"
+            },
             "id": {
               "type": "string"
             },
@@ -2174,6 +3100,26 @@
             "path",
             "line",
             "text"
+          ],
+          "type": "object"
+        },
+        "Handler": {
+          "additionalProperties": false,
+          "properties": {
+            "file": {
+              "type": "string"
+            },
+            "repo": {
+              "type": "string"
+            },
+            "symbol": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "repo",
+            "file",
+            "symbol"
           ],
           "type": "object"
         },
@@ -2847,7 +3793,8 @@
                   "external_ref",
                   "dynamic_sql",
                   "orm_dynamic_query",
-                  "external_schema_ref"
+                  "external_schema_ref",
+                  "dynamic_target"
                 ],
                 "type": "string"
               },

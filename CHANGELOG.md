@@ -3,6 +3,77 @@
 All notable changes to LAIN are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+## [0.15.0] - 2026-11-10
+
+- **Fix the startup cache on a repository reached through a symlink.** The
+  git sensor canonicalizes its workspace, so the tracked paths it reports
+  are canonical, but the repository root came from the configuration
+  unchanged. Where the two spelled the same directory differently — macOS
+  `/var` vs `/private/var`, a symlinked checkout, a Windows short name —
+  every tracked file read as "tracked path outside repository" and the
+  startup cache could never be written. The root is now canonicalized
+  before the tracked paths are made relative to it.
+- **Distribution: publish only what the release actually builds.** The
+  release workflow builds Linux and Windows; the macOS ARM64 target was
+  dropped in v0.14.0 (an unresolvable ONNX Runtime linker error) and has
+  not returned. `Formula/lain.rb` no longer carries an `on_macos` stanza,
+  and `server.json` no longer advertises a `macos-aarch64` binary — both
+  pointed at assets that are never published. macOS users install with
+  `cargo install --git https://github.com/spuentesp/lain.git` or the npm
+  launcher until the target comes back.
+- **Distribution: fill the Homebrew checksums from the published
+  `SHA256SUMS`.** v0.14.0 shipped a Formula whose `sha256` values did
+  not match the published artifacts (the post-publish step was skipped),
+  so `brew install lain` failed checksum verification. `scripts/fill-formula-sha256.py`
+  fills the hashes from a published release's `SHA256SUMS` and
+  `--check` verifies them; `scripts/test_fill_formula_sha256.py` pins
+  the behaviour in CI.
+- Say why an answer may be incomplete. `get_call_sites`, `assess_change`,
+  `explain_dispatch` and `get_cross_repo_blast_radius` report an
+  `answer_scope` field — `get_blast_radius` and `get_call_chain` state the same
+  reason in their text (they have no structured output): `null` (omitted for
+  cross-repo blast radius)
+  when the answer is complete — including an empty
+  answer that is a confirmed absence — and otherwise one of `unresolved_name`,
+  `ambiguous_target`, `dynamic_target`, `stale_or_unindexed` or `truncated`. A
+  runtime-selected path in the contract tools is now reported as `dynamic_target`
+  instead of `no_route_in_service`, which claimed a service had been checked
+  when no service was involved. `get_call_chain` searches every definition of
+  both names, so several definitions are not a gap for it — its answer says how
+  many it covered and its `answer_scope` never carries `ambiguous_target`.
+  `explain_dispatch` now resolves ambiguous names the way `find_symbol` does, so
+  the reported target matches the one other tools name. No numeric confidence is
+  added: the reasons name
+  what the analyzer could not see. Cross-repo answers also flag duplicate names
+  within the selected repo, runtime-dispatch edges, stale seed files, and
+  unfinished or unavailable federation members. See `docs/quickstart-tools.md`.
+
+- Resolve repository-local JavaScript URL constants, named imports, CommonJS destructuring, object members, and simple zero-argument helpers with bounded syntax evaluation, and bound GraphQL call extraction to its own string literal so SQL documents no longer parse as GraphQL operations. Preserve URL-constructor replacement semantics, lexical scope, and uncertain environment defaults; reject ignored or escaping import inputs and stop rendering opaque URLs as root requests. Honor request-option overwrite order and keep unknown methods uncertain. Stop emitting WebSocket server providers from client callbacks, recognize FastAPI keyword route registrations through configurable queries, keep WebSocket, topic, and table suggestions within their protocol, and show captured HTTP source expressions and hosts in unresolved results. Advance the contract analyzer revision to 10 to invalidate older snapshot analysis; graph serialization is unchanged. NVIDIA HTTP smoke checks now distinguish test traffic from non-test source bindings and offer `NAT_REQUIRE_NON_TEST_HTTP_BINDINGS=1` for a strict source-coverage gate.
+
+- Reuse validated completed federation checkpoints on unchanged startup, retain live watchers after cache hits, and support `LAIN_REQUIRE_STARTUP_CACHE=1` for prepared-cache-only launches. Share checksum-validated static reference artifacts within a bounded disk cache, defer cross-repo projection until local indexing completes, retract obsolete derived references without repeating peer matching, prune unselected repo nodes, reuse identical signature matches, and compile TypeScript ORM queries once per scan. Count service-reference lines incrementally instead of rescanning the file per URL. Graph serialization is unchanged. See `docs/STARTUP_CACHE.md`.
+
+- Index Rust gRPC declarations and lexical context once per file, and reuse compiled detection queries across workspace scans, avoiding repeated whole-tree scope searches on large Rust files while preserving identity evidence and ambiguity checks.
+
+- Bind raw graph and code reads to named snapshots, with errors instead of live fallback when a snapshot or repo is unavailable.
+
+- Add schema-valid structured output to raw analysis tools and `search_code`, preserve their text output, and expose `get_contract` provider handlers as `{repo, file, symbol}`.
+
+- Include source locations and provenance in raw graph results, compose chained traversal paths, and add deterministic cursor pagination.
+
+- Add first-class ORM model/table/column relations and migration evidence for Django, SQLAlchemy, Prisma, Drizzle, TypeORM, and Sequelize. `FEDERATION_GRAPH_VERSION` advances from 4 to 5; run `lain reindex` to back up and rebuild older graphs.
+
+- Add operation-scoped topic/GraphQL payload reads and frontend `Renders`, `Stores`, `Forwards`, and `Discards` relations, keeping dynamic or ambiguous lineage explicitly unresolved.
+
+- Preserve OpenTelemetry resource and scope identity, and report relation, emitter, and snapshot readiness through `get_capabilities`.
+
+- Keep MCP cold-start handshakes non-blocking with an installed default embedding model by deferring checksum verification and ONNX initialization until first use; semantic capability reports warming until the model is ready.
+
+- Use syntax-backed ORM extraction and evidence-based frontend dispositions, fail snapshot source reads explicitly, and sort default-capped query results by name and id before truncation.
+
+- Refuse to bridge to a shared daemon whose `version`, `build_commit`, or `index_build_id` differs from the client's. The error names the socket and both identities, and no competing indexer is started beside the stale daemon; restart the daemon or use `--no-share` / `LAIN_MCP_NO_SHARE=1`. `lain oneshot` checks the shared daemon it would reuse the same way and fails the call instead of answering with stale code; `LAIN_ONESHOT_NO_SHARE=1` is its explicit private fallback.
+
 ## [0.14.0] - 2026-10-30
 
 - Allow exact consumer `site` selectors in confirmed mappings, so repeated RPC calls within one symbol can target different services. Existing selectors remain supported.
@@ -203,6 +274,7 @@ All notable changes to LAIN are documented here. Versions follow
   build script because its watched paths do not exist.
 - Go message producers resolve package-level environment values on Windows.
   Package scope keys now use forward slashes, matching the cross-package lookup.
+
 
 ## 0.13.0 — 2026-10-27
 
@@ -1161,7 +1233,7 @@ No product code changes. Test, CI and documentation only.
   busy indexing or hung. The new default matches
   `LAIN_REINDEX_TIMEOUT`. Override with
   `LAIN_ONESHOT_TIMEOUT=<seconds>` for tighter pipelines. Found by
-  dogfooding Lain on Lain (`DOGFOODING_REPORT.md`, 2026-10-04,
+  dogfooding Lain on Lain (`docs/DOGFOODING_REPORT.md`, 2026-10-04,
   finding B6).
 
 - **`get_coupling_radar` doc clarified** — the section heading
@@ -1172,7 +1244,7 @@ No product code changes. Test, CI and documentation only.
   `scripts/check-tool-doc-args.py` validates every JSON example in
   `docs/quickstart-tools.md` against its tool's input schema, so
   this class of drift can't recur without failing the build. Found
-  by dogfooding Lain on Lain (`DOGFOODING_REPORT.md`, 2026-10-04,
+  by dogfooding Lain on Lain (`docs/DOGFOODING_REPORT.md`, 2026-10-04,
   finding B9).
 
 - **Quickstart now warns about the `head -N` pipe footgun.** A user
@@ -1182,7 +1254,7 @@ No product code changes. Test, CI and documentation only.
   symptom is "no tools/call response from `lain mcp`" plus a
   corrupt on-disk graph; the fix is to pipe to a file or to a tool
   that reads to EOF. The new Quickstart row links the reader to
-  `DOGFOODING_REPORT.md` (B7) for the full trace.
+  `docs/DOGFOODING_REPORT.md` (B7) for the full trace.
 
 - **`get_audit_log` is now advertised by default.** The audit log
   (the durable counterpart to the in-memory presence state) used to
@@ -1193,7 +1265,7 @@ No product code changes. Test, CI and documentation only.
   surface includes it. The 6 other `social` tools
   (`who_am_i`, `list_active_agents`, `list_subagents`,
   `unregister_agent`, `detect_overlap`) stay opt-in. Found by
-  dogfooding Lain on Lain (`DOGFOODING_REPORT.md`, 2026-10-04,
+  dogfooding Lain on Lain (`docs/DOGFOODING_REPORT.md`, 2026-10-04,
   finding B10).
 
 - **`get_health` now reports per-file call-graph coverage.** A new
@@ -1221,7 +1293,7 @@ No product code changes. Test, CI and documentation only.
   same test there. A symlink path *outside* the tree is now
   treated as a published install even when the symlink target
   happens to live in the tree. Found by dogfooding Lain on Lain
-  (`DOGFOODING_REPORT.md`, 2026-10-04, finding B2). Three new
+  (`docs/DOGFOODING_REPORT.md`, 2026-10-04, finding B2). Three new
   tests cover the symlink cases.
 
 - **`find_anchors` now excludes test and script paths by
@@ -1308,7 +1380,7 @@ No product code changes. Test, CI and documentation only.
   `EdgeType::all()` so every variant is reported. A banner line
   is also emitted when `Calls == 0` to make the silent-absence
   mode loud. Surfaced by dogfooding Lain on Lain
-  (`DOGFOODING_REPORT.md`, 2026-10-04, finding B11).
+  (`docs/DOGFOODING_REPORT.md`, 2026-10-04, finding B11).
 
 
 LAIN 0.9 introduces cross-repo contract federation. For every
@@ -1322,7 +1394,7 @@ The 13 read-only contract tools live in the new `contracts`
 package — opt in with `LAIN_TOOL_PROFILE=contracts` or
 `load_package("contracts")`. The full design is in
 `docs/superpowers/specs/2026-10-02-contract-coverage-and-protocols-design.md`
-(supersedes the earlier `docs/CONTRACT_FEDERATION.md` design
+(supersedes the earlier `docs/CONTRACT_FEDERATION.md` design (since removed; see Git history)
 and its 15-PR tracker, both removed in this release).
 
 Sensors in each repo find routes, client calls, schema fields,
@@ -1727,7 +1799,7 @@ that touches the joiner, sensors, or fixture must keep
   (the shared `(string)` query does not match Rust's `string_literal`).
 
 - **Intent & observability layer** (PRs 1–6 of
-  `docs/archive/INTENT_AND_OBSERVABILITY_PLAN.md`). Two new MCP tools:
+  `docs/archive/INTENT_AND_OBSERVABILITY_PLAN.md` — since removed from the tree; see Git history). Two new MCP tools:
   `lain_intent` (declare / update per-agent goal + scopes) and
   `list_active_intents` (per-agent activity feed). New
   `POST /hook` endpoint that ingests tool-call observations from
@@ -2190,7 +2262,7 @@ that touches the joiner, sensors, or fixture must keep
   "unavailable" answer. `README.md` flips the mermaid agent label from
   Cursor to Agy/Codex (Cursor has no full hook script in `hooks/`) and
   rewords the `lain ask` row. `docs/hot-reload.md` polls every 2 s (was
-  every second). `docs/wish-list.md` refreshes the `61 / 63 / 64` tool
+  every second). `docs/wish-list.md` (since removed; see Git history) refreshes the `61 / 63 / 64` tool
   counts to match the canonical 67. `index.html`/`theme.css`/etc. were
   not touched; no code changes shipped.
 
@@ -2243,4 +2315,3 @@ that touches the joiner, sensors, or fixture must keep
 
 Initial public release. Federation `lain server` + single-repo `lain mcp` +
 Command Center SPA.
-

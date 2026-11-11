@@ -41,7 +41,6 @@ const KEY_GET: &str = "rpc:openshell.v1.OpenShell/GetSandbox";
 fn write(root: &Path, path: &str, content: &str) {
     let path = root.join(path);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let content = content.replace("\r\n", "\n");
     std::fs::write(path, content).unwrap();
 }
 fn git(root: &Path, args: &[&str]) -> String {
@@ -59,7 +58,6 @@ fn git(root: &Path, args: &[&str]) -> String {
 }
 fn commit(root: &Path) {
     git(root, &["init", "-q"]);
-    git(root, &["config", "core.autocrlf", "false"]);
     git(root, &["add", "-A"]);
     git(
         root,

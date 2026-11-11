@@ -194,6 +194,7 @@ jobs:
         with:
           toolchain: stable
 
+
       - name: Configure Git
         run: |
           git config --global user.name "CI Runner"
@@ -689,6 +690,11 @@ jobs:
       - name: Windows archive contract tests
         working-directory: .
         run: python3 scripts/test_package_windows_release.py
+      - name: Startup benchmark and contract smoke harness tests
+        working-directory: .
+        run: |
+          python3 tests/e2e/test_nvidia_startup_bench.py
+          python3 tests/e2e/test_contract_smoke_scope.py
 
   arch-guardrails:
     name: Architecture guardrails (no redundant code)
@@ -726,6 +732,7 @@ jobs:
           python scripts/test_check_mcp_dispatch_shape.py
           python scripts/test_check_no_mirror_dtos.py
           python scripts/test_check_format_duration_once.py
+          python scripts/test_mutation_gate.py
 
 
   coverage:
@@ -864,6 +871,12 @@ jobs:
       # ignores (description / homepage / keywords / repository.url).
       - name: Canonical metadata sync gate
         run: python scripts/test_sync_metadata.py
+      # The post-publish Formula checksum fill (AGENTS.md step 6).
+      # v0.14.0 shipped with hashes that did not match the published
+      # artifacts because this step was skipped; the tests pin it so
+      # the fill cannot be skipped silently again.
+      - name: Formula checksum fill regression tests
+        run: python scripts/test_fill_formula_sha256.py
       # Fast, network-free unit tests for the Milestone 9 clean-room
       # check script (reader-thread timeout handling, protocol-violation
       # detection) against a fake in-process server. The real live-network

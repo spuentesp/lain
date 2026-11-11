@@ -1,0 +1,79 @@
+{
+  "started_utc": "2026-11-06T23:45:23.155566+00:00",
+  "mode": "static-no-lsp",
+  "binary_sha256": "c94c770863a869cbf64441354b0f79355c4b5851d82d1440aa1ff37bdad15a59",
+  "tests": [
+    {
+      "group": "openshell",
+      "script": "scripts/eval/openshell-contract-smoke.sh",
+      "exit_code": 0,
+      "all_three_repos_ready": true,
+      "elapsed_s": 82.07412895400194,
+      "stdout": "federation states: ready ready ready\nrpc contracts: 120\nbound consumers: 21\nPASS: at least one RPC contract binds a consumer\nparse_sandbox_policy callers by repo: {'nemo-fabric': 42, 'nemoclaw': 57, 'openshell': 96}\nPASS: nemo-fabric calls into openshell\n"
+    },
+    {
+      "group": "nat",
+      "script": "scripts/eval/nat-http-contract-smoke.sh",
+      "exit_code": 0,
+      "all_three_repos_ready": true,
+      "elapsed_s": 20.422940179007128,
+      "stdout": "federation states: ready ready ready\nhttp endpoints: 12 bound consumers: 1\nunresolved consumers: 43 {'no_match': 30, 'no_route_in_service': 9, 'graphql_no_op': 2, 'env_unmapped': 2}\n--- declared providers present ---\nOK   http:POST /chat/stream\nOK   http:POST /chat\n--- no garbage ANY routes (prose or log lines as paths) ---\n0\n--- nat-ui Next.js API route ---\nOK   http:ANY /api/mcp/clients\n--- the UI proxy is attributed to the nat service ---\nOK   proxy/server.js -> no_route_in_service (service nat)\nPASS: declared providers present, no garbage routes, Next.js API route found, proxy attributed\n"
+    }
+  ],
+  "prior_attempts": [
+    {
+      "group": "nat",
+      "script": "scripts/eval/nat-http-contract-smoke.sh",
+      "exit_code": 0,
+      "all_three_repos_ready": true,
+      "elapsed_s": 20.715243681013817,
+      "stdout": "scripts/eval/nat-http-contract-smoke.sh: line 18: env:: command not found\nscripts/eval/nat-http-contract-smoke.sh: line 18: nat: command not found\nfederation states: ready ready ready\nhttp endpoints: 12 bound consumers: 1\nunresolved consumers: 43 {'no_match': 30, 'no_route_in_service': 9, 'graphql_no_op': 2, 'env_unmapped': 2}\n--- declared providers present ---\nOK   http:POST /chat/stream\nOK   http:POST /chat\n--- no garbage ANY routes (prose or log lines as paths) ---\n0\n--- nat-ui Next.js API route ---\nOK   http:ANY /api/mcp/clients\n--- the UI proxy is attributed to the nat service ---\nOK   proxy/server.js -> no_route_in_service (service nat)\nPASS: declared providers present, no garbage routes, Next.js API route found, proxy attributed\n"
+    }
+  ],
+  "harness_fixes": [
+    "Removed command-substitution backticks from comments in the unquoted generated-config heredoc; reran NAT smoke."
+  ],
+  "inputs": {
+    "openshell": {
+      "path": "/data/agents/tmp-lain-tests/nvidia-eval/OpenShell",
+      "commit": "d4e32263eb4554c46c5bae702acada2f4af03eb0",
+      "dirty": false,
+      "tracked_files": 2129
+    },
+    "nemo-fabric": {
+      "path": "/data/agents/tmp-lain-tests/nvidia-eval/NeMo-Fabric",
+      "commit": "4fdf65a4b4c96024327501ae28243f2d206e7ec7",
+      "dirty": false,
+      "tracked_files": 1165
+    },
+    "nemoclaw": {
+      "path": "/data/agents/tmp-lain-tests/nvidia-eval/NemoClaw",
+      "commit": "37f1e4cb9942a3dc05c0c76995f86624261bc7b1",
+      "dirty": false,
+      "tracked_files": 6655
+    },
+    "nat": {
+      "path": "/data/agents/tmp-lain-tests/nvidia-eval/NeMo-Agent-Toolkit",
+      "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+      "dirty": false,
+      "tracked_files": 2776
+    },
+    "nat-ui": {
+      "path": "/data/agents/tmp-lain-tests/nvidia-eval/NeMo-Agent-Toolkit-UI",
+      "commit": "41cb8cf843091a24bd06d0a5f844a3cb824049d8",
+      "dirty": false,
+      "tracked_files": 175
+    },
+    "nat-examples": {
+      "path": "/data/agents/tmp-lain-tests/nvidia-eval/NeMo-Agent-Toolkit-Examples",
+      "commit": "eadbb7573b9ba12c01a9df85c601a32a886d7b25",
+      "dirty": false,
+      "tracked_files": 169
+    }
+  },
+  "script_sha256": {
+    "scripts/eval/openshell-contract-smoke.sh": "72e5ef9c8804d424266e1e4a0f5bf9f957b4f4c83907ccf1a7c66d2b03a789ff",
+    "scripts/eval/nat-http-contract-smoke.sh": "4753b7d26d12ecdbd5c1c1f5752afa5c0c4bb10472619fe29c6da6d03a08017d"
+  },
+  "coverage_limit": "Functional smoke scenarios with explicit service/provider configuration; no corpus-wide precision/recall claim."
+}

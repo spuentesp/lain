@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 /// layout change. Old v2 files are refused at load — recovery is
 /// `lain reindex`.
 pub const FEDERATION_GRAPH_MAGIC: &[u8] = b"LNF2";
-pub const FEDERATION_GRAPH_VERSION: u32 = 4;
+pub const FEDERATION_GRAPH_VERSION: u32 = 5;
 pub const FEDERATION_GRAPH_HEADER_LEN: usize = FEDERATION_GRAPH_MAGIC.len() + 4;
 
 /// Sibling file holding the validated payload (everything after the
@@ -212,6 +212,7 @@ pub struct PetgraphBackend {
 
 impl PetgraphBackend {
     pub fn new(data_dir: &Path) -> Result<Self, LainError> {
+        let _open_timing = super::startup_cache::StartupTiming::start("federation_graph_open");
         let bin_path = data_dir.join("federated_graph.bin");
         let payload_path = payload_path_for(&bin_path);
 
@@ -244,6 +245,8 @@ impl PetgraphBackend {
                     });
                 }
                 let payload = &bytes[FEDERATION_GRAPH_HEADER_LEN..];
+                let validate_timing =
+                    super::startup_cache::StartupTiming::start("federation_payload_validation");
                 GraphDatabase::validate_persisted_payload(payload).map_err(|error| {
                     tracing::warn!(
                         "Rejecting corrupt federation graph payload at {}: {error}. Run `lain reindex` to rebuild.",
@@ -253,17 +256,25 @@ impl PetgraphBackend {
                         reason: error.to_string(),
                     }
                 })?;
+                drop(validate_timing);
+                let write_timing =
+                    super::startup_cache::StartupTiming::start("federation_payload_write");
                 std::fs::write(&payload_path, payload)?;
+                drop(write_timing);
             }
         }
 
+        let decode_timing = super::startup_cache::StartupTiming::start("federation_database_load");
         let db = GraphDatabase::new(&payload_path)?;
+        drop(decode_timing);
+        let index_timing = super::startup_cache::StartupTiming::start("federation_global_id_index");
         let index = DashMap::new();
         for node in db.get_all_nodes() {
             if let Ok(global_id) = GlobalId::parse(&node.id) {
                 index.insert(node.id, global_id);
             }
         }
+        drop(index_timing);
         Ok(Self {
             db,
             index,
@@ -345,19 +356,11 @@ impl PetgraphBackend {
         self.save()
     }
 
-    /// Direct access to the underlying `GraphDatabase` for bulk operations.
-    /// Used by the planned-but-not-yet-implemented
-    /// `federation_index_for_test` test fixture to seed a synthetic
-    /// federation with `insert_nodes_batch` / `insert_edges_batch`
-    /// without paying the per-write `save_to_disk_sync` cost of
-    /// `upsert_node_global` / `upsert_edge` — the latter would serialize
-    /// 50K writes to disk for a small-fixture perf test.
-    ///
-    /// The `&GraphDatabase` view is enough for batch inserts: callers cannot
-    /// mutate petgraph state outside of the documented batch methods, and
-    /// any internal `save_to_disk_sync` they trigger is an explicit choice.
-    #[cfg(test)]
-    pub fn db(&self) -> &crate::graph::GraphDatabase {
+    /// Direct access to the underlying `GraphDatabase` for bulk operations and
+    /// read-only snapshot tool execution. Callers cannot mutate petgraph state
+    /// outside of the documented batch methods, and any internal
+    /// `save_to_disk_sync` they trigger is an explicit choice.
+    pub(crate) fn db(&self) -> &crate::graph::GraphDatabase {
         &self.db
     }
 }
@@ -781,6 +784,14 @@ pub fn impact_propagation(e: &EdgeType) -> Propagation {
         // and follow forward (a separate traversal pass).
         | EdgeType::ReadsTable
         | EdgeType::WritesTable
+        | EdgeType::MapsTo
+        | EdgeType::HasColumn
+        | EdgeType::ReadsColumn
+        | EdgeType::WritesColumn
+        | EdgeType::Renders
+        | EdgeType::Stores
+        | EdgeType::Forwards
+        | EdgeType::Discards
         // Anchor-miner stage: heuristic `BusTopic` / `RouteMatches`
         // edges (minted by `federation::anchor_miner`, and by the
         // dynamic-dispatch sensor on per-repo graphs) are couplings

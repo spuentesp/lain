@@ -1,0 +1,75 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": [
+    "symbol",
+    "target_id",
+    "target_path",
+    "static_callers",
+    "heuristic_callers",
+    "runtime_callers",
+    "co_change_partners",
+    "verdict"
+  ],
+  "properties": {
+    "symbol": {
+      "type": "string"
+    },
+    "target_id": {
+      "type": "string"
+    },
+    "target_path": {
+      "type": "string"
+    },
+    "static_callers": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "heuristic_callers": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "runtime_callers": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "co_change_partners": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "verdict": {
+      "type": "string",
+      "enum": [
+        "static_only",
+        "static_and_heuristic",
+        "heuristic_only",
+        "runtime_only",
+        "runtime_confirmed",
+        "insufficient_evidence"
+      ]
+    },
+    "answer_scope": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        null,
+        "unresolved_name",
+        "ambiguous_target",
+        "dynamic_target",
+        "stale_or_unindexed",
+        "truncated"
+      ],
+      "description": "Why the answer cannot be read as complete, or null when it can. A null on an empty result is a confirmed absence (the index is current and nothing calls it)."
+    }
+  }
+}

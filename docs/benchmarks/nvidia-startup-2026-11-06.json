@@ -1,0 +1,1408 @@
+{
+  "schema_version": 1,
+  "binary_build_commit": "dfd10bf7-dirty",
+  "binary_version": "0.13.0",
+  "mode": "static-no-lsp",
+  "binary": "/data/agents/orca/workspaces/lain/booby/target/release/lain",
+  "binary_sha256": "f183b1e442694c044f503acff246296e2fbe93e2af396c79ad76694aa70576eb",
+  "sidecar_binary": "/data/agents/orca/workspaces/lain/booby/target/release/lain-git-sidecar",
+  "sidecar_sha256": "6868b6af1072c5f55e8af05cb2c1e18ff8999606ba962069eaa1651237128b41",
+  "git_sensor": "sidecar",
+  "platform": "Linux-7.2.6-1-default-x86_64-with-glibc2.44",
+  "cpu_count": 12,
+  "inputs": {
+    "openshell": {
+      "path": "/data/agents/tmp-lain-tests/nvidia-eval/OpenShell",
+      "commit": "d4e32263eb4554c46c5bae702acada2f4af03eb0",
+      "dirty": false,
+      "tracked_files": 2129
+    },
+    "nemo-fabric": {
+      "path": "/data/agents/tmp-lain-tests/nvidia-eval/NeMo-Fabric",
+      "commit": "4fdf65a4b4c96024327501ae28243f2d206e7ec7",
+      "dirty": false,
+      "tracked_files": 1165
+    },
+    "nemoclaw": {
+      "path": "/data/agents/tmp-lain-tests/nvidia-eval/NemoClaw",
+      "commit": "37f1e4cb9942a3dc05c0c76995f86624261bc7b1",
+      "dirty": false,
+      "tracked_files": 6655
+    },
+    "nat": {
+      "path": "/data/agents/tmp-lain-tests/nvidia-eval/NeMo-Agent-Toolkit",
+      "commit": "2fdf56a41a4a3237a4dd83492fed8e11be7eec99",
+      "dirty": false,
+      "tracked_files": 2776
+    },
+    "nat-ui": {
+      "path": "/data/agents/tmp-lain-tests/nvidia-eval/NeMo-Agent-Toolkit-UI",
+      "commit": "41cb8cf843091a24bd06d0a5f844a3cb824049d8",
+      "dirty": false,
+      "tracked_files": 175
+    },
+    "nat-examples": {
+      "path": "/data/agents/tmp-lain-tests/nvidia-eval/NeMo-Agent-Toolkit-Examples",
+      "commit": "eadbb7573b9ba12c01a9df85c601a32a886d7b25",
+      "dirty": false,
+      "tracked_files": 169
+    }
+  },
+  "concurrency": 1,
+  "runs": [
+    {
+      "run": 1,
+      "phase": "cold",
+      "ready_s": 276.1881616800092,
+      "http_s": 1.540894401987316,
+      "tools_list_s": 1.542654526012484,
+      "peak_parent_rss_mib": 1850.73046875,
+      "status": "ready",
+      "host_loadavg_start": [
+        5.5947265625,
+        5.34912109375,
+        4.02880859375
+      ],
+      "last_index_status": {
+        "repos": [
+          {
+            "health": "ready",
+            "id": "nemo-fabric"
+          },
+          {
+            "health": "ready",
+            "id": "nemoclaw"
+          },
+          {
+            "health": "ready",
+            "id": "openshell"
+          }
+        ]
+      },
+      "health": {
+        "federation": {
+          "git_sensor": {
+            "alive": true,
+            "child_pid": 2356575,
+            "consecutive_failures": 0,
+            "kind": "sidecar",
+            "last_call_duration_us": 849269,
+            "respawn_count": 0,
+            "respawns_in_window": 0
+          },
+          "memory_estimate_bytes": 52059800,
+          "repos": [
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 2356575,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 849269,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nemo-fabric"
+            },
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 2356578,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 778734,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nemoclaw"
+            },
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 2356573,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 307946,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "openshell"
+            }
+          ],
+          "total_edges": 318362,
+          "total_nodes": 101118
+        },
+        "git_sensor": {
+          "alive": true,
+          "child_pid": 2356664,
+          "consecutive_failures": 0,
+          "kind": "sidecar",
+          "last_call_duration_us": 0,
+          "respawn_count": 0,
+          "respawns_in_window": 0
+        },
+        "graph_edges": 0,
+        "graph_nodes": 0,
+        "lsp_prewarm": {},
+        "server": "lain",
+        "status": "ok",
+        "tools_count": 42,
+        "version": "0.13.0"
+      },
+      "elapsed_s": 276.30250074798823,
+      "host_loadavg_end": [
+        1.95703125,
+        3.62548828125,
+        3.66796875
+      ],
+      "group": "openshell"
+    },
+    {
+      "run": 1,
+      "phase": "warm",
+      "ready_s": 163.53864223798155,
+      "http_s": 8.283389352989616,
+      "tools_list_s": 8.284616807999555,
+      "peak_parent_rss_mib": 1145.046875,
+      "status": "ready",
+      "host_loadavg_start": [
+        1.95703125,
+        3.62548828125,
+        3.66796875
+      ],
+      "last_index_status": {
+        "repos": [
+          {
+            "health": "ready",
+            "id": "nemo-fabric"
+          },
+          {
+            "health": "ready",
+            "id": "nemoclaw"
+          },
+          {
+            "health": "ready",
+            "id": "openshell"
+          }
+        ]
+      },
+      "health": {
+        "federation": {
+          "git_sensor": {
+            "alive": true,
+            "child_pid": 2358166,
+            "consecutive_failures": 0,
+            "kind": "sidecar",
+            "last_call_duration_us": 880299,
+            "respawn_count": 0,
+            "respawns_in_window": 0
+          },
+          "memory_estimate_bytes": 52075500,
+          "repos": [
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 2358166,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 880299,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nemo-fabric"
+            },
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 2358171,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 843615,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nemoclaw"
+            },
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 2358164,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 329609,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "openshell"
+            }
+          ],
+          "total_edges": 318519,
+          "total_nodes": 101118
+        },
+        "git_sensor": {
+          "alive": true,
+          "child_pid": 2358187,
+          "consecutive_failures": 0,
+          "kind": "sidecar",
+          "last_call_duration_us": 0,
+          "respawn_count": 0,
+          "respawns_in_window": 0
+        },
+        "graph_edges": 0,
+        "graph_nodes": 0,
+        "lsp_prewarm": {},
+        "server": "lain",
+        "status": "ok",
+        "tools_count": 42,
+        "version": "0.13.0"
+      },
+      "elapsed_s": 163.60287384298863,
+      "host_loadavg_end": [
+        4.060546875,
+        3.4208984375,
+        3.55712890625
+      ],
+      "group": "openshell"
+    },
+    {
+      "run": 2,
+      "phase": "cold",
+      "ready_s": 285.10634421900613,
+      "http_s": 1.4382208999886643,
+      "tools_list_s": 1.443537966988515,
+      "peak_parent_rss_mib": 2096.0625,
+      "status": "ready",
+      "host_loadavg_start": [
+        4.060546875,
+        3.4208984375,
+        3.55712890625
+      ],
+      "last_index_status": {
+        "repos": [
+          {
+            "health": "ready",
+            "id": "nemo-fabric"
+          },
+          {
+            "health": "ready",
+            "id": "nemoclaw"
+          },
+          {
+            "health": "ready",
+            "id": "openshell"
+          }
+        ]
+      },
+      "health": {
+        "federation": {
+          "git_sensor": {
+            "alive": true,
+            "child_pid": 2358785,
+            "consecutive_failures": 0,
+            "kind": "sidecar",
+            "last_call_duration_us": 852866,
+            "respawn_count": 0,
+            "respawns_in_window": 0
+          },
+          "memory_estimate_bytes": 52344800,
+          "repos": [
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 2358785,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 852866,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nemo-fabric"
+            },
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 2358788,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 779448,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nemoclaw"
+            },
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 2358779,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 331241,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "openshell"
+            }
+          ],
+          "total_edges": 321212,
+          "total_nodes": 101118
+        },
+        "git_sensor": {
+          "alive": true,
+          "child_pid": 2358802,
+          "consecutive_failures": 0,
+          "kind": "sidecar",
+          "last_call_duration_us": 98,
+          "respawn_count": 0,
+          "respawns_in_window": 0
+        },
+        "graph_edges": 0,
+        "graph_nodes": 0,
+        "lsp_prewarm": {},
+        "server": "lain",
+        "status": "ok",
+        "tools_count": 42,
+        "version": "0.13.0"
+      },
+      "elapsed_s": 285.22741127500194,
+      "host_loadavg_end": [
+        3.1865234375,
+        4.2734375,
+        4.00244140625
+      ],
+      "group": "openshell"
+    },
+    {
+      "run": 2,
+      "phase": "warm",
+      "ready_s": 169.22095586700016,
+      "http_s": 8.269993233989226,
+      "tools_list_s": 8.271187538979575,
+      "peak_parent_rss_mib": 1135.4453125,
+      "status": "ready",
+      "host_loadavg_start": [
+        3.1865234375,
+        4.2734375,
+        4.00244140625
+      ],
+      "last_index_status": {
+        "repos": [
+          {
+            "health": "ready",
+            "id": "nemo-fabric"
+          },
+          {
+            "health": "ready",
+            "id": "nemoclaw"
+          },
+          {
+            "health": "ready",
+            "id": "openshell"
+          }
+        ]
+      },
+      "health": {
+        "federation": {
+          "git_sensor": {
+            "alive": true,
+            "child_pid": 2360625,
+            "consecutive_failures": 0,
+            "kind": "sidecar",
+            "last_call_duration_us": 883100,
+            "respawn_count": 0,
+            "respawns_in_window": 0
+          },
+          "memory_estimate_bytes": 52360500,
+          "repos": [
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 2360625,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 883100,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nemo-fabric"
+            },
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 2360630,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 790723,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nemoclaw"
+            },
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 2360623,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 325764,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "openshell"
+            }
+          ],
+          "total_edges": 321369,
+          "total_nodes": 101118
+        },
+        "git_sensor": {
+          "alive": true,
+          "child_pid": 2360668,
+          "consecutive_failures": 0,
+          "kind": "sidecar",
+          "last_call_duration_us": 85,
+          "respawn_count": 0,
+          "respawns_in_window": 0
+        },
+        "graph_edges": 0,
+        "graph_nodes": 0,
+        "lsp_prewarm": {},
+        "server": "lain",
+        "status": "ok",
+        "tools_count": 42,
+        "version": "0.13.0"
+      },
+      "elapsed_s": 169.28521665299195,
+      "host_loadavg_end": [
+        4.53125,
+        4.515625,
+        4.1494140625
+      ],
+      "group": "openshell"
+    },
+    {
+      "run": 3,
+      "phase": "cold",
+      "ready_s": 272.5102015750017,
+      "http_s": 1.1257077170012053,
+      "tools_list_s": 1.1282254540128633,
+      "peak_parent_rss_mib": 2139.25390625,
+      "status": "ready",
+      "host_loadavg_start": [
+        4.53125,
+        4.515625,
+        4.1494140625
+      ],
+      "last_index_status": {
+        "repos": [
+          {
+            "health": "ready",
+            "id": "nemo-fabric"
+          },
+          {
+            "health": "ready",
+            "id": "nemoclaw"
+          },
+          {
+            "health": "ready",
+            "id": "openshell"
+          }
+        ]
+      },
+      "health": {
+        "federation": {
+          "git_sensor": {
+            "alive": true,
+            "child_pid": 2361525,
+            "consecutive_failures": 0,
+            "kind": "sidecar",
+            "last_call_duration_us": 870722,
+            "respawn_count": 0,
+            "respawns_in_window": 0
+          },
+          "memory_estimate_bytes": 52026300,
+          "repos": [
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 2361525,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 870722,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nemo-fabric"
+            },
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 2361529,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 785366,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nemoclaw"
+            },
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 2361523,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 306769,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "openshell"
+            }
+          ],
+          "total_edges": 318027,
+          "total_nodes": 101118
+        },
+        "git_sensor": {
+          "alive": true,
+          "child_pid": 2361541,
+          "consecutive_failures": 0,
+          "kind": "sidecar",
+          "last_call_duration_us": 0,
+          "respawn_count": 0,
+          "respawns_in_window": 0
+        },
+        "graph_edges": 0,
+        "graph_nodes": 0,
+        "lsp_prewarm": {},
+        "server": "lain",
+        "status": "ok",
+        "tools_count": 42,
+        "version": "0.13.0"
+      },
+      "elapsed_s": 272.62477011600276,
+      "host_loadavg_end": [
+        2.11572265625,
+        3.72900390625,
+        3.98046875
+      ],
+      "group": "openshell"
+    },
+    {
+      "run": 3,
+      "phase": "warm",
+      "ready_s": 165.2252979420009,
+      "http_s": 7.482208062981954,
+      "tools_list_s": 7.483680136996554,
+      "peak_parent_rss_mib": 1114.38671875,
+      "status": "ready",
+      "host_loadavg_start": [
+        2.11572265625,
+        3.72900390625,
+        3.98046875
+      ],
+      "last_index_status": {
+        "repos": [
+          {
+            "health": "ready",
+            "id": "nemo-fabric"
+          },
+          {
+            "health": "ready",
+            "id": "nemoclaw"
+          },
+          {
+            "health": "ready",
+            "id": "openshell"
+          }
+        ]
+      },
+      "health": {
+        "federation": {
+          "git_sensor": {
+            "alive": true,
+            "child_pid": 2362922,
+            "consecutive_failures": 0,
+            "kind": "sidecar",
+            "last_call_duration_us": 912002,
+            "respawn_count": 0,
+            "respawns_in_window": 0
+          },
+          "memory_estimate_bytes": 52042000,
+          "repos": [
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 2362922,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 912002,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nemo-fabric"
+            },
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 2362927,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 816798,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nemoclaw"
+            },
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 2362920,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 333871,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "openshell"
+            }
+          ],
+          "total_edges": 318184,
+          "total_nodes": 101118
+        },
+        "git_sensor": {
+          "alive": true,
+          "child_pid": 2362943,
+          "consecutive_failures": 0,
+          "kind": "sidecar",
+          "last_call_duration_us": 0,
+          "respawn_count": 0,
+          "respawns_in_window": 0
+        },
+        "graph_edges": 0,
+        "graph_nodes": 0,
+        "lsp_prewarm": {},
+        "server": "lain",
+        "status": "ok",
+        "tools_count": 42,
+        "version": "0.13.0"
+      },
+      "elapsed_s": 165.29242875799537,
+      "host_loadavg_end": [
+        3.341796875,
+        3.509765625,
+        3.8466796875
+      ],
+      "group": "openshell"
+    },
+    {
+      "run": 1,
+      "phase": "cold",
+      "ready_s": 44.06834134500241,
+      "http_s": 0.7193139980081469,
+      "tools_list_s": 0.7232042770192493,
+      "peak_parent_rss_mib": 770.3671875,
+      "status": "ready",
+      "host_loadavg_start": [
+        3.341796875,
+        3.509765625,
+        3.8466796875
+      ],
+      "last_index_status": {
+        "repos": [
+          {
+            "health": "ready",
+            "id": "nat"
+          },
+          {
+            "health": "ready",
+            "id": "nat-examples"
+          },
+          {
+            "health": "ready",
+            "id": "nat-ui"
+          }
+        ]
+      },
+      "health": {
+        "federation": {
+          "git_sensor": {
+            "alive": true,
+            "child_pid": 2363718,
+            "consecutive_failures": 0,
+            "kind": "sidecar",
+            "last_call_duration_us": 488276,
+            "respawn_count": 0,
+            "respawns_in_window": 0
+          },
+          "memory_estimate_bytes": 11789400,
+          "repos": [
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 2363718,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 488276,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nat"
+            },
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 2363723,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 15250,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nat-examples"
+            },
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 2363720,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 21029,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nat-ui"
+            }
+          ],
+          "total_edges": 67842,
+          "total_nodes": 25026
+        },
+        "git_sensor": {
+          "alive": true,
+          "child_pid": 2363736,
+          "consecutive_failures": 0,
+          "kind": "sidecar",
+          "last_call_duration_us": 118,
+          "respawn_count": 0,
+          "respawns_in_window": 0
+        },
+        "graph_edges": 0,
+        "graph_nodes": 0,
+        "lsp_prewarm": {},
+        "server": "lain",
+        "status": "ok",
+        "tools_count": 42,
+        "version": "0.13.0"
+      },
+      "elapsed_s": 44.10075929801678,
+      "host_loadavg_end": [
+        6.1591796875,
+        4.19677734375,
+        4.06103515625
+      ],
+      "group": "nat"
+    },
+    {
+      "run": 1,
+      "phase": "warm",
+      "ready_s": 28.248349753994262,
+      "http_s": 2.134873436007183,
+      "tools_list_s": 2.1402111719944514,
+      "peak_parent_rss_mib": 484.421875,
+      "status": "ready",
+      "host_loadavg_start": [
+        6.1591796875,
+        4.19677734375,
+        4.06103515625
+      ],
+      "last_index_status": {
+        "repos": [
+          {
+            "health": "ready",
+            "id": "nat"
+          },
+          {
+            "health": "ready",
+            "id": "nat-examples"
+          },
+          {
+            "health": "ready",
+            "id": "nat-ui"
+          }
+        ]
+      },
+      "health": {
+        "federation": {
+          "git_sensor": {
+            "alive": true,
+            "child_pid": 2364151,
+            "consecutive_failures": 0,
+            "kind": "sidecar",
+            "last_call_duration_us": 489413,
+            "respawn_count": 0,
+            "respawns_in_window": 0
+          },
+          "memory_estimate_bytes": 11789800,
+          "repos": [
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 2364151,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 489413,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nat"
+            },
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 2364156,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 18156,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nat-examples"
+            },
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 2364153,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 21550,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nat-ui"
+            }
+          ],
+          "total_edges": 67846,
+          "total_nodes": 25026
+        },
+        "git_sensor": {
+          "alive": true,
+          "child_pid": 2364217,
+          "consecutive_failures": 0,
+          "kind": "sidecar",
+          "last_call_duration_us": 18,
+          "respawn_count": 0,
+          "respawns_in_window": 0
+        },
+        "graph_edges": 0,
+        "graph_nodes": 0,
+        "lsp_prewarm": {},
+        "server": "lain",
+        "status": "ok",
+        "tools_count": 42,
+        "version": "0.13.0"
+      },
+      "elapsed_s": 28.314599290984916,
+      "host_loadavg_end": [
+        7.36962890625,
+        4.60693359375,
+        4.19970703125
+      ],
+      "group": "nat"
+    },
+    {
+      "run": 2,
+      "phase": "cold",
+      "ready_s": 40.84999551202054,
+      "http_s": 0.5122841650154442,
+      "tools_list_s": 0.5204103700234555,
+      "peak_parent_rss_mib": 847.890625,
+      "status": "ready",
+      "host_loadavg_start": [
+        7.36962890625,
+        4.60693359375,
+        4.19970703125
+      ],
+      "last_index_status": {
+        "repos": [
+          {
+            "health": "ready",
+            "id": "nat"
+          },
+          {
+            "health": "ready",
+            "id": "nat-examples"
+          },
+          {
+            "health": "ready",
+            "id": "nat-ui"
+          }
+        ]
+      },
+      "health": {
+        "federation": {
+          "git_sensor": {
+            "alive": true,
+            "child_pid": 2364357,
+            "consecutive_failures": 0,
+            "kind": "sidecar",
+            "last_call_duration_us": 895994,
+            "respawn_count": 0,
+            "respawns_in_window": 0
+          },
+          "memory_estimate_bytes": 11789400,
+          "repos": [
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 2364357,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 895994,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nat"
+            },
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 2364362,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 14264,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nat-examples"
+            },
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 2364359,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 19959,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nat-ui"
+            }
+          ],
+          "total_edges": 67842,
+          "total_nodes": 25026
+        },
+        "git_sensor": {
+          "alive": true,
+          "child_pid": 2364377,
+          "consecutive_failures": 0,
+          "kind": "sidecar",
+          "last_call_duration_us": 24,
+          "respawn_count": 0,
+          "respawns_in_window": 0
+        },
+        "graph_edges": 0,
+        "graph_nodes": 0,
+        "lsp_prewarm": {},
+        "server": "lain",
+        "status": "ok",
+        "tools_count": 42,
+        "version": "0.13.0"
+      },
+      "elapsed_s": 40.914664203999564,
+      "host_loadavg_end": [
+        5.3837890625,
+        4.4501953125,
+        4.1630859375
+      ],
+      "group": "nat"
+    },
+    {
+      "run": 2,
+      "phase": "warm",
+      "ready_s": 23.880030969972722,
+      "http_s": 1.1121938189899083,
+      "tools_list_s": 1.1136836359801237,
+      "peak_parent_rss_mib": 431.7890625,
+      "status": "ready",
+      "host_loadavg_start": [
+        5.3837890625,
+        4.4501953125,
+        4.1630859375
+      ],
+      "last_index_status": {
+        "repos": [
+          {
+            "health": "ready",
+            "id": "nat"
+          },
+          {
+            "health": "ready",
+            "id": "nat-examples"
+          },
+          {
+            "health": "ready",
+            "id": "nat-ui"
+          }
+        ]
+      },
+      "health": {
+        "federation": {
+          "git_sensor": {
+            "alive": true,
+            "child_pid": 2364794,
+            "consecutive_failures": 0,
+            "kind": "sidecar",
+            "last_call_duration_us": 490135,
+            "respawn_count": 0,
+            "respawns_in_window": 0
+          },
+          "memory_estimate_bytes": 11789800,
+          "repos": [
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 2364794,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 490135,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nat"
+            },
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 2364799,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 26157,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nat-examples"
+            },
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 2364796,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 21215,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nat-ui"
+            }
+          ],
+          "total_edges": 67846,
+          "total_nodes": 25026
+        },
+        "git_sensor": {
+          "alive": true,
+          "child_pid": 2364809,
+          "consecutive_failures": 0,
+          "kind": "sidecar",
+          "last_call_duration_us": 0,
+          "respawn_count": 0,
+          "respawns_in_window": 0
+        },
+        "graph_edges": 0,
+        "graph_nodes": 0,
+        "lsp_prewarm": {},
+        "server": "lain",
+        "status": "ok",
+        "tools_count": 42,
+        "version": "0.13.0"
+      },
+      "elapsed_s": 23.896199157985393,
+      "host_loadavg_end": [
+        5.86865234375,
+        4.6259765625,
+        4.228515625
+      ],
+      "group": "nat"
+    },
+    {
+      "run": 3,
+      "phase": "cold",
+      "ready_s": 39.37438529700739,
+      "http_s": 0.30290089698974043,
+      "tools_list_s": 0.3046032900165301,
+      "peak_parent_rss_mib": 759.40625,
+      "status": "ready",
+      "host_loadavg_start": [
+        5.86865234375,
+        4.6259765625,
+        4.228515625
+      ],
+      "last_index_status": {
+        "repos": [
+          {
+            "health": "ready",
+            "id": "nat"
+          },
+          {
+            "health": "ready",
+            "id": "nat-examples"
+          },
+          {
+            "health": "ready",
+            "id": "nat-ui"
+          }
+        ]
+      },
+      "health": {
+        "federation": {
+          "git_sensor": {
+            "alive": true,
+            "child_pid": 2364971,
+            "consecutive_failures": 0,
+            "kind": "sidecar",
+            "last_call_duration_us": 464640,
+            "respawn_count": 0,
+            "respawns_in_window": 0
+          },
+          "memory_estimate_bytes": 11789400,
+          "repos": [
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 2364971,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 464640,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nat"
+            },
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 2364976,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 14390,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nat-examples"
+            },
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 2364973,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 24812,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nat-ui"
+            }
+          ],
+          "total_edges": 67842,
+          "total_nodes": 25026
+        },
+        "git_sensor": {
+          "alive": true,
+          "child_pid": 2364991,
+          "consecutive_failures": 0,
+          "kind": "sidecar",
+          "last_call_duration_us": 0,
+          "respawn_count": 0,
+          "respawns_in_window": 0
+        },
+        "graph_edges": 0,
+        "graph_nodes": 0,
+        "lsp_prewarm": {},
+        "server": "lain",
+        "status": "ok",
+        "tools_count": 42,
+        "version": "0.13.0"
+      },
+      "elapsed_s": 39.40643303000252,
+      "host_loadavg_end": [
+        6.1435546875,
+        4.896484375,
+        4.33935546875
+      ],
+      "group": "nat"
+    },
+    {
+      "run": 3,
+      "phase": "warm",
+      "ready_s": 23.66761853900971,
+      "http_s": 1.1073913860018365,
+      "tools_list_s": 1.1102937720133923,
+      "peak_parent_rss_mib": 473.09765625,
+      "status": "ready",
+      "host_loadavg_start": [
+        6.1435546875,
+        4.896484375,
+        4.33935546875
+      ],
+      "last_index_status": {
+        "repos": [
+          {
+            "health": "ready",
+            "id": "nat"
+          },
+          {
+            "health": "ready",
+            "id": "nat-examples"
+          },
+          {
+            "health": "ready",
+            "id": "nat-ui"
+          }
+        ]
+      },
+      "health": {
+        "federation": {
+          "git_sensor": {
+            "alive": true,
+            "child_pid": 2365360,
+            "consecutive_failures": 0,
+            "kind": "sidecar",
+            "last_call_duration_us": 466243,
+            "respawn_count": 0,
+            "respawns_in_window": 0
+          },
+          "memory_estimate_bytes": 11789800,
+          "repos": [
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 2365360,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 466243,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nat"
+            },
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 2365365,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 17426,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nat-examples"
+            },
+            {
+              "git_sensor": {
+                "alive": true,
+                "child_pid": 2365362,
+                "consecutive_failures": 0,
+                "kind": "sidecar",
+                "last_call_duration_us": 20945,
+                "respawn_count": 0,
+                "respawns_in_window": 0
+              },
+              "health": "ready",
+              "id": "nat-ui"
+            }
+          ],
+          "total_edges": 67846,
+          "total_nodes": 25026
+        },
+        "git_sensor": {
+          "alive": true,
+          "child_pid": 2365377,
+          "consecutive_failures": 0,
+          "kind": "sidecar",
+          "last_call_duration_us": 0,
+          "respawn_count": 0,
+          "respawns_in_window": 0
+        },
+        "graph_edges": 0,
+        "graph_nodes": 0,
+        "lsp_prewarm": {},
+        "server": "lain",
+        "status": "ok",
+        "tools_count": 42,
+        "version": "0.13.0"
+      },
+      "elapsed_s": 23.702101419010432,
+      "host_loadavg_end": [
+        6.966796875,
+        5.19287109375,
+        4.45263671875
+      ],
+      "group": "nat"
+    }
+  ],
+  "summary": {
+    "openshell/cold": {
+      "n": 3,
+      "median_s": 276.1881616800092,
+      "min_s": 272.5102015750017,
+      "max_s": 285.10634421900613
+    },
+    "openshell/warm": {
+      "n": 3,
+      "median_s": 165.2252979420009,
+      "min_s": 163.53864223798155,
+      "max_s": 169.22095586700016
+    },
+    "nat/cold": {
+      "n": 3,
+      "median_s": 40.84999551202054,
+      "min_s": 39.37438529700739,
+      "max_s": 44.06834134500241
+    },
+    "nat/warm": {
+      "n": 3,
+      "median_s": 23.880030969972722,
+      "min_s": 23.66761853900971,
+      "max_s": 28.248349753994262
+    }
+  },
+  "notes": [
+    "cold = fresh Lain data directory; OS page cache is not flushed",
+    "warm = restart using the preceding cold run's data directory",
+    "RSS samples cover the server parent only, at roughly 100ms plus probe latency",
+    "Readiness requires the exact repo roster ready after cross-repo linking"
+  ],
+  "source_commit": "4b877781fdca8ef6ec1690693b12dabfa729202e",
+  "started_utc": "2026-11-06T20:02:03Z"
+}

@@ -527,7 +527,8 @@ mod wiring_tests {
         );
         let server = std::fs::read_to_string(root.join("src/cli/server.rs")).unwrap();
         assert!(
-            server.contains("fed.index_all()"),
+            server.contains("fed.index_all_for_startup()")
+                && server.contains("repo.start_watcher()"),
             "`lain server` must run the index pass that starts the watchers"
         );
     }

@@ -587,7 +587,13 @@ fn envelope_error_text(env: &serde_json::Value) -> String {
 fn server_starts_when_embedding_model_missing() {
     let port = free_port();
     let host = format!("127.0.0.1:{port}");
-    let _server = boot_server_fixture(port);
+    let model_home = tempfile::tempdir().unwrap();
+    let (_server, _) = boot_server_with(
+        port,
+        &[],
+        &[("LAIN_MODEL_DIR", model_home.path().to_str().unwrap())],
+    )
+    .unwrap();
 
     let body = serde_json::json!({
         "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {},

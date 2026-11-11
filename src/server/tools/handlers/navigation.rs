@@ -10,11 +10,24 @@ use crate::server::tools::{UiSession, UiSessionData};
 use std::collections::{HashMap, HashSet, VecDeque};
 use uuid::Uuid;
 
+pub struct DependencyReport {
+    pub text: String,
+    pub nodes: Vec<GraphNode>,
+}
+
 pub fn trace_dependency(
     graph: &GraphDatabase,
     overlay: &VolatileOverlay,
     symbol: &str,
 ) -> Result<String, LainError> {
+    trace_dependency_report(graph, overlay, symbol).map(|report| report.text)
+}
+
+pub fn trace_dependency_report(
+    graph: &GraphDatabase,
+    overlay: &VolatileOverlay,
+    symbol: &str,
+) -> Result<DependencyReport, LainError> {
     // 1. Resolve handle
     let start_node = resolve_node(graph, overlay, symbol)?;
     let start_id = start_node.id.clone();
@@ -70,7 +83,7 @@ pub fn trace_dependency(
         }
     }
 
-    Ok(format!(
+    let text = format!(
         "Found {} dependency nodes in Merged Brain:\n{}",
         results.len(),
         results
@@ -78,12 +91,17 @@ pub fn trace_dependency(
             .map(|n| format!("- {} ({:?})", n.name, n.node_type))
             .collect::<Vec<_>>()
             .join("\n")
-    ))
+    );
+    Ok(DependencyReport {
+        text,
+        nodes: results,
+    })
 }
 
 pub async fn get_call_chain(
     graph: &GraphDatabase,
     overlay: &VolatileOverlay,
+    workspace: &std::path::Path,
     federation: Option<&FederatedIndex>,
     from: &str,
     to: &str,
@@ -153,6 +171,8 @@ pub async fn get_call_chain(
             )));
         }
     }
+    let from_defs = starts.len();
+    let to_defs = end_nodes.len();
     let ends: HashSet<String> = end_nodes.into_iter().map(|n| n.id).collect();
 
     let mut queue = VecDeque::new();
@@ -201,9 +221,51 @@ pub async fn get_call_chain(
     }
 
     let Some(end_id) = found else {
+        // "No path" is only conclusive when the answer could have found
+        // one: neither end is reached through a dispatcher, neither
+        // end's file moved on after its scan, and neither name matched
+        // several definitions. Otherwise the path may exist and the
+        // static graph cannot see it.
+        // The from end only cares about dispatch hops out of its own
+        // file — a dynamically-reached `from` means its *callers* are
+        // invisible, which does not bear on paths from it. The to end
+        // keeps both forms: a dynamically-reached `to` may be reachable
+        // through a hop the static graph cannot follow.
+        let dynamic = starts
+            .iter()
+            .any(|n| crate::server::tools::answer_scope::file_dispatches_dynamically(graph, n))
+            || ends.iter().any(|id| {
+                graph.get_node(id).ok().flatten().is_some_and(|n| {
+                    crate::server::tools::answer_scope::dispatches_dynamically(graph, &n)
+                })
+            });
+        let stale = starts
+            .iter()
+            .any(|n| crate::server::tools::answer_scope::is_stale(graph, workspace, &n.path))
+            || ends.iter().any(|id| {
+                graph.get_node(id).ok().flatten().is_some_and(|n| {
+                    crate::server::tools::answer_scope::is_stale(graph, workspace, &n.path)
+                })
+            });
+        // Not ambiguity: the BFS queued every definition of both names,
+        // so this negative covers all of them — the single-target
+        // tools' `AmbiguousTarget` ("this answer covers one of them")
+        // would contradict the coverage sentence below. Several
+        // definitions are stated there as the fact they are.
+        let scope = crate::server::tools::answer_scope::reason_for(false, stale, dynamic);
+        let note = match scope {
+            Some(reason) => format!(" — {}: {}", reason.wire_label(), reason.explanation()),
+            None => String::new(),
+        };
         return Ok(format!(
-            "No call path found from '{}' to '{}' in this repository.",
-            from, to
+            "No call path found from '{}' to '{}' in this repository{}.\n\
+             The search covered every definition of both names ({from_defs} for '{from}', \
+             {to_defs} for '{to}').",
+            from,
+            to,
+            note,
+            from_defs = from_defs,
+            to_defs = to_defs,
         ));
     };
 

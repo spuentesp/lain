@@ -145,11 +145,22 @@ async fn freshness_reflects_the_last_update_not_construction() {
         out.contains("compute"),
         "the answer should name the queried symbol: {out}"
     );
-    // New contract (#292): blast radius is silent about freshness unless
-    // the file backing the answer really changed after its last scan. A
-    // just-touched overlay over unchanged files must NOT warn.
+    // #292 and the answer-scope note are two layers with two claims. The
+    // freshness *marker* ("was modified ... after it was last indexed")
+    // is silent unless the file really changed after its scan — an
+    // overlay just touched must not print it (impact's own tests pin
+    // that split). The *scope* note is the different, newer claim:
+    // these nodes carry no scan timestamp at all, so the index cannot
+    // prove it saw the file, and the answer says so in the shared
+    // vocabulary — `stale_or_unindexed` covers "or was never indexed".
+    // The marker's own sentences are the pin — not "after it was last
+    // indexed", which the scope note's explanation legitimately shares.
     assert!(
-        !out.contains("after it was last indexed"),
-        "a just-touched overlay with unchanged files must not warn: {out}"
+        !out.contains("was modified") && !out.contains("is not in the graph"),
+        "a just-touched overlay over unchanged files must not print the freshness marker: {out}"
+    );
+    assert!(
+        out.contains("stale_or_unindexed"),
+        "a never-scanned file must qualify the answer rather than read as conclusive: {out}"
     );
 }

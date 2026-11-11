@@ -114,6 +114,8 @@ pub struct FederatedIndex {
     /// Bound on concurrent repo index passes. Set by the loader from
     /// `FederationConfig::max_concurrent_indexers`.
     max_concurrent_indexers: AtomicUsize,
+    startup_restored: std::sync::atomic::AtomicBool,
+    startup_inputs: RwLock<Option<String>>,
     /// Set by `project_nodes` / `project_edges` whenever the
     /// projected graph could change `Binds` outcomes. Cleared by
     /// `rejoin_contracts_if_dirty` after the join lands (§5.3).
@@ -217,6 +219,8 @@ impl FederatedIndex {
             max_concurrent_indexers: AtomicUsize::new(
                 crate::federation::config::FederationConfig::default().max_concurrent_indexers,
             ),
+            startup_restored: std::sync::atomic::AtomicBool::new(false),
+            startup_inputs: RwLock::new(None),
             load_errors: RwLock::new(Vec::new()),
             contracts_dirty: crate::sync::DirtyFlag::new(false),
             contract_node_ids: DashMap::new(),
@@ -226,6 +230,100 @@ impl FederatedIndex {
             contract_snapshot: RwLock::new(None),
             client_defs_cache: DashMap::new(),
         }
+    }
+
+    pub fn startup_restored(&self) -> bool {
+        self.startup_restored.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn set_startup_restored(&self, value: bool) {
+        self.startup_restored.store(value, Ordering::Release);
+    }
+
+    pub(crate) fn set_startup_inputs(&self, key: Option<String>) {
+        *self.startup_inputs.write() = key;
+    }
+
+    pub(crate) fn startup_inputs(&self) -> Option<String> {
+        self.startup_inputs.read().clone()
+    }
+
+    /// Rebuild process-local lookup tables without reprojecting or rematching
+    /// the persisted graph. Contract queries still get a fresh in-memory join.
+    pub(crate) fn restore_projection_metadata(&self) -> Result<(), LainError> {
+        let _metadata_timing = super::startup_cache::StartupTiming::start("metadata_restore");
+        for (id, _) in self.list_repos() {
+            if let Some(repo) = self.get_repo(&id) {
+                let _sensor_timing =
+                    super::startup_cache::StartupTiming::start("metadata_env_owners");
+                // These sensors keep process-local metadata rather than graph
+                // nodes. A persisted graph cannot restore their side channels.
+                crate::server::sensors::env_sensor::scan_workspace_env(
+                    repo.db(),
+                    repo.local_path(),
+                    &repo.id_namespace,
+                )?;
+                crate::server::sensors::codeowners_sensor::scan_workspace_codeowners_for_repo(
+                    repo.db(),
+                    repo.local_path(),
+                    &repo.id_namespace,
+                    id.as_str(),
+                )?;
+            }
+            let mut ids = std::collections::BTreeSet::new();
+            let ids_timing = super::startup_cache::StartupTiming::start("metadata_contract_ids");
+            let prefix = format!("{}:", id.as_str());
+            self.backend.visit_nodes(&mut |node| {
+                if node.id.starts_with(&prefix) && !node.contract.is_empty() {
+                    ids.insert(node.id.clone());
+                }
+            })?;
+            self.contract_node_ids.insert(id.clone(), ids);
+            drop(ids_timing);
+            let refs_timing = super::startup_cache::StartupTiming::start("metadata_service_refs");
+            self.refresh_service_refs(&id);
+            drop(refs_timing);
+        }
+        let symbol_timing = super::startup_cache::StartupTiming::start("metadata_symbol_index");
+        self.rebuild_symbol_index();
+        drop(symbol_timing);
+        let join_timing = super::startup_cache::StartupTiming::start("metadata_contract_join");
+        self.rejoin_contracts_if_dirty()?;
+        drop(join_timing);
+        Ok(())
+    }
+
+    pub(crate) fn startup_inputs_unchanged(&self) -> Result<bool, LainError> {
+        let Some(path) = self.config_path() else {
+            return Ok(false);
+        };
+        let config = crate::federation::loader::resolve_data_dir(
+            crate::federation::config::FederationConfig::load(&path)?,
+            &path,
+        );
+        let current = crate::federation::startup_cache::inputs(self, &config)?;
+        Ok(current.is_some() && current == self.startup_inputs())
+    }
+
+    /// Checkpoint a fully ready, unchanged federation for the next launch.
+    /// Also used by prewarming callers after indexing and linking complete.
+    pub fn checkpoint_startup(&self) -> Result<bool, LainError> {
+        self.checkpoint_startup_inner(false)
+    }
+
+    pub(crate) fn checkpoint_startup_held(&self) -> Result<bool, LainError> {
+        self.checkpoint_startup_inner(true)
+    }
+
+    fn checkpoint_startup_inner(&self, allow_held: bool) -> Result<bool, LainError> {
+        let Some(path) = self.config_path() else {
+            return Ok(false);
+        };
+        let config = crate::federation::loader::resolve_data_dir(
+            crate::federation::config::FederationConfig::load(&path)?,
+            &path,
+        );
+        crate::federation::startup_cache::publish(self, &config, allow_held)
     }
 
     /// Record a repository that failed to load.
@@ -368,6 +466,7 @@ impl FederatedIndex {
                 return Err(e);
             }
         };
+        index.set_reference_cache_dir(data_dir.join("static-ref-cache"));
         // If the federation already has an overlay wired in (the
         // production constructor installs it before the first `add_repo`),
         // share the same Arc so a successful index() updates the
@@ -570,6 +669,124 @@ impl FederatedIndex {
         self.project_nodes(id).await?;
         self.project_edges(id).await?;
         self.refresh_service_refs(id);
+        Ok(())
+    }
+
+    /// Refresh the complete cross-repo reference set without recomputing
+    /// signature peers. Relinking changes edges, not the indexed symbols.
+    /// Replace only syntax-derived Calls/Uses; confirmed/runtime evidence has
+    /// a separate owner and must survive a source-reference refresh.
+    pub async fn relink_repo(&self, id: &RepoId) -> Result<usize, LainError> {
+        let repo = self
+            .get_repo(id)
+            .ok_or_else(|| LainError::NotFound(format!("repo {id}")))?;
+        let previous = repo.health();
+        repo.set_health(RepoHealth::Indexing);
+        let result = async {
+            repo.relink_cross_repo().await?;
+            repo.db().clear_calls_published();
+            let _guard = self.projection_lock.lock();
+            if !self
+                .get_repo(id)
+                .is_some_and(|current| Arc::ptr_eq(&current, &repo))
+            {
+                return Err(LainError::Cancelled);
+            }
+            let mut batch = Vec::new();
+            for mut edge in repo.db().take_pending_external_edges() {
+                let Some(node) = repo.db().get_node(&edge.source_id)? else {
+                    continue;
+                };
+                edge.source_id = global_id_str(id, &node);
+                edge.cross_repo = false;
+                if !self.backend.has_node(&edge.source_id)?
+                    || !self.backend.has_node(&edge.target_id)?
+                {
+                    continue;
+                }
+                let authoritative = self
+                    .backend
+                    .edges_to(&edge.target_id, edge.edge_type.clone())?
+                    .iter()
+                    .any(|existing| {
+                        existing.source_id == edge.source_id
+                            && matches!(
+                                existing.provenance,
+                                Some(
+                                    crate::schema::EdgeProvenance::Confirmed { .. }
+                                        | crate::schema::EdgeProvenance::Runtime { .. }
+                                )
+                            )
+                    });
+                if !authoritative {
+                    batch.push(edge);
+                }
+            }
+            let prefix = format!("{}:", id.as_str());
+            let mut stale = Vec::new();
+            self.backend.visit_edges(&mut |edge| {
+                if edge.source_id.starts_with(&prefix)
+                    && !edge.target_id.starts_with(&prefix)
+                    && matches!(edge.edge_type, EdgeType::Calls | EdgeType::Uses)
+                    && matches!(
+                        edge.provenance,
+                        None | Some(crate::schema::EdgeProvenance::Static {
+                            source: crate::schema::StaticSource::TreeSitter
+                        })
+                    )
+                {
+                    stale.push(edge.clone());
+                }
+            })?;
+            if !stale.is_empty() {
+                self.backend.remove_edges(&stale)?;
+            }
+            let count = batch.len();
+            if !batch.is_empty() {
+                self.backend.upsert_edges_batch(&batch)?;
+            }
+            self.contracts_dirty.mark();
+            if let Some(commit) = repo.db().get_last_commit()? {
+                repo.db().mark_calls_published(&commit);
+            }
+            Ok(count)
+        }
+        .await;
+        repo.set_health(if result.is_ok() {
+            previous
+        } else {
+            RepoHealth::Degraded
+        });
+        result
+    }
+
+    /// A changed selected repo set must not retain nodes from the previous
+    /// federation in the shared backend. Per-repo disk indexes stay reusable.
+    pub(crate) fn prune_unregistered_nodes(&self) -> Result<(), LainError> {
+        let _guard = self.projection_lock.lock();
+        let owners: std::collections::BTreeSet<_> = self
+            .list_repos()
+            .into_iter()
+            .map(|(id, _)| id.as_str().to_owned())
+            .collect();
+        let mut stale = Vec::new();
+        self.backend.visit_nodes(&mut |node| {
+            if !node
+                .id
+                .split(':')
+                .next()
+                .is_some_and(|owner| owners.contains(owner))
+            {
+                stale.push(node.id.clone());
+            }
+        })?;
+        if !stale.is_empty() {
+            self.backend.remove_nodes(&stale)?;
+            tracing::info!(
+                "federation: removed {} nodes outside the selected repo set",
+                stale.len()
+            );
+        }
         Ok(())
     }
 
@@ -871,8 +1088,21 @@ impl FederatedIndex {
         let matcher = CrossRepoMatcher::new(&other_nodes);
         let mut target_nodes: std::collections::BTreeMap<String, GraphNode> =
             std::collections::BTreeMap::new();
+        let mut signature_matches = std::collections::HashMap::new();
         for new_node in &batch_nodes_owned {
-            let matches = matcher.find_matches(new_node, 5, 0.5);
+            if !EdgeType::CrossRepoSameSymbol
+                .source_types()
+                .contains(&new_node.node_type)
+            {
+                continue;
+            }
+            let Some(signature) = new_node.signature.as_deref() else {
+                continue;
+            };
+            let matches = signature_matches
+                .entry(signature)
+                .or_insert_with(|| matcher.find_matches(new_node, 5, 0.5));
+            let matches = matches.clone();
             for (target_gid, sim, _confidence) in matches {
                 // The matched node's owning repo may not have run its own
                 // `project_repo` yet (callers project repos one at a time,
@@ -1178,6 +1408,14 @@ impl FederatedIndex {
     /// sequential loop let one repo whose language server monopolised
     /// the runtime starve every repo behind it.
     pub async fn index_all(self: &Arc<Self>) {
+        self.index_all_inner(false).await;
+    }
+
+    pub async fn index_all_for_startup(self: &Arc<Self>) {
+        self.index_all_inner(true).await;
+    }
+
+    async fn index_all_inner(self: &Arc<Self>, local_only: bool) {
         let semaphore = Arc::new(tokio::sync::Semaphore::new(
             self.max_concurrent_indexers().max(1),
         ));
@@ -1195,17 +1433,14 @@ impl FederatedIndex {
                     .expect("index semaphore is never closed");
                 tracing::info!("lain server: indexing repo '{}'", id.as_str());
                 let pass = fed.enter_index_pass();
-                let indexed = repo.index().await;
+                let indexed = if local_only {
+                    repo.index_local().await
+                } else {
+                    repo.index().await
+                };
                 drop(pass);
                 match indexed {
-                    Ok(()) => {
-                        if let Err(e) = fed.project_repo(&id).await {
-                            tracing::warn!(
-                                "lain server: project_repo for '{}' after indexing failed: {e}",
-                                id.as_str()
-                            );
-                        }
-                    }
+                    Ok(()) => {}
                     Err(e) => {
                         // Demote here too: the demotion must not depend on
                         // `RepoIndex::index` doing it.
@@ -1226,6 +1461,25 @@ impl FederatedIndex {
         }
         for handle in handles {
             let _ = handle.await;
+        }
+        // All per-repo symbols must exist before matching or resolving peers.
+        // Never let task completion order choose which cross-repo edges exist.
+        for (id, _) in self.list_repos() {
+            if let Err(error) = self.project_nodes(&id).await {
+                tracing::warn!("node projection failed for {id}: {error}");
+                if let Some(repo) = self.get_repo(&id) {
+                    repo.set_health(RepoHealth::Degraded);
+                }
+            }
+        }
+        for (id, _) in self.list_repos() {
+            if let Err(error) = self.project_edges(&id).await {
+                tracing::warn!("edge projection failed for {id}: {error}");
+                if let Some(repo) = self.get_repo(&id) {
+                    repo.set_health(RepoHealth::Degraded);
+                }
+            }
+            self.refresh_service_refs(&id);
         }
     }
 
@@ -1464,12 +1718,12 @@ impl FederatedIndex {
                     let full = root.join(path);
                     // Graph paths and configuration are workspace-relative; do not
                     // follow a symlink out of the owning source checkout.
-                    let full = match dunce::canonicalize(&full) {
+                    let full = match full.canonicalize() {
                         Ok(p) => p,
                         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
                         Err(e) => return Err(e.into()),
                     };
-                    if !full.starts_with(dunce::canonicalize(root)?) {
+                    if !full.starts_with(root.canonicalize()?) {
                         return Err(LainError::Other(
                             "Rust RPC source escaped repository".into(),
                         ));
@@ -1811,6 +2065,50 @@ impl FederatedIndex {
         self.depends_cache.insert(key, answer);
         answer
     }
+
+    /// Resolve a uniquely-owned symbol in a declared dependency. When a
+    /// qualifier is supplied, also require the target node to belong to that
+    /// type; this keeps calls like `Bytes::from_static()` from linking to an
+    /// unrelated local or dependency method with the same name.
+    fn resolve_repo_symbol(
+        &self,
+        source_repo: &RepoId,
+        name: &str,
+        qualifier: Option<&str>,
+    ) -> Option<GlobalId> {
+        let entries = self.symbol_to_repos.get(name)?;
+        let candidates: Vec<RepoId> = distinct_repos(entries.value())
+            .into_iter()
+            .filter(|repo| repo != source_repo)
+            .collect();
+        if candidates.len() != 1 {
+            return None;
+        }
+        let target_repo = &candidates[0];
+        if !self.repo_depends_on(source_repo, target_repo) {
+            return None;
+        }
+        let target = self.get_repo(target_repo)?;
+        let indices = target.db().find_indices_by_name(name);
+        let graph = target.db().graph_ref_for_read();
+        let mut matching = indices
+            .into_iter()
+            .filter_map(|index| graph.node_weight(index))
+            .filter(|node| {
+                node.name == name && qualifier.is_none_or(|q| node.container.as_deref() == Some(q))
+            })
+            .map(|node| {
+                GlobalId::new(
+                    target_repo,
+                    node.node_type.clone(),
+                    &node.path,
+                    &node.name,
+                    node.line_start,
+                )
+            });
+        let first = matching.next()?;
+        matching.next().is_none().then_some(first)
+    }
 }
 
 const MANIFEST_FILES: &[&str] = &[
@@ -1991,54 +2289,18 @@ impl crate::federation::cross_repo::CrossRepoResolver for FederatedIndex {
             }
         }
 
-        // Strategy 2: name only (tree-sitter refs). Use the federation's
-        // symbol index. If exactly one non-source repo owns the name,
-        // look up its kind+path in that repo and return the global id.
-        if let Some(name) = name {
-            let cross_repos: Vec<RepoId> = {
-                let entries = self.symbol_to_repos.get(name)?;
-                let distinct = distinct_repos(entries.value());
-                distinct.into_iter().filter(|r| r != source_repo).collect()
-            };
-            // A bare name only means "that repo's symbol" if the calling
-            // repo depends on that repo: pflag's `fmt.Println(...)` and
-            // `Usage()` linked to cobra's methods of the same name.
-            if cross_repos.len() == 1 && self.repo_depends_on(source_repo, &cross_repos[0]) {
-                let rid = &cross_repos[0];
-                if let Some(idx) = self.get_repo(rid) {
-                    let db = idx.db();
-                    let indices = db.find_indices_by_name(name);
-                    if !indices.is_empty() {
-                        let g = db.graph_ref_for_read();
-                        // Only a unique name in the target repo is a decidable
-                        // link. With several definitions the call could go to
-                        // any of them, so emit nothing, as the local resolver
-                        // does in `resolve_static_edges`. This also keeps the
-                        // answer independent of index order.
-                        let mut matches = indices
-                            .into_iter()
-                            .filter_map(|node_idx| g.node_weight(node_idx))
-                            .filter(|node| node.name == name)
-                            .map(|node| {
-                                GlobalId::new(
-                                    rid,
-                                    node.node_type.clone(),
-                                    &node.path,
-                                    &node.name,
-                                    node.line_start,
-                                )
-                            });
-                        let first = matches.next()?;
-                        return match matches.next() {
-                            Some(_) => None,
-                            None => Some(first),
-                        };
-                    }
-                }
-            }
-        }
+        // Strategy 2: name-only tree-sitter refs. A type qualifier, when
+        // available, narrows same-named methods before returning a target.
+        name.and_then(|name| self.resolve_repo_symbol(source_repo, name, None))
+    }
 
-        None
+    fn resolve_cross_repo_qualified(
+        &self,
+        source_repo: &RepoId,
+        name: &str,
+        qualifier: &str,
+    ) -> Option<GlobalId> {
+        self.resolve_repo_symbol(source_repo, name, Some(qualifier))
     }
 }
 
@@ -2174,6 +2436,8 @@ mod phase_b_c_tests {
 #[cfg(test)]
 mod dependency_tests {
     use super::*;
+    use crate::federation::repo_source::WorkspaceDirSource;
+    use crate::schema::{GraphNode, NodeType};
 
     #[test]
     fn tokens_are_bounded() {
@@ -2304,5 +2568,120 @@ mod dependency_tests {
         assert!(!fed.repo_depends_on(&consumer_id, &provider_id));
         fed.set_declared_packages(&provider_id, vec!["@nvidia/openshell-sdk".into()]);
         assert!(fed.repo_depends_on(&consumer_id, &provider_id));
+    }
+
+    #[tokio::test]
+    async fn qualified_calls_require_a_declared_dependency_and_unique_container_match() {
+        let root = tempfile::tempdir().unwrap();
+        let bytes = root.path().join("bytes");
+        let tokio = root.path().join("tokio");
+        let unrelated = root.path().join("unrelated");
+        for dir in [&bytes, &tokio, &unrelated] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(
+            bytes.join("Cargo.toml"),
+            "[package]\nname = \"bytes\"\nversion = \"1.0.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tokio.join("Cargo.toml"),
+            "[package]\nname = \"tokio\"\nversion = \"1.0.0\"\nedition = \"2021\"\n\
+             [dependencies]\nbytes = \"1\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            unrelated.join("Cargo.toml"),
+            "[package]\nname = \"unrelated\"\nversion = \"1.0.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+
+        for dir in [&bytes, &tokio, &unrelated] {
+            let repo = git2::Repository::init(dir).unwrap();
+            let mut index = repo.index().unwrap();
+            index
+                .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
+                .unwrap();
+            index.write().unwrap();
+            let tree_id = index.write_tree().unwrap();
+            let tree = repo.find_tree(tree_id).unwrap();
+            let signature = git2::Signature::now("test", "test@example.com").unwrap();
+            repo.commit(Some("HEAD"), &signature, &signature, "init", &tree, &[])
+                .unwrap();
+        }
+
+        let data_dir = root.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let backend: Arc<dyn crate::federation::graph_backend::GraphBackend> =
+            Arc::new(crate::federation::graph_backend::PetgraphBackend::new(&data_dir).unwrap());
+        let fed = FederatedIndex::new(backend);
+        let bytes_id = RepoId::new("bytes").unwrap();
+        let tokio_id = RepoId::new("tokio").unwrap();
+        let unrelated_id = RepoId::new("unrelated").unwrap();
+        for (id, dir) in [
+            (&bytes_id, &bytes),
+            (&tokio_id, &tokio),
+            (&unrelated_id, &unrelated),
+        ] {
+            let source: Box<dyn RepoSource> = Box::new(
+                WorkspaceDirSource::with_config(
+                    id.clone(),
+                    dir.clone(),
+                    crate::federation::config::SourceConfig::WorkspaceDir { path: dir.clone() },
+                )
+                .unwrap(),
+            );
+            source.fetch().await.unwrap();
+            fed.add_repo(source, &data_dir).await.unwrap();
+        }
+
+        let provider = fed.get_repo(&bytes_id).unwrap();
+        let add_method = |name: &str, container: &str, line: u32| {
+            let mut node = GraphNode::new(
+                NodeType::Method,
+                name.to_string(),
+                format!("src/{container}_{line}.rs"),
+            );
+            node.container = Some(container.to_string());
+            node.line_start = Some(line);
+            provider.db().upsert_node(node).unwrap();
+        };
+        add_method("from_static", "Bytes", 10);
+        add_method("from_static", "OtherType", 20);
+        add_method("duplicate", "Bytes", 30);
+        add_method("duplicate", "Bytes", 40);
+        fed.rebuild_symbol_index();
+
+        let resolved =
+            crate::federation::cross_repo::CrossRepoResolver::resolve_cross_repo_qualified(
+                &fed,
+                &tokio_id,
+                "from_static",
+                "Bytes",
+            );
+        assert_eq!(
+            resolved.as_ref().map(GlobalId::as_str),
+            Some("bytes:Method:src/Bytes_10.rs:from_static:10")
+        );
+        assert!(
+            crate::federation::cross_repo::CrossRepoResolver::resolve_cross_repo_qualified(
+                &fed,
+                &tokio_id,
+                "duplicate",
+                "Bytes",
+            )
+            .is_none(),
+            "two methods on the requested type remain ambiguous"
+        );
+        assert!(
+            crate::federation::cross_repo::CrossRepoResolver::resolve_cross_repo_qualified(
+                &fed,
+                &unrelated_id,
+                "from_static",
+                "Bytes",
+            )
+            .is_none(),
+            "a same-named target is not linked without a declared dependency"
+        );
     }
 }
