@@ -107,6 +107,12 @@ Both this and the previous defect are in code that landed on `dev` after
 v0.14.0 and that `dev`'s fast lane never exercises on macOS or
 Windows.
 
+One run of the Windows job failed during the *build* step, before any
+test ran: the `ort-sys` build script could not extract its prebuilt
+ONNX Runtime download (`Failed to extract to
+'...onnxruntime.lib': Peer disconnected`). That is a transient CDN
+failure on the runner, not a code defect — the job passed on re-run.
+
 ## Verification (on the exact release tree)
 
 - `cargo test --workspace --no-fail-fast`: see the PR comment for the
