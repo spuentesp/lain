@@ -109,5 +109,5 @@ tests prevent build failures from passing as unviable or caught mutants.
 - [x] All four `HTTP_PROXY_PATH` cases have evidence-backed outcomes.
 - [x] Graph tools explain ambiguity, unresolved calls, stale data, and truncation where applicable.
 - [x] Startup reports state comparable conditions and reflect verified raw data.
-- [ ] Required and optional checks have recorded results from the final tree.
+- [x] Required and optional checks have recorded results from the final tree (the mutation gate is recorded as **waived by the owner** for v0.15.0 after three environment-killed runs — see the release audit's pending inventory; it is not recorded as passed).
 - [x] Documentation matches those results; no open audit item is described as closed without evidence.
