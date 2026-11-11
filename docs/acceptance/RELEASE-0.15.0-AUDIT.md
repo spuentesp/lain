@@ -87,6 +87,22 @@ making the paths relative to it. `source_key_accepts_a_root_that_reaches_the_rep
 reproduces the failure through a symlinked root and fails without the
 fix.
 
+### 5. A snapshot test renamed a directory the server had open
+
+`unreadable_snapshot_source_is_an_error_in_structured_and_legacy_tools`
+renamed the mirror out of the way to make the snapshot source
+unreadable. The running server holds the mirror's worktree registration
+open, and Windows refuses to rename a directory another process has
+open, so the test failed there with `The process cannot access the file
+because it is being used by another process`. The server is now stopped
+before the rename and restarted afterwards, on a new port. The test
+still asserts what it asserted before: with the mirror in place the
+tools answer from live data and the test fails.
+
+Both this and the previous defect are in code that landed on `dev` after
+v0.14.0 and that `dev`'s fast lane never exercises on macOS or
+Windows.
+
 ## Verification (on the exact release tree)
 
 - `cargo test --workspace --no-fail-fast`: see the PR comment for the

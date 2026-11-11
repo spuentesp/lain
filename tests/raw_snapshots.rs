@@ -11,7 +11,8 @@ struct RawSnapshotFixture {
     _tmp: tempfile::TempDir,
     root: std::path::PathBuf,
     host: String,
-    _server: common::ServerGuard,
+    _server: Option<common::ServerGuard>,
+    repos_yaml: std::path::PathBuf,
     snapshot: String,
 }
 
@@ -97,7 +98,8 @@ impl RawSnapshotFixture {
             _tmp: tmp,
             root: root.clone(),
             host,
-            _server: server,
+            _server: Some(server),
+            repos_yaml,
             snapshot,
         }
     }
@@ -109,6 +111,27 @@ impl RawSnapshotFixture {
             args["repo_id"] = json!("orders");
         }
         tools_call_envelope(&self.host, name, args)
+    }
+
+    /// Stop the server and wait for it to exit, so it releases the
+    /// handles it holds on the mirror. Windows refuses to rename a
+    /// directory that any process still has open.
+    fn stop_server(&mut self) {
+        if let Some(mut server) = self._server.take() {
+            let _ = server.child.kill();
+            let _ = server.child.wait();
+        }
+    }
+
+    /// Boot a fresh server against the same config, on a new port.
+    /// Used after `stop_server` when the test needs the server back.
+    async fn restart_server(&mut self) {
+        let port = common::free_port();
+        let host = format!("127.0.0.1:{port}");
+        let server = common::boot_server(port, &self.repos_yaml);
+        common::wait_for_health(&host, std::time::Duration::from_secs(60));
+        self.host = host;
+        self._server = Some(server);
     }
 }
 
@@ -274,10 +297,17 @@ async fn arbitrary_snapshot_values_never_fall_back_to_live_data() {
 
 #[tokio::test]
 async fn unreadable_snapshot_source_is_an_error_in_structured_and_legacy_tools() {
-    let fixture = RawSnapshotFixture::new().await;
+    let mut fixture = RawSnapshotFixture::new().await;
     let mirror = fixture.root.join("data/mirrors/orders.git");
     let parked = fixture.root.join("data/mirrors/orders.git.parked");
+    // The running server holds the mirror's worktree registration open.
+    // Windows refuses to rename a directory with an open handle, so the
+    // server is stopped first; the mirror is then unreachable and the
+    // snapshot reads must report the failure rather than fall back to
+    // live data.
+    fixture.stop_server();
     std::fs::rename(&mirror, &parked).unwrap();
+    fixture.restart_server().await;
 
     for (tool, args) in [
         ("get_context", json!({"symbol": "old_callee"})),
