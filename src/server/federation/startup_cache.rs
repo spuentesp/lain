@@ -574,7 +574,35 @@ mod tests {
         let via_link = link_parent.join("repo");
 
         // The sensor reports canonical paths; `root` is the symlinked one.
-        let key = source_key(&via_link, &git).unwrap();
-        assert!(key.is_some(), "a clean repo must produce a source key");
+        // The property `source_key` exists for is that the key is the same
+        // either way — that is what lets identical checkouts share a cache
+        // entry. Asserting only `is_some` would accept a key that is wrong
+        // or empty, which the prefix-stripping bug produced silently.
+        let via_link_key = source_key(&via_link, &git).unwrap();
+        let canonical_key = source_key(&repo, &git).unwrap();
+        assert!(
+            via_link_key.is_some(),
+            "a clean repo must produce a source key"
+        );
+        assert_eq!(
+            via_link_key, canonical_key,
+            "the source key must not depend on whether the root is reached through a symlink"
+        );
+
+        // The key must also mean something: a constant (or empty) key is
+        // self-consistent across the symlink and so passes the equality
+        // above, but it would make two different checkouts collide on one
+        // cache entry. It must be non-empty and change with the content.
+        let key = via_link_key.clone().expect("source key");
+        assert!(!key.is_empty(), "a source key must not be empty");
+
+        std::fs::write(repo.join("extra.rs"), "fn extra() {}\n").unwrap();
+        git_cmd(&["add", "extra.rs"]);
+        git_cmd(&["commit", "-q", "-m", "different content"]);
+        let changed_key = source_key(&repo, &git).unwrap().expect("source key");
+        assert_ne!(
+            key, changed_key,
+            "the source key must change when the tracked files change"
+        );
     }
 }
