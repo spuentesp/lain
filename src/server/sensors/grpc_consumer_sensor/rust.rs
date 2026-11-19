@@ -10,10 +10,39 @@ use tree_sitter::{Node, Query, QueryCursor, StreamingIterator};
 
 #[cfg(test)]
 thread_local! { static PARSE_RUNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
-fn parse_rust_source(source: &str) -> Option<tree_sitter::Tree> {
+pub(super) fn parse_rust_source(source: &str) -> Option<tree_sitter::Tree> {
     #[cfg(test)]
     PARSE_RUNS.with(|n| n.set(n.get() + 1));
-    parse_for_lang(Lang::Rust, source)
+    let tree = parse_for_lang(Lang::Rust, source)?;
+    if !tree.root_node().has_error() {
+        return Some(tree);
+    }
+    // The bundled grammar rejects some attribute placements (`#[cfg(..)]` on a
+    // field of a destructuring pattern), and one error voids the whole file.
+    // Retry with attributes blanked out at the same byte offsets; keep that
+    // tree only when it parses cleanly, otherwise report the original.
+    let blanked = blank_attributes(source);
+    if blanked != source {
+        if let Some(retry) = parse_for_lang(Lang::Rust, &blanked) {
+            if !retry.root_node().has_error() {
+                return Some(retry);
+            }
+        }
+    }
+    Some(tree)
+}
+
+/// `source` with every `#[...]` attribute replaced by spaces (newlines kept),
+/// so byte offsets and line numbers are unchanged.
+fn blank_attributes(source: &str) -> String {
+    static ATTRIBUTE: OnceLock<Regex> = OnceLock::new();
+    let re = ATTRIBUTE.get_or_init(|| Regex::new(r"#!?\[[^\]]*\]").expect("attribute regex"));
+    re.replace_all(source, |m: &regex::Captures| {
+        m[0].chars()
+            .map(|c| if c == '\n' { '\n' } else { ' ' })
+            .collect::<String>()
+    })
+    .into_owned()
 }
 
 #[cfg(test)]
@@ -95,6 +124,12 @@ pub struct RustGrpcConfig {
     followed_wrappers: Vec<FollowedWrapper>,
     #[serde(skip)]
     method_counts: HashMap<String, usize>,
+    /// Simple names of types the repository defines itself that wrap a
+    /// generated client (no tonic dispatch in their methods). Their own
+    /// module is often named `*_client`, so the generated-type pattern
+    /// matches them; a call on one is not an RPC unless a wrapper maps it.
+    #[serde(skip)]
+    local_wrapper_types: BTreeSet<String>,
     #[serde(skip)]
     prepared: Option<Arc<PreparedRepository>>,
 }
@@ -110,6 +145,7 @@ struct PreparedRepository {
     config_hash: [u8; 32],
     wrappers: Vec<FollowedWrapper>,
     method_counts: HashMap<String, usize>,
+    local_wrapper_types: BTreeSet<String>,
     files: BTreeMap<String, PreparedFile>,
 }
 fn repository_cache(
@@ -306,6 +342,7 @@ pub fn detect_rust_grpc_candidates(
     local.prepared = None;
     local.followed_wrappers.clear();
     local.method_counts.clear();
+    local.local_wrapper_types.clear();
     follow_rust_grpc_wrappers(&mut local, &[(path.to_string(), src.to_string())])?;
     let mut candidates = match local.prepared_file(src, path) {
         Some(file) => file.candidates.clone(),
@@ -341,6 +378,7 @@ pub fn follow_rust_grpc_wrappers(
     if let Some(hit) = repository_cache().lock().get(&key).cloned() {
         config.followed_wrappers = hit.wrappers.clone();
         config.method_counts = hit.method_counts.clone();
+        config.local_wrapper_types = hit.local_wrapper_types.clone();
         config.prepared = Some(hit);
         return Ok(());
     }
@@ -349,6 +387,14 @@ pub fn follow_rust_grpc_wrappers(
     direct.wrappers.clear();
     direct.followed_wrappers.clear();
     direct.method_counts.clear();
+    direct.local_wrapper_types.clear();
+    let dispatch = config
+        .tonic_dispatch_patterns
+        .iter()
+        .filter_map(|p| Regex::new(p).ok())
+        .collect::<Vec<_>>();
+    let mut vendored_types = BTreeSet::new();
+    let mut local_types = BTreeSet::new();
     let mut wrappers = Vec::new();
     let mut counts = HashMap::new();
     let mut trees = BTreeMap::new();
@@ -372,11 +418,22 @@ pub fn follow_rust_grpc_wrappers(
                 let Some(owner) = ctx.impl_type(*method) else {
                     continue;
                 };
+                let owner_name = simple_type_name(&owner);
+                if dispatch.iter().any(|d| d.is_match(ctx.text(*method))) {
+                    vendored_types.insert(owner_name.clone());
+                } else {
+                    local_types.insert(owner_name.clone());
+                }
                 if compiled.generated.is_match(&owner) {
                     continue;
                 }
                 let targets: Vec<_> = calls
                     .iter()
+                    .filter(|call| {
+                        // A call on the wrapper type itself (`self.workspace()`) is a
+                        // helper, not the delegation this body is being judged by.
+                        simple_type_name(&call.generated_type) != owner_name
+                    })
                     .filter(|call| {
                         call.site.start_byte >= method.start_byte()
                             && call.site.end_byte <= method.end_byte()
@@ -419,6 +476,7 @@ pub fn follow_rust_grpc_wrappers(
     }
     config.followed_wrappers = wrappers;
     config.method_counts = counts;
+    config.local_wrapper_types = local_types.difference(&vendored_types).cloned().collect();
     let mut files = BTreeMap::new();
     for (path, source) in sources {
         let (candidates, probes) = if let Some(tree) = trees.get(path) {
@@ -453,6 +511,7 @@ pub fn follow_rust_grpc_wrappers(
         config_hash,
         wrappers: config.followed_wrappers.clone(),
         method_counts: config.method_counts.clone(),
+        local_wrapper_types: config.local_wrapper_types.clone(),
         files,
     });
     // Cache derived evidence only, never sources or parse trees. Bound each
@@ -643,7 +702,15 @@ fn detect_with_tree(
         } else {
             ctx.text(method)
         };
-        if ctx.generated.is_match(&ty) && !config.deny_methods.iter().any(|m| m == rpc_method) {
+        // A locally defined wrapper type is not a generated client: an unmapped
+        // call on it (`client.workspace()`) is ordinary code, not an RPC stub.
+        let unmapped_local_wrapper = explicit.is_none()
+            && automatic.is_none()
+            && config.local_wrapper_types.contains(&simple_type_name(&ty));
+        if ctx.generated.is_match(&ty)
+            && !unmapped_local_wrapper
+            && !config.deny_methods.iter().any(|m| m == rpc_method)
+        {
             out.push(RustGrpcCandidate {
                 provenance: if explicit.is_some() {
                     RustGrpcProvenance::ConfiguredWrapper
@@ -672,6 +739,19 @@ fn detect_with_tree(
     out.sort_by_key(|c| c.site.start_byte);
     out.dedup_by_key(|c| c.site.start_byte);
     Ok(out)
+}
+
+/// `a::b::Type<T>` -> `Type`.
+fn simple_type_name(ty: &str) -> String {
+    ty.split('<')
+        .next()
+        .unwrap_or(ty)
+        .trim()
+        .rsplit("::")
+        .next()
+        .unwrap_or(ty)
+        .trim()
+        .to_string()
 }
 
 fn receiver_matches_wrapper(receiver: &str, wrapper: &str) -> bool {
@@ -1203,6 +1283,14 @@ impl<'a> Context<'a> {
                             && self.enclosing_impl(*n).is_some_and(|i| self.visible(i, at))
                     })
                     .collect();
+                // `Clone::clone` returns its receiver's type. Tonic clients are
+                // cloned per call (`self.client.clone().rpc(..)`); without this
+                // the receiver's identity is lost. A type's own `clone` method
+                // (counted above) still takes precedence.
+                if accessors.is_empty() && methods.is_empty() && method == "clone" {
+                    evidence.push(self.evidence(expr, "Clone::clone preserves the receiver type".to_string()));
+                    return Some((owner, evidence));
+                }
                 if accessors.len() + methods.len() != 1 {
                     return None;
                 }
@@ -1373,5 +1461,108 @@ mod followup_review {
         let prepared = config.prepared.as_ref().unwrap();
         assert!(!repository_cache().lock().iter().any(|(_, cached)| Arc::ptr_eq(cached, prepared)),
             "over four MiB of file paths must not bypass the cache limit just because there are no candidates");
+    }
+
+    fn candidate_types(src: &str) -> Vec<(String, String)> {
+        let mut config = RustGrpcConfig::from_sources(None, None).unwrap();
+        follow_rust_grpc_wrappers(&mut config, &[("crates/c/src/grpc_client.rs".into(), src.into())]).unwrap();
+        let out = detect_rust_grpc_candidates(src, "crates/c/src/grpc_client.rs", &config)
+            .unwrap()
+            .into_iter()
+            .map(|c| (c.method, c.generated_type))
+            .collect();
+        // The repository cache is process-wide with eight slots; a test that
+        // only needs the answer must not evict entries other tests rely on.
+        if let Some(prepared) = config.prepared.as_ref() {
+            let mut cache = repository_cache().lock();
+            let keys: Vec<_> = cache
+                .iter()
+                .filter(|(_, v)| Arc::ptr_eq(v, prepared))
+                .map(|(k, _)| *k)
+                .collect();
+            for key in keys {
+                cache.pop(&key);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn cloned_field_receiver_keeps_the_generated_client_type() {
+        let src = "use crate::proto::open_shell_client::OpenShellClient; pub struct W { client: OpenShellClient<Chan> } impl W { pub async fn get_draft_policy(&self) { let r = self.client.clone().get_draft_policy(req).await; } }";
+        assert_eq!(candidate_types(src).len(), 1, "{:?}", candidate_types(src));
+    }
+
+    #[test]
+    fn cloned_field_receiver_with_a_nested_import_keeps_the_type() {
+        let src = "use crate::proto::{Foo, open_shell_client::OpenShellClient}; pub struct W { client: OpenShellClient<Chan> } impl W { pub async fn get_draft_policy(&self) { let r = self.client.clone().get_draft_policy(req).await; } }";
+        assert_eq!(candidate_types(src).len(), 1, "{:?}", candidate_types(src));
+    }
+
+    #[test]
+    fn field_receiver_with_a_nested_import_keeps_the_type() {
+        let src = "use crate::proto::{Foo, open_shell_client::OpenShellClient}; pub struct W { client: OpenShellClient<Chan> } impl W { pub async fn get_draft_policy(&mut self) { let r = self.client.get_draft_policy(req).await; } }";
+        assert_eq!(candidate_types(src).len(), 1, "{:?}", candidate_types(src));
+    }
+
+    #[test]
+    fn cfg_attribute_on_a_pattern_field_does_not_void_the_file() {
+        let src = "use crate::proto::open_shell_client::OpenShellClient; struct T { a: u8, b: u8 } pub struct W { client: OpenShellClient<Chan> } impl W { pub async fn draft(&self, t: T) { let T { #[cfg(feature = \"jwt\")] a, b } = t; let r = self.client.clone().get_draft_policy(req).await; } }";
+        assert!(parse_for_lang(Lang::Rust, src).unwrap().root_node().has_error(), "fixture must trip the grammar");
+        let types = candidate_types(src);
+        assert_eq!(types.len(), 1, "{types:?}");
+        assert_eq!(types[0].0, "get_draft_policy");
+    }
+
+    #[test]
+    fn blank_attributes_keeps_offsets_and_newlines() {
+        let src = "#[cfg(a)]\nfn f() {}\n#![allow(x)]\n";
+        let out = blank_attributes(src);
+        assert_eq!(out.len(), src.len());
+        assert_eq!(out.matches('\n').count(), 3);
+        assert!(out.contains("fn f() {}"));
+        assert!(!out.contains('#'));
+    }
+
+    const WRAPPER_FILE: &str = "crates/openshell-core/src/grpc_client.rs";
+    const WRAPPER_SRC: &str = "use crate::proto::{Foo, open_shell_client::OpenShellClient}; pub struct CachedOpenShellClient { client: OpenShellClient<Chan> } impl CachedOpenShellClient { pub async fn connect(g: &str) -> Self { todo!() } pub fn workspace(&self) -> &str { \"w\" } pub async fn poll_settings(&self, name: &str) { let scope = self.workspace(); let r = self.client.clone().get_sandbox_config(req(scope, name)).await; } }";
+    const CALLER_FILE: &str = "crates/openshell-supervisor/src/lib.rs";
+    const CALLER_SRC: &str = "use openshell_core::grpc_client::CachedOpenShellClient; async fn flush(g: &str) -> Result<(), E> { let client = CachedOpenShellClient::connect(g).await?; client.poll_settings(\"sb\").await; let w = client.workspace(); Ok(()) }";
+
+    fn two_file_candidates() -> Vec<RustGrpcCandidate> {
+        let mut config = RustGrpcConfig::from_sources(None, None).unwrap();
+        let sources = vec![
+            (WRAPPER_FILE.to_string(), WRAPPER_SRC.to_string()),
+            (CALLER_FILE.to_string(), CALLER_SRC.to_string()),
+        ];
+        follow_rust_grpc_wrappers(&mut config, &sources).unwrap();
+        let out = detect_rust_grpc_candidates(CALLER_SRC, CALLER_FILE, &config).unwrap();
+        if let Some(prepared) = config.prepared.as_ref() {
+            let mut cache = repository_cache().lock();
+            let keys: Vec<_> = cache.iter().filter(|(_, v)| Arc::ptr_eq(v, prepared)).map(|(k, _)| *k).collect();
+            for key in keys {
+                cache.pop(&key);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn wrapper_with_a_self_helper_call_still_maps_to_its_rpc() {
+        let calls = two_file_candidates();
+        let poll = calls.iter().find(|c| c.site.line == 1 && c.receiver == "client" && c.method != "workspace");
+        let poll = poll.unwrap_or_else(|| panic!("poll_settings not mapped: {calls:?}"));
+        assert_eq!(poll.method, "get_sandbox_config");
+        assert_eq!(poll.provenance, RustGrpcProvenance::FollowedWrapper);
+        assert!(poll.generated_type.ends_with("open_shell_client::OpenShellClient"), "{}", poll.generated_type);
+    }
+
+    #[test]
+    fn unmapped_call_on_a_local_wrapper_type_is_not_an_rpc_stub() {
+        let calls = two_file_candidates();
+        assert!(
+            calls.iter().all(|c| c.method != "workspace"),
+            "a helper on the wrapper type is ordinary code: {calls:?}"
+        );
     }
 }

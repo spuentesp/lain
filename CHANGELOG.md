@@ -5,6 +5,16 @@ All notable changes to LAIN are documented here. Versions follow
 
 ## Unreleased
 
+- **Rust gRPC wrappers are followed on real code.** Three separate causes kept
+  OpenShell's `CachedOpenShellClient` from binding: (1) a file the bundled
+  grammar cannot parse (`#[cfg(..)]` on a field of a destructuring pattern)
+  was skipped whole, so the wrapper module was never analyzed; the sensor now
+  retries with attributes blanked at the same offsets; (2) `x.clone().rpc()`
+  lost the receiver's type, so `self.client.clone().rpc()` was not seen as a
+  generated-client call; (3) a call on the wrapper type itself
+  (`self.workspace()`) made a one-RPC wrapper body look like two RPCs, and an
+  unmapped call on a locally defined wrapper type (whose module is called
+  `*_client`) was reported as an RPC stub. All three are fixed.
 - **A timed-out repo says why, and its budget is configurable.** A repo whose
   indexing exceeded the budget was reported `failed` with `error: null`; only
   the server log had the reason. `get_coverage` (live), the scope's `unreviewed`
