@@ -471,6 +471,44 @@ fn e5_same_service_call_does_not_bind() {
     );
 }
 
+#[test]
+fn same_service_only_hostless_rpc_is_excluded_from_unresolved_coverage() {
+    use lain::federation::contracts::diff::{build_coverage, Scope};
+    let provider = rpc_provider_node(
+        "orders",
+        "pkg/orders/orders.proto",
+        "Get",
+        7,
+        "com.acme.orders.Orders",
+    );
+    let consumer = rpc_consumer_node(
+        "orders",
+        "pkg/orders/handler.rs",
+        "Get",
+        22,
+        "com.acme.orders.Orders",
+        None,
+        HostPart::None,
+    );
+    let out = run(vec![provider, consumer], config_with_orders_host("orders"));
+    let resolution = out.index.consumer_resolutions().next().unwrap().1;
+    assert!(
+        matches!(resolution.target, Some(ConsumerTarget::Internal)),
+        "{resolution:?}"
+    );
+    let coverage = build_coverage(
+        &out.index,
+        vec![],
+        Scope {
+            reviewed: vec![],
+            unreviewed: vec![],
+            configured_only: true,
+        },
+    );
+    assert!(coverage.unresolved_consumers.is_empty());
+    assert!(out.binds.is_empty());
+}
+
 // ─── E6 — gRPC message-field lineage and field binds ──────────────────
 
 #[test]

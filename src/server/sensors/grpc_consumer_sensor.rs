@@ -56,8 +56,8 @@ use std::path::Path;
 #[path = "grpc_consumer_sensor/rust.rs"]
 mod rust;
 pub use rust::{
-    detect_rust_grpc_candidates, discover_rust_grpc_candidates, RustGrpcCandidate, RustGrpcConfig,
-    RustGrpcEvidence, RustGrpcSite,
+    detect_rust_grpc_candidates, discover_rust_grpc_candidates, follow_rust_grpc_wrappers,
+    RustGrpcCandidate, RustGrpcConfig, RustGrpcEvidence, RustGrpcProvenance, RustGrpcSite,
 };
 
 // ─── Public sensor shape ───────────────────────────────────────────────
@@ -123,6 +123,7 @@ impl crate::server::sensors::Sensor for GrpcConsumerSensor {
             vec![]
         } else {
             vec![crate::federation::contracts::coverage::UnresolvedRecord {
+                locations: None,
                 reason: crate::federation::contracts::model::UnresolvedReason::RpcStubUnknown,
                 count: rust_files.len(),
                 sample_ids: rust_files.iter().take(5).cloned().collect(),

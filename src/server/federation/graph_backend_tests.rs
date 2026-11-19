@@ -1510,6 +1510,7 @@ fn reference_traverse_impact(
             | Some(crate::schema::EdgeProvenance::Confirmed { .. }) => 1.0,
             Some(crate::schema::EdgeProvenance::Heuristic { confidence, .. }) => *confidence,
             Some(crate::schema::EdgeProvenance::Runtime { .. }) => 0.9,
+            Some(crate::schema::EdgeProvenance::Ref { .. }) => 1.0,
             None => 0.0,
         });
         if conf < min_confidence {

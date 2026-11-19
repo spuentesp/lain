@@ -384,7 +384,7 @@ async fn unnormalized_consumers_are_recorded() {
     // The integration-test fixture's hand-written Python sources
     // don't go through the sensor pipeline, so we drive the
     // joiner directly with a synthetic
-    // `ConsumerFact { url: NormalizedUrl { template: None, .. } }`.
+    // `ConsumerFact { url_defaults: None, url: NormalizedUrl { template: None, .. } }`.
     // This is the in-process shape the sensors will eventually
     // emit for a fully dynamic URL.
     use lain::federation::contracts::config::{ContractFederationConfig, ServiceDecl};
@@ -438,6 +438,7 @@ async fn unnormalized_consumers_are_recorded() {
     );
     consumer.id = consumer_gid.as_str().to_string();
     consumer.contract = vec![ContractFact::Consumer(ConsumerFact {
+        url_defaults: None,
         method: MethodSpec::Known(HttpMethod::Get),
         // Expr host — rules 3 / 4 cannot resolve it; template
         // = None — rule 5 fires.
@@ -586,6 +587,7 @@ async fn field_ref_to_field_binds_edge_is_persisted() {
     call.repo_id = Some("billing".into());
     call.line_start = Some(5);
     call.contract = vec![ContractFact::Consumer(ConsumerFact {
+        url_defaults: None,
         method: MethodSpec::Known(HttpMethod::Get),
         url: NormalizedUrl {
             host: HostPart::Literal("orders.svc".into()),

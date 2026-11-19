@@ -144,6 +144,21 @@ pub fn scan_workspace_sql_with_report(
     let mut all_nodes: Vec<GraphNode> = Vec::new();
     let mut all_edges: Vec<GraphEdge> = Vec::new();
     let mut unresolved: BTreeMap<UnresolvedReason, (usize, Vec<String>)> = BTreeMap::new();
+    let mut locations = crate::federation::contracts::coverage::LocationCounts::default();
+    // The generic SQL ORM shapes also match Django manager calls. Delegate
+    // sites the Django detector actually understands (including its unresolved
+    // sites) so one source site is not counted twice in the coverage ledger.
+    // Unknown/library models stay with the generic SQL detector. Literal SQL
+    // remains SQL-owned, even when embedded in an ORM call.
+    let django_sites: std::collections::HashSet<(String, u32)> = {
+        let analysis = crate::server::sensors::util::django_analysis(root);
+        analysis
+            .sites
+            .iter()
+            .map(|s| (s.path.clone(), s.line))
+            .chain(analysis.unresolved.iter().map(|s| (s.path.clone(), s.line)))
+            .collect()
+    };
 
     let any_ext = |p: &Path| {
         p.extension()
@@ -152,12 +167,19 @@ pub fn scan_workspace_sql_with_report(
     };
     for (path, content, ext) in crate::server::sensors::util::scan_files(root, any_ext) {
         let graph_path_str = graph_path(root, &path);
-        let sites = detect_in_file(&content, &ext);
+        let mut sites = detect_in_file(&content, &ext);
+        sites.retain(|site| {
+            site.unresolved_reason != Some(UnresolvedReason::OrmDynamicQuery)
+                || !django_sites.contains(&(graph_path_str.clone(), site.line))
+        });
         let (nodes, edges, file_unresolved) =
             build_graph(graph, &sites, &graph_path_str, namespace);
         all_nodes.extend(nodes);
         all_edges.extend(edges);
         for rec in file_unresolved {
+            if rec.reason == UnresolvedReason::OrmDynamicQuery {
+                locations.add(&graph_path_str, rec.count);
+            }
             let entry = unresolved
                 .entry(rec.reason)
                 .or_insert_with(|| (0, Vec::new()));
@@ -178,6 +200,7 @@ pub fn scan_workspace_sql_with_report(
     let unresolved_records: Vec<UnresolvedRecord> = unresolved
         .into_iter()
         .map(|(reason, (count, sample_ids))| UnresolvedRecord {
+            locations: (reason == UnresolvedReason::OrmDynamicQuery).then(|| locations.clone()),
             reason,
             count,
             sample_ids,
@@ -1055,6 +1078,7 @@ fn build_graph(
 
     for (reason, (count, sample_ids)) in per_reason_dynamic {
         unresolved.push(UnresolvedRecord {
+            locations: None,
             reason,
             count,
             sample_ids,
@@ -1070,6 +1094,33 @@ fn build_graph(
 mod tests {
     use super::*;
     use crate::schema::RepoNamespace;
+
+    #[test]
+    fn sql_orm_report_retains_exact_locations_beyond_samples() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+        for i in 0..40 {
+            std::fs::write(
+                tmp.path().join(format!("src/queries{i}.py")),
+                "session.query(Order).all()\n".repeat(125),
+            )
+            .unwrap();
+        }
+        let graph = GraphDatabase::new(&tmp.path().join("graph.bin")).unwrap();
+        let report =
+            scan_workspace_sql_with_report(&graph, tmp.path(), &RepoNamespace::for_test()).unwrap();
+        let orm = report
+            .unresolved
+            .iter()
+            .find(|r| r.reason == UnresolvedReason::OrmDynamicQuery)
+            .unwrap();
+        assert_eq!(orm.count, 5000);
+        assert!(orm.sample_ids.len() <= 5);
+        let locations = orm.locations.as_ref().unwrap();
+        assert_eq!(locations.files.len(), 40);
+        assert!(locations.files.values().all(|n| *n == 125));
+        assert_eq!(locations.directories["src"], 5000);
+    }
 
     #[test]
     fn escaped_backslash_before_comment_does_not_emit_phantom_sql() {

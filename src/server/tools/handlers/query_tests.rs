@@ -236,3 +236,33 @@ fn test_describe_schema() {
     let value: serde_json::Value = serde_json::from_str(&text).unwrap();
     assert!(value.is_object());
 }
+
+#[test]
+fn query_graph_unknown_filter_returns_invalid_argument_with_accepted_keys() {
+    let graph = GraphDatabase::empty_writable();
+    let embedder = NlpEmbedder::new_stub();
+    let cache = Arc::new(Mutex::new(lru::LruCache::new(
+        std::num::NonZeroUsize::new(4).unwrap(),
+    )));
+    let args = serde_json::json!({"ops":[{"op":"find"},{"op":"filter","bogus":123}]});
+    let error = query_graph(
+        std::path::Path::new(""),
+        &graph,
+        &embedder,
+        &cache,
+        &PresenceRegistry::new(),
+        &CoordinationProxy::new(std::env::temp_dir()),
+        args.as_object(),
+        100,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error, crate::error::LainError::InvalidArgument(_)),
+        "{error:?}"
+    );
+    let message = error.to_string();
+    assert!(
+        message.contains("bogus") && message.contains("repo") && message.contains("resolution"),
+        "{message}"
+    );
+}

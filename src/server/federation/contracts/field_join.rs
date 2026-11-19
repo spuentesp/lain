@@ -615,6 +615,7 @@ fn prov_confidence(p: &EdgeProvenance) -> f32 {
         // Runtime observations carry no confidence scalar; treat as
         // certain (they only appear on non-contract edges in practice).
         EdgeProvenance::Runtime { .. } => 1.0,
+        EdgeProvenance::Ref { .. } => 0.0,
     }
 }
 

@@ -5,11 +5,26 @@
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "snapshot": { "type": "string" },
-    "repo": { "type": "string" },
-    "service": { "type": "string" },
-    "cursor": { "type": "string" },
-    "limit": { "type": "integer", "minimum": 1, "maximum": 1000 }
+    "snapshot": {
+      "type": "string"
+    },
+    "repo": {
+      "type": "string"
+    },
+    "service": {
+      "type": "string",
+      "description": "Match the consumer service, target_service, or any candidate endpoint service."
+    },
+    "cursor": {
+      "type": "string"
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000
+    }
   },
-  "required": ["snapshot"]
+  "required": [
+    "snapshot"
+  ]
 }

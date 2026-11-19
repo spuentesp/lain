@@ -54,6 +54,8 @@ pub enum NodeType {
     // "v3 is unreleased: new node/edge types fold into v3").
     Table,
     Column,
+    /// A literal URL reference to a declared service (not an executable call).
+    ServiceRef,
 }
 
 impl NodeType {
@@ -91,6 +93,7 @@ impl NodeType {
             NodeType::Synthetic,
             NodeType::Table,
             NodeType::Column,
+            NodeType::ServiceRef,
         ]
     }
 
@@ -150,7 +153,8 @@ impl NodeType {
             | NodeType::Topic
             | NodeType::Schema
             | NodeType::Table
-            | NodeType::Column => true,
+            | NodeType::Column
+            | NodeType::ServiceRef => true,
             // Known-but-unindexed: `Resource` has no producer in this
             // codebase (there is no IaC resource sensor), so
             // `describe_schema` reports it as unavailable rather than
@@ -214,6 +218,9 @@ impl NodeType {
                  `Table` contract payload; the joiner fills `service` from \
                  `repos.yaml`. Reach handler → function → table through \
                  `ReadsTable` / `WritesTable` edges."
+            }
+            NodeType::ServiceRef => {
+                "A literal URL reference to a declared service, joined by Binds with Ref provenance"
             }
             NodeType::Column => {
                 "A database column declared by an ORM model or migration. Linked \
@@ -524,7 +531,8 @@ impl EdgeType {
                 "Federation-only join: consumer → provider. Written by \
                  `ContractJoiner::run` (§5.3). Confirmed bindings carry \
                  `EdgeProvenance::Confirmed` with the `repos.yaml#bindings[<i>]` \
-                 reference."
+                 reference. URL reference bindings connect ServiceRef sites to service Module anchors, \
+                 carrying Ref provenance and production/test/config/doc usage (not executable calls)."
             }
             EdgeType::ReadsTable => {
                 "Enclosing function/method/file → Table. Emitted by \
@@ -602,12 +610,13 @@ impl EdgeType {
             EdgeType::ReadsFrom => &[NodeType::FieldRef],
             // `Binds` is federation-only: consumer (HttpClientCall /
             // FieldRef / Topic) → provider (HttpRoute / Field / Topic).
-            // Source types are the three consumer shapes a joiner can
-            // produce.
+            // ServiceRef → Module is a service identity reference, with
+            // Ref provenance; it does not assert executable consumption.
             EdgeType::Binds => &[
                 NodeType::HttpClientCall,
                 NodeType::FieldRef,
                 NodeType::Topic,
+                NodeType::ServiceRef,
             ],
             // Phase D (spec §7): the SQL-shaped edges mirror
             // `SendsHttp`'s source rules — the enclosing
@@ -683,7 +692,12 @@ impl EdgeType {
             // `Binds` targets: the provider side. HttpClientCall →
             // HttpRoute, FieldRef → Field, consumer Topic → producer
             // Topic.
-            EdgeType::Binds => &[NodeType::HttpRoute, NodeType::Field, NodeType::Topic],
+            EdgeType::Binds => &[
+                NodeType::HttpRoute,
+                NodeType::Field,
+                NodeType::Topic,
+                NodeType::Module,
+            ],
             // Phase D (spec §7): the SQL edges always target a
             // `Table` node (the destination of a read or a write).
             EdgeType::ReadsTable | EdgeType::WritesTable => &[NodeType::Table],
@@ -1084,6 +1098,21 @@ pub enum EdgeProvenance {
     /// operator which binding entry the edge came from. Counts as
     /// "certain" for the `Verified` traversal (§4.6).
     Confirmed { source: String },
+    /// A URL literal identifies a declared service; this is not proof of a call.
+    Ref { usage: ReferenceUsage },
+}
+
+/// Path-based usage of a persisted reference binding.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ReferenceUsage {
+    #[serde(rename = "production")]
+    Production,
+    #[serde(rename = "test")]
+    Test,
+    #[serde(rename = "config")]
+    Configuration,
+    #[serde(rename = "doc")]
+    Documentation,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

@@ -21,9 +21,9 @@
 //!
 //! Comments (`#` line, `""" ... """` block) are stripped so a
 //! `# orders` comment inside a `type` block does not get
-//! emitted as a field. Multi-line field declarations are joined
-//! before parsing so `fieldName(\n  arg: Type\n): RetType` still
-//! resolves to a single field.
+//! emitted as a field. Balanced argument lists preserve multiline
+//! declarations and source locations; type references stop before
+//! directives and adjacent field declarations.
 //!
 //! The `GraphqlProvider` shape is public so the acceptance
 //! tests can exercise the detector directly without going
@@ -95,6 +95,7 @@ pub fn scan_workspace_graphql_provider(
         let graph_path_str = graph_path(root, &path);
         let providers = parse_sdl_providers(&content, &graph_path_str);
         let object_types = extract_object_type_blocks(&content);
+        let root_blocks = extract_root_type_blocks(&strip_comments(&content));
 
         let mut schemas_in_file: std::collections::BTreeMap<String, String> =
             std::collections::BTreeMap::new();
@@ -121,7 +122,7 @@ pub fn scan_workspace_graphql_provider(
                 let field_id = GraphNode::generate_id(
                     &NodeType::Field,
                     &graph_path_str,
-                    &field.name,
+                    &format!("{}.{}", obj.name, field.name),
                     Some(obj.line + field.line_offset),
                     namespace,
                 );
@@ -130,6 +131,7 @@ pub fn scan_workspace_graphql_provider(
                 field_node.id = field_id.clone();
                 field_node.line_start = Some(obj.line + field.line_offset);
                 field_node.line_end = Some(obj.line + field.line_offset);
+                field_node.signature = Some(field.return_type.clone());
                 let required = field.return_type.ends_with('!');
                 field_node.contract = vec![ContractFact::Field(
                     crate::federation::contracts::model::FieldMeta {
@@ -173,25 +175,112 @@ pub fn scan_workspace_graphql_provider(
             all_nodes.push(node);
             total += 1;
 
+            let args = root_blocks
+                .iter()
+                .filter(|b| b.op == provider.op)
+                .flat_map(|b| &b.fields)
+                .find(|f| f.name == provider.field)
+                .map(|f| f.arguments.clone())
+                .unwrap_or_default();
+            emit_schema(
+                graph_path_str.as_str(),
+                namespace,
+                &id,
+                &format!("{id_name}:request"),
+                provider.site.line,
+                Direction::Request,
+                args,
+                &mut all_nodes,
+                &mut all_edges,
+            );
             let bare_ret = provider
                 .return_type
-                .trim()
-                .trim_end_matches('!')
-                .trim_start_matches('[')
-                .trim_end_matches(']')
-                .trim()
-                .trim_end_matches('!');
+                .trim_matches(|c| matches!(c, '[' | ']' | '!' | ' '));
             if let Some(resp_schema_id) = schemas_in_file.get(bare_ret) {
                 all_edges.push(GraphEdge::new(
                     EdgeType::ResponseSchema,
                     id,
                     resp_schema_id.clone(),
                 ));
+            } else {
+                // Scalars, enums, unions, and externally defined object types
+                // still describe a result even without local object fields.
+                emit_schema(
+                    graph_path_str.as_str(),
+                    namespace,
+                    &id,
+                    &format!("{id_name}:response"),
+                    provider.site.line,
+                    Direction::Response,
+                    vec![FieldDecl {
+                        name: provider.field,
+                        return_type: provider.return_type,
+                        line_offset: 0,
+                        arguments: vec![],
+                    }],
+                    &mut all_nodes,
+                    &mut all_edges,
+                );
             }
         }
     }
     graph.replace_sensor_output(SensorOwner::GraphqlProviderSensor, &all_nodes, &all_edges)?;
     Ok(total)
+}
+
+/// Materialize an operation's argument or scalar-result schema with SDL types.
+#[allow(clippy::too_many_arguments)]
+fn emit_schema(
+    path: &str,
+    namespace: &RepoNamespace,
+    provider_id: &str,
+    name: &str,
+    line: u32,
+    direction: Direction,
+    fields: Vec<FieldDecl>,
+    nodes: &mut Vec<GraphNode>,
+    edges: &mut Vec<GraphEdge>,
+) {
+    let id = GraphNode::generate_id(&NodeType::Schema, path, name, Some(line), namespace);
+    let mut node = GraphNode::new(NodeType::Schema, name.to_string(), path.to_string());
+    node.id = id.clone();
+    node.line_start = Some(line);
+    node.line_end = Some(line);
+    node.contract = vec![ContractFact::Schema { direction }];
+    nodes.push(node);
+    edges.push(GraphEdge::new(
+        match direction {
+            Direction::Request => EdgeType::RequestSchema,
+            _ => EdgeType::ResponseSchema,
+        },
+        provider_id.to_string(),
+        id.clone(),
+    ));
+    for field in fields {
+        let field_id = GraphNode::generate_id(
+            &NodeType::Field,
+            path,
+            &format!("{name}.{}", field.name),
+            Some(line),
+            namespace,
+        );
+        let mut node = GraphNode::new(NodeType::Field, field.name, path.to_string());
+        node.id = field_id.clone();
+        node.line_start = Some(line);
+        node.line_end = Some(line);
+        node.signature = Some(field.return_type.clone());
+        let required = field.return_type.ends_with('!');
+        node.contract = vec![ContractFact::Field(
+            crate::federation::contracts::model::FieldMeta {
+                ty: graphql_type_to_typedesc(&field.return_type),
+                required,
+                nullable: !required,
+                enum_values: None,
+            },
+        )];
+        nodes.push(node);
+        edges.push(GraphEdge::new(EdgeType::HasField, id.clone(), field_id));
+    }
 }
 
 // ─── Detection (hand-rolled SDL tokenizer) ─────────────────────────────
@@ -202,7 +291,7 @@ pub fn scan_workspace_graphql_provider(
 /// repo-relative path).
 pub fn parse_sdl_providers(content: &str, sdl_path: &str) -> Vec<GraphqlProvider> {
     let stripped = strip_comments(content);
-    let joined = join_continued_lines(&stripped);
+    let joined = stripped;
     let mut out: Vec<GraphqlProvider> = Vec::new();
     for root_block in extract_root_type_blocks(&joined) {
         let op = root_block.op;
@@ -242,6 +331,7 @@ pub struct FieldDecl {
     pub name: String,
     pub return_type: String,
     pub line_offset: u32,
+    pub arguments: Vec<FieldDecl>,
 }
 
 fn graphql_type_to_typedesc(sdl_type: &str) -> crate::federation::contracts::model::TypeDesc {
@@ -268,34 +358,39 @@ fn graphql_scalar_to_typedesc(name: &str) -> crate::federation::contracts::model
 
 /// Strip `#` line comments and `""" ... """` block comments.
 /// Block comments spanning multiple lines preserve newlines so
-/// the subsequent line-number math stays correct. Thin wrapper
-/// around `crate::server::sensors::util_tokenize::strip_comments`
-/// so the per-sensor API stays unchanged for callers.
+/// the subsequent line-number math stays correct. String contents are
+/// masked as well, so braces inside defaults cannot change block depth.
 fn strip_comments(input: &str) -> String {
-    crate::server::sensors::util_tokenize::strip_comments(
-        input,
-        crate::server::sensors::util_tokenize::CommentSyntax::HashBlockString,
-    )
-}
-
-/// Join continued lines: a trailing comma or opening bracket
-/// means the next line continues the current declaration. This
-/// keeps multi-line field shapes
-/// (`fieldName(\n  arg: Type\n): RetType`) parseable as a single
-/// field.
-fn join_continued_lines(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let mut prev_token_ends_continuation = false;
-    for ch in input.chars() {
-        if prev_token_ends_continuation && ch == '\n' {
-            prev_token_ends_continuation = false;
-            // Drop the newline; the continuation is consumed.
+    // Mask descriptions and string values before balancing SDL syntax. Keep
+    // byte positions and newlines, including non-ASCII description text.
+    let bytes = input.as_bytes();
+    let mut out = bytes.to_vec();
+    let mut i = 0;
+    while i < bytes.len() {
+        let start = i;
+        if bytes[i] == b'#' {
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+        } else if bytes[i] == b'"' {
+            i = crate::server::sensors::util_tokenize::extract_string_literal(input, i)
+                .map(|(end, _)| end)
+                .unwrap_or(bytes.len());
+        } else {
+            i += 1;
             continue;
         }
-        prev_token_ends_continuation = matches!(ch, ',' | '(' | '[' | '{');
-        out.push(ch);
+        for byte in &mut out[start..i] {
+            if *byte != b'\n' {
+                *byte = b' ';
+            }
+        }
+        // A harmless scalar token lets default-value parsing consume strings.
+        if bytes[start] == b'"' {
+            out[start] = b'0';
+        }
     }
-    out
+    String::from_utf8(out).expect("masked SDL remains UTF-8")
 }
 
 /// Extract every `type Query { ... }` /
@@ -404,7 +499,7 @@ fn extract_root_type_blocks(content: &str) -> Vec<RootTypeBlock> {
 /// where `<Name>` is not a root operation type (`Query`, `Mutation`, `Subscription`).
 pub fn extract_object_type_blocks(content: &str) -> Vec<ObjectTypeBlock> {
     let stripped = strip_comments(content);
-    let joined = join_continued_lines(&stripped);
+    let joined = stripped;
     let mut out: Vec<ObjectTypeBlock> = Vec::new();
     let bytes = joined.as_bytes();
     let mut i = 0usize;
@@ -587,125 +682,119 @@ fn skip_type_modifiers(content: &str, at: usize, line_no: &mut u32) -> Option<us
 
 /// Walk every `fieldName(args): ReturnType` declaration inside
 /// a root type block. The body of the block is the slice
-/// starting at the block's `{` line. Multi-line declarations
-/// (`fieldName(\n  arg: Type\n): RetType`) were joined by
-/// `join_continued_lines` so each field is one logical line
-/// here.
+/// starting at the block's `{` line. Arguments are parsed recursively
+/// after balancing their parentheses; whitespace and commas separate fields.
+fn skip_space(bytes: &[u8], i: &mut usize) {
+    while *i < bytes.len() && (bytes[*i].is_ascii_whitespace() || bytes[*i] == b',') {
+        *i += 1;
+    }
+}
+
+fn skip_group(bytes: &[u8], i: &mut usize, open: u8, close: u8) {
+    let mut depth = 0;
+    while *i < bytes.len() {
+        let ch = bytes[*i];
+        *i += 1;
+        if ch == open {
+            depth += 1;
+        }
+        if ch == close {
+            depth -= 1;
+            if depth == 0 {
+                break;
+            }
+        }
+    }
+}
+
 fn parse_field_decls(from: &str) -> Vec<FieldDecl> {
-    let mut out: Vec<FieldDecl> = Vec::new();
     let bytes = from.as_bytes();
-    let mut i = 0usize;
-    let mut line_offset: u32 = 0;
+    let mut out = Vec::new();
+    let mut i = 0;
+    let mut counted = 0;
+    let mut line_offset = 0;
     while i < bytes.len() {
-        if bytes[i] == b'\n' {
-            line_offset += 1;
+        skip_space(bytes, &mut i);
+        line_offset += bytes[counted..i].iter().filter(|&&b| b == b'\n').count() as u32;
+        counted = i;
+        let field_line = line_offset;
+        if i == bytes.len() {
+            break;
+        }
+        // Descriptions have been masked with a numeric sentinel.
+        if !(bytes[i].is_ascii_alphabetic() || bytes[i] == b'_') {
             i += 1;
             continue;
         }
-        if (bytes[i] as char).is_ascii_whitespace() {
-            i += 1;
-            continue;
-        }
-        // Skip over `}` so we don't mistake the block terminator
-        // for a field.
-        if bytes[i] == b'}' {
-            i += 1;
-            continue;
-        }
-        // A field declaration starts with an identifier followed
-        // by `(`, `:` (no-arg form), or whitespace+args. We
-        // accept both `field: RetType` and
-        // `field(args): RetType`.
-        let name_start = i;
+        let start = i;
         while i < bytes.len() && is_ident_continue(bytes[i]) {
             i += 1;
         }
-        if i == name_start {
-            i += 1;
-            continue;
-        }
-        let name = std::str::from_utf8(&bytes[name_start..i])
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        // Skip whitespace.
-        while i < bytes.len() && (bytes[i] as char).is_ascii_whitespace() {
-            if bytes[i] == b'\n' {
-                line_offset += 1;
-            }
-            i += 1;
-        }
-        // Optional `(args)` — track balanced parens.
+        let name = from[start..i].to_string();
+        skip_space(bytes, &mut i);
+        let mut arguments = Vec::new();
         if i < bytes.len() && bytes[i] == b'(' {
-            let mut depth: u32 = 1;
-            i += 1;
-            while i < bytes.len() && depth > 0 {
-                let c = bytes[i];
-                if c == b'\n' {
-                    line_offset += 1;
-                }
-                if c == b'(' {
-                    depth += 1;
-                } else if c == b')' {
-                    depth -= 1;
-                }
-                i += 1;
-            }
-            // Skip whitespace.
-            while i < bytes.len() && (bytes[i] as char).is_ascii_whitespace() {
-                if bytes[i] == b'\n' {
-                    line_offset += 1;
-                }
-                i += 1;
-            }
+            let args_start = i + 1;
+            skip_group(bytes, &mut i, b'(', b')');
+            arguments = parse_field_decls(&from[args_start..i.saturating_sub(1)]);
         }
-        // Expect `:`.
-        if i >= bytes.len() || bytes[i] != b':' {
+        skip_space(bytes, &mut i);
+        if i == bytes.len() || bytes[i] != b':' {
             continue;
         }
         i += 1;
-        // Skip whitespace.
-        while i < bytes.len() && (bytes[i] as char).is_ascii_whitespace() {
-            if bytes[i] == b'\n' {
-                line_offset += 1;
-            }
-            i += 1;
-        }
-        // Read the return type up to the next `,` or `}`.
-        let ret_start = i;
-        while i < bytes.len() && bytes[i] != b',' && bytes[i] != b'}' && bytes[i] != b'\n' {
-            // Skip over `[Type!]` brackets so a comma inside
-            // doesn't terminate the type.
-            if bytes[i] == b'[' {
-                let mut bracket_depth: u32 = 1;
+        skip_space(bytes, &mut i);
+        let start = i;
+        // A type reference ends before the next declaration or directive.
+        if i < bytes.len() && bytes[i] == b'[' {
+            skip_group(bytes, &mut i, b'[', b']');
+        } else {
+            while i < bytes.len() && is_ident_continue(bytes[i]) {
                 i += 1;
-                while i < bytes.len() && bracket_depth > 0 {
-                    if bytes[i] == b'[' {
-                        bracket_depth += 1;
-                    } else if bytes[i] == b']' {
-                        bracket_depth -= 1;
-                    }
-                    i += 1;
-                }
-                continue;
             }
+        }
+        if i < bytes.len() && bytes[i] == b'!' {
             i += 1;
         }
-        let return_type = std::str::from_utf8(&bytes[ret_start..i])
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        if name.is_empty() || return_type.is_empty() {
+        let return_type = from[start..i].split_whitespace().collect::<String>();
+        if return_type.is_empty() {
             continue;
         }
         out.push(FieldDecl {
             name,
             return_type,
-            line_offset,
+            line_offset: field_line,
+            arguments,
         });
-        // Skip the `,` if present.
-        if i < bytes.len() && bytes[i] == b',' {
+        skip_space(bytes, &mut i);
+        if i < bytes.len() && bytes[i] == b'=' {
             i += 1;
+            skip_space(bytes, &mut i);
+            match bytes.get(i) {
+                Some(b'{') => skip_group(bytes, &mut i, b'{', b'}'),
+                Some(b'[') => skip_group(bytes, &mut i, b'[', b']'),
+                _ => {
+                    while i < bytes.len()
+                        && (is_ident_continue(bytes[i]) || matches!(bytes[i], b'.' | b'-' | b'+'))
+                    {
+                        i += 1;
+                    }
+                }
+            }
+        }
+        loop {
+            skip_space(bytes, &mut i);
+            if i == bytes.len() || bytes[i] != b'@' {
+                break;
+            }
+            i += 1;
+            while i < bytes.len() && is_ident_continue(bytes[i]) {
+                i += 1;
+            }
+            skip_space(bytes, &mut i);
+            if i < bytes.len() && bytes[i] == b'(' {
+                skip_group(bytes, &mut i, b'(', b')');
+            }
         }
     }
     out
@@ -714,6 +803,83 @@ fn parse_field_decls(from: &str) -> Vec<FieldDecl> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sdl_keeps_actual_field_lines_and_ignores_description_syntax() {
+        let src = "type Mutation {\n  \"\"\"mentions type Query { fake: Missing }\"\"\"\n  checkoutComplete(\n    checkoutId: ID!\n  ): CheckoutComplete @deprecated(reason: \"use new\")\n}\n";
+        let providers = parse_sdl_providers(src, "schema.graphql");
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].field, "checkoutComplete");
+        assert_eq!(providers[0].return_type, "CheckoutComplete");
+        assert_eq!(providers[0].site.line, 3);
+    }
+
+    #[test]
+    fn saleor_sdl_emits_request_and_response_for_every_operation() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("schema.graphql"),
+            r#"
+scalar JSONString
+type Query { checkout(id: ID!): Checkout health: String! }
+type Mutation {
+  checkoutComplete(
+    checkoutId: ID!
+    paymentData: JSONString = "{}"
+    redirectUrl: String
+  ): CheckoutComplete
+}
+type Subscription { checkoutUpdated: Checkout }
+type Checkout { id: ID! metadata: JSONString }
+type CheckoutComplete { checkout: Checkout errors: [CheckoutError!]! }
+type CheckoutError { field: String message: String! }
+"#,
+        )
+        .unwrap();
+        let graph = GraphDatabase::new(&dir.path().join("graph.bin")).unwrap();
+        assert_eq!(
+            scan_workspace_graphql_provider(&graph, dir.path(), &RepoNamespace::for_test())
+                .unwrap(),
+            4
+        );
+        let providers: Vec<_> = graph
+            .get_all_nodes()
+            .into_iter()
+            .filter(|n| {
+                n.contract
+                    .iter()
+                    .any(|f| matches!(f, ContractFact::GraphqlProvider(_)))
+            })
+            .collect();
+        for provider in &providers {
+            let edges = graph.get_edges_from(&provider.id).unwrap();
+            assert!(
+                edges
+                    .iter()
+                    .any(|e| e.edge_type == EdgeType::ResponseSchema),
+                "{} response",
+                provider.name
+            );
+        }
+        let complete = providers
+            .iter()
+            .find(|p| p.name == "mutation:checkoutComplete")
+            .unwrap();
+        let edges = graph.get_edges_from(&complete.id).unwrap();
+        let request = edges
+            .iter()
+            .find(|e| e.edge_type == EdgeType::RequestSchema)
+            .expect("request arguments");
+        let fields = graph.get_edges_from(&request.target_id).unwrap();
+        let mut args = std::collections::BTreeMap::new();
+        for field in fields {
+            let node = graph.get_node(&field.target_id).unwrap().unwrap();
+            args.insert(node.name, node.signature.unwrap());
+        }
+        assert_eq!(args["checkoutId"], "ID!");
+        assert_eq!(args["paymentData"], "JSONString");
+        assert_eq!(args["redirectUrl"], "String");
+    }
 
     #[test]
     fn parses_large_sdl_without_revalidating_the_document_per_token() {

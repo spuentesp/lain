@@ -12,12 +12,32 @@ pub(super) enum Value {
     Parts(Vec<UrlPart>),
     Object(BTreeMap<String, Value>),
     Callable(Box<Value>),
+    Default(Box<Value>, BTreeSet<String>),
 }
 
 impl Value {
+    fn defaults(&self) -> BTreeSet<String> {
+        match self {
+            Self::Default(value, names) => {
+                let mut out = value.defaults();
+                out.extend(names.iter().cloned());
+                out
+            }
+            Self::Object(fields) => fields.get("url").map(Self::defaults).unwrap_or_default(),
+            _ => BTreeSet::new(),
+        }
+    }
+    fn with_defaults(self, names: BTreeSet<String>) -> Self {
+        if names.is_empty() {
+            self
+        } else {
+            Self::Default(Box::new(self), names)
+        }
+    }
     fn parts(self, fallback: &str) -> Vec<UrlPart> {
         match self {
             Self::Parts(p) if !p.is_empty() => p,
+            Self::Default(value, _) => value.parts(fallback),
             _ => vec![UrlPart::Hole(fallback.to_owned())],
         }
     }
@@ -36,6 +56,18 @@ pub(super) fn parts(node: Node, src: &[u8], ctx: &FileContext, scopes: &[u32]) -
         v => v,
     };
     value.parts(&text_of(node, src).unwrap_or_default())
+}
+
+pub(super) fn default_envs(
+    node: Node,
+    src: &[u8],
+    ctx: &FileContext,
+    scopes: &[u32],
+) -> Vec<String> {
+    evaluate(node, src, ctx, scopes)
+        .defaults()
+        .into_iter()
+        .collect()
 }
 
 fn expression(
@@ -139,6 +171,7 @@ fn eval(
         }
         "template_string" => {
             let mut out = Vec::new();
+            let mut defaults = BTreeSet::new();
             let mut cursor = node.walk();
             for n in node.named_children(&mut cursor) {
                 match n.kind() {
@@ -147,7 +180,9 @@ fn eval(
                     }
                     "template_substitution" => {
                         if let Some(n) = n.named_child(0) {
-                            out.extend(child(n).parts(&text_of(n, src).unwrap_or_default()));
+                            let value = child(n);
+                            defaults.extend(value.defaults());
+                            out.extend(value.parts(&text_of(n, src).unwrap_or_default()));
                         }
                     }
                     // Escapes cannot disappear from an apparent route.
@@ -168,13 +203,32 @@ fn eval(
                     return unknown(&raw);
                 }
             }
-            Value::Parts(out)
+            Value::Parts(out).with_defaults(defaults)
         }
         "binary_expression" => {
             let operator = node
                 .child_by_field_name("operator")
                 .and_then(|n| text_of(n, src));
             if matches!(operator.as_deref(), Some("||" | "??")) {
+                if let (Some(left), Some(right)) = (
+                    node.child_by_field_name("left"),
+                    node.child_by_field_name("right"),
+                ) {
+                    let left_text = text_of(left, src).unwrap_or_default();
+                    if left_text.starts_with("process.env.")
+                        || left_text.starts_with("process.env[")
+                    {
+                        if let Some(name) = crate::server::sensors::util::host_env_name(&left_text)
+                        {
+                            let default = child(right);
+                            let parts = default.clone().parts(&raw);
+                            // Preserve source-default evidence through aliases.
+                            if parts.iter().all(|p| matches!(p, UrlPart::Literal(_))) {
+                                return default.with_defaults(BTreeSet::from([name.to_owned()]));
+                            }
+                        }
+                    }
+                }
                 return unknown(&format!("conditional: {raw}"));
             }
             if operator.as_deref() != Some("+") {
@@ -186,9 +240,13 @@ fn eval(
             ) else {
                 return unknown(&raw);
             };
-            let mut out = child(left).parts(&raw);
-            out.extend(child(right).parts(&raw));
-            Value::Parts(out)
+            let left = child(left);
+            let right = child(right);
+            let mut defaults = left.defaults();
+            defaults.extend(right.defaults());
+            let mut out = left.parts(&raw);
+            out.extend(right.parts(&raw));
+            Value::Parts(out).with_defaults(defaults)
         }
         "object" => {
             let mut values = BTreeMap::new();
@@ -326,14 +384,19 @@ fn eval(
                 && args.len() == 2
                 && !shadowed_constructor
             {
-                let path = child(args[0]).parts(&raw);
-                let base = child(args[1]).parts(&raw);
+                let path = child(args[0]);
+                let base = child(args[1]);
+                let mut defaults = path.defaults();
+                defaults.extend(base.defaults());
+                let path = path.parts(&raw);
+                let base = base.parts(&raw);
                 return Value::Parts(join_url(
                     path,
                     base,
                     &raw,
                     &text_of(args[1], src).unwrap_or_default(),
-                ));
+                ))
+                .with_defaults(defaults);
             }
             if function_text == "urljoin" && args.len() == 2 {
                 return Value::Parts(join_url(
@@ -755,6 +818,26 @@ mod tests {
     }
 
     #[test]
+    fn const_chain_resolves_environment_url_default() {
+        let found = calls("const B = process.env.PORTAL_URL || 'https://portal.nousresearch.com'; const A = B + '/api'; fetch(`${A}/oauth/token`);");
+        assert_eq!(
+            found[0].url.host,
+            HostPart::Literal("portal.nousresearch.com".into())
+        );
+        assert_eq!(found[0].url.template.as_deref(), Some("/api/oauth/token"));
+        assert_eq!(found[0].default_env, vec!["PORTAL_URL"]);
+    }
+
+    #[test]
+    fn const_chain_resolves_relative_proxy_default() {
+        let found = calls(
+            "const B = process.env.HTTP_PROXY_PATH || '/proxy'; const A = B + '/mcp'; fetch(A);",
+        );
+        assert_eq!(found[0].url.template.as_deref(), Some("/proxy/mcp"));
+        assert_eq!(found[0].default_env, vec!["HTTP_PROXY_PATH"]);
+    }
+
+    #[test]
     fn local_helpers_members_and_url_replacement() {
         let found = calls(
             r#"
@@ -800,7 +883,6 @@ mod tests {
             "const A = () => B(); const B = () => A(); fetch(A())",
             "fetch(unknown())",
             "const target = flag ? '/a' : '/b'; fetch(target)",
-            "const target = process.env.ROUTE || '/default'; fetch(target)",
         ] {
             let found = calls(source);
             assert_eq!(found.len(), 1, "{source}");
@@ -886,10 +968,10 @@ mod tests {
                fetch(target);"#,
         );
         assert_eq!(found.len(), 1);
-        assert_eq!(found[0].url.host, HostPart::Expr("HTTP_PROXY_PATH".into()));
+        assert_eq!(found[0].url.host, HostPart::None);
         assert_eq!(
             found[0].url.template.as_deref(),
-            Some("/update-data-stream")
+            Some("/api/update-data-stream")
         );
     }
 
@@ -900,7 +982,7 @@ mod tests {
                fetch(`${HTTP_PROXY_PATH}${httpEndpointPath}`, { method: 'POST' });"#,
         );
         assert_eq!(found.len(), 1);
-        assert_eq!(found[0].url.host, HostPart::Expr("HTTP_PROXY_PATH".into()));
+        assert_eq!(found[0].url.host, HostPart::None);
         assert_eq!(found[0].url.template, None);
     }
 
@@ -963,7 +1045,7 @@ mod tests {
     }
 
     #[test]
-    fn defaults_import_cycles_and_escaping_modules_stay_unresolved() {
+    fn imported_defaults_resolve_but_import_cycles_and_escaping_modules_do_not() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         std::fs::write(
@@ -972,7 +1054,8 @@ mod tests {
         )
         .unwrap();
         let found = workspace_calls(root, "import {PATH} from './routes'; fetch(PATH);");
-        assert_eq!(found[0].url.template, None);
+        assert_eq!(found[0].url.template.as_deref(), Some("/default"));
+        assert_eq!(found[0].default_env, vec!["PATH_OVERRIDE"]);
         std::fs::write(
             root.join("a.js"),
             "import {B} from './b'; export const A = B;",

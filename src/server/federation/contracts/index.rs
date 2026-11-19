@@ -344,6 +344,7 @@ mod tests {
         });
         assert_eq!(node_type_of(&p), NodeType::HttpRoute);
         let c = ContractFact::Consumer(ConsumerFact {
+            url_defaults: None,
             method: MethodSpec::Known(HttpMethod::Get),
             url: NormalizedUrl {
                 host: HostPart::None,

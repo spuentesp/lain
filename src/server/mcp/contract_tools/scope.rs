@@ -83,7 +83,20 @@ pub fn live_scope(fed: &FederatedIndex) -> Value {
                 unreviewed.push(json!({"repo": id.as_str(), "reason": "not_ready"}))
             }
             RepoHealth::Degraded | RepoHealth::Unavailable | RepoHealth::Missing => {
-                unreviewed.push(json!({"repo": id.as_str(), "reason": "failed"}))
+                // Carry the indexer's own explanation. A timeout was reported
+                // as a bare `failed` with `error: null`; only the server log
+                // had the reason.
+                let error = fed.get_repo(&id).and_then(|r| r.last_index_error());
+                let cause = error.as_deref().map(|e| {
+                    if e.starts_with(crate::federation::repo_index::INDEX_TIMEOUT_CAUSE) {
+                        crate::federation::repo_index::INDEX_TIMEOUT_CAUSE
+                    } else {
+                        "index_error"
+                    }
+                });
+                unreviewed.push(
+                    json!({"repo": id.as_str(), "reason": "failed", "cause": cause, "error": error}),
+                )
             }
         }
     }
@@ -230,5 +243,33 @@ mod tests {
         });
         let out = render_sentence(&s);
         assert!(out.contains("1 configured repo could not"));
+    }
+
+    #[tokio::test]
+    async fn timed_out_repo_reports_its_cause_and_error_in_scope() {
+        use crate::federation::graph_backend::PetgraphBackend;
+        use crate::federation::repo_id::RepoId;
+        use crate::federation::repo_index::RepoIndex;
+        use crate::federation::repo_source::WorkspaceDirSource;
+        use std::sync::Arc;
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        let src_dir = tempfile::tempdir().unwrap();
+        git2::Repository::init(src_dir.path()).unwrap();
+        let src: Box<dyn crate::federation::repo_source::RepoSource> = Box::new(
+            WorkspaceDirSource::new(RepoId::new("big").unwrap(), src_dir.path().to_path_buf())
+                .unwrap(),
+        );
+        fed.add_repo(src, tmp.path()).await.unwrap();
+        let repo: Arc<RepoIndex> = fed.get_repo(&RepoId::new("big").unwrap()).unwrap();
+        repo.record_index_failure_for_test(
+            "index_timeout: indexing exceeded the 60s budget".to_string(),
+        );
+        let scope = live_scope(&fed);
+        let entry = &scope["unreviewed"][0];
+        assert_eq!(entry["repo"], "big");
+        assert_eq!(entry["reason"], "failed");
+        assert_eq!(entry["cause"], "index_timeout");
+        assert!(entry["error"].as_str().unwrap().contains("60s budget"));
     }
 }

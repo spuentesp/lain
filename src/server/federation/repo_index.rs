@@ -24,6 +24,9 @@ use tokio_util::sync::CancellationToken;
 /// polling — the federation stays up.
 pub const INDEX_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Prefix of the `last_index_error` message when the budget elapsed.
+pub const INDEX_TIMEOUT_CAUSE: &str = "index_timeout";
+
 /// Resolved per-repo pipeline timeout. Honors `LAIN_INDEX_TIMEOUT`
 /// (this knob is per repo) and never `LAIN_REINDEX_TIMEOUT`, which is
 /// the *startup* budget read by [`crate::server::refresh::parse_reindex_timeout`].
@@ -51,6 +54,40 @@ fn parse_index_timeout(raw: Option<&str>) -> Duration {
             }
         },
     }
+}
+
+/// `LAIN_INDEX_TIMEOUT` when it is set to a valid integer.
+fn explicit_env_timeout() -> Option<Duration> {
+    std::env::var("LAIN_INDEX_TIMEOUT")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .map(Duration::from_secs)
+}
+
+/// Upper bound of the scaled default. It still guards against a hang.
+pub const MAX_SCALED_INDEX_TIMEOUT: Duration = Duration::from_secs(1800);
+
+/// Files per extra second of budget in [`scaled_index_timeout`].
+const FILES_PER_EXTRA_SECOND: usize = 10;
+
+/// The default budget grown with repo size: [`INDEX_TIMEOUT`] plus one
+/// second per ten files, capped at [`MAX_SCALED_INDEX_TIMEOUT`]. A fixed 60 s
+/// failed OpenShell (2.1k files) and NemoClaw (6.7k) on a clean scan.
+pub fn scaled_index_timeout(files: usize) -> Duration {
+    (INDEX_TIMEOUT + Duration::from_secs((files / FILES_PER_EXTRA_SECOND) as u64))
+        .min(MAX_SCALED_INDEX_TIMEOUT)
+}
+
+/// Files the main scan would consider under `root` (hidden paths and
+/// gitignored files excluded). A light walk: only the count is needed.
+fn count_repo_files(root: &Path) -> usize {
+    ignore::WalkBuilder::new(root)
+        .hidden(true)
+        .git_ignore(true)
+        .build()
+        .flatten()
+        .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
+        .count()
 }
 
 /// Run `f` on a fresh OS thread and wait up to `budget` for it to
@@ -91,6 +128,8 @@ where
 pub struct RepoIndex {
     reference_cache_dir: parking_lot::RwLock<PathBuf>,
     analysis_key_path: PathBuf,
+    coverage_ledger_path: PathBuf,
+    live_coverage: RwLock<Option<crate::federation::contracts::coverage::RepoCoverage>>,
     source: Box<dyn RepoSource>,
     db: GraphDatabase,
     lsp: LspPool,
@@ -125,6 +164,8 @@ pub struct RepoIndex {
     /// harness diagnosing a flake) can see the real cause instead of just
     /// the coarse health enum. Cleared on the next successful index.
     last_index_error: Arc<RwLock<Option<String>>>,
+    /// Per-repo budget override in seconds (`repos[].index_timeout_secs`); 0 = unset.
+    index_timeout_override: std::sync::atomic::AtomicU64,
     /// Shared handle to the federation's `VolatileOverlay`. `index()`
     /// touches it after a successful index pass so the overlay's own
     /// age reflects "we just indexed" rather than "no edits ever"
@@ -321,6 +362,9 @@ impl RepoIndex {
         Ok(Self {
             reference_cache_dir: parking_lot::RwLock::new(data_dir.join("static-ref-cache")),
             analysis_key_path: data_dir.join("analysis-inputs.txt"),
+            coverage_ledger_path: data_dir
+                .join(crate::federation::contracts::coverage::LEDGER_FILE),
+            live_coverage: RwLock::new(None),
             source,
             db,
             lsp,
@@ -330,6 +374,7 @@ impl RepoIndex {
             projection_stale: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             last_indexed: Arc::new(RwLock::new(SystemTime::UNIX_EPOCH)),
             last_index_error: Arc::new(RwLock::new(None)),
+            index_timeout_override: std::sync::atomic::AtomicU64::new(0),
             server_overlay: parking_lot::Mutex::new(Arc::new(VolatileOverlay::new())),
             overlay_paths: parking_lot::Mutex::new(HashMap::new()),
             sync_overlay_lock: AsyncMutex::new(()),
@@ -406,6 +451,54 @@ impl RepoIndex {
         &self.lsp
     }
 
+    /// Read the ledger produced by the last live indexing pass. Keeping it
+    /// beside the repository graph also makes it available after a warm boot.
+    pub fn coverage(
+        &self,
+    ) -> Result<Option<crate::federation::contracts::coverage::RepoCoverage>, LainError> {
+        if let Some(coverage) = self.live_coverage.read().clone() {
+            return Ok(Some(coverage));
+        }
+        Ok(
+            crate::federation::contracts::coverage::read_ledger(&self.coverage_ledger_path)?
+                .and_then(|ledger| ledger.by_repo.get(self.source.id().as_str()).cloned()),
+        )
+    }
+
+    fn retain_coverage(
+        &self,
+        outcome: &crate::server::ingest::ingestion::IndexOutcome,
+    ) -> Result<(), LainError> {
+        // An unchanged-commit short circuit did not run sensors. Preserve the
+        // matching graph's existing ledger instead of replacing it with zeros.
+        if outcome.sensor_reports.is_empty() {
+            return Ok(());
+        }
+        let key = crate::federation::contracts::index_cache::CacheKey::new(
+            self.source.id().as_str(),
+            &self.db.get_last_commit()?.unwrap_or_default(),
+            crate::federation::contracts::analyzer_version(),
+        );
+        let mut coverage = crate::federation::contracts::coverage::coverage_from_reports(
+            self.source.local_path(),
+            &key,
+            &outcome.sensor_counts,
+            &outcome.sensor_reports,
+        );
+        let mut ledger = crate::federation::contracts::coverage::CoverageLedger::default();
+        ledger.insert(self.source.id().as_str().to_string(), coverage.clone());
+        if let Err(error) = crate::federation::contracts::coverage::write_ledger(
+            &self.coverage_ledger_path,
+            &ledger,
+        ) {
+            tracing::warn!(repo = %self.source.id(), "coverage ledger checkpoint failed: {error}");
+            coverage.error = Some(format!("coverage ledger checkpoint failed: {error}"));
+            let _ = std::fs::remove_file(self.coverage_ledger_path.with_extension("json.staging"));
+        }
+        *self.live_coverage.write() = Some(coverage);
+        Ok(())
+    }
+
     /// Borrow the Git sensor for this repository.
     pub fn git(&self) -> &Arc<AnyGitSensor> {
         &self.git
@@ -465,6 +558,45 @@ impl RepoIndex {
     /// The error text from the most recent failed indexing attempt, if
     /// this repo is (or was last) `Degraded`. `None` if it has never
     /// failed, or the last attempt since a failure succeeded.
+    /// Set (or clear) this repo's indexing budget. A per-repo value wins
+    /// over `LAIN_INDEX_TIMEOUT` and the 60 s default.
+    pub fn set_index_timeout(&self, secs: Option<u64>) {
+        self.index_timeout_override
+            .store(secs.unwrap_or(0), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The budget one indexing pass of this repo gets: the per-repo
+    /// `index_timeout_secs`, else `LAIN_INDEX_TIMEOUT`, else the default
+    /// scaled with the repo's size (see [`scaled_index_timeout`]).
+    pub fn effective_index_timeout(&self) -> Duration {
+        match self
+            .index_timeout_override
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            0 => explicit_env_timeout()
+                .unwrap_or_else(|| scaled_index_timeout(count_repo_files(self.source.local_path()))),
+            secs => Duration::from_secs(secs),
+        }
+    }
+
+    /// The timeout failure message for `budget`. It starts with
+    /// [`INDEX_TIMEOUT_CAUSE`] so API consumers can tell a timeout from
+    /// an indexing error, and it names the knob that raises the budget.
+    fn timeout_message(budget: Duration) -> String {
+        format!(
+            "{INDEX_TIMEOUT_CAUSE}: indexing exceeded the {}s budget; raise `index_timeout_secs` for this repo in repos.yaml (or set LAIN_INDEX_TIMEOUT)",
+            budget.as_secs()
+        )
+    }
+
+    /// Record an index failure without running the pipeline. Tests outside
+    /// this module use it to put a repo into a failed state.
+    #[cfg(test)]
+    pub(crate) fn record_index_failure_for_test(&self, message: String) {
+        *self.last_index_error.write() = Some(message);
+        self.set_health(RepoHealth::Degraded);
+    }
+
     pub fn last_index_error(&self) -> Option<String> {
         self.last_index_error.read().clone()
     }
@@ -702,16 +834,16 @@ impl RepoIndex {
             })
             .await
         };
-        let result = match tokio::time::timeout(index_timeout(), pipeline).await {
+        let budget = self.effective_index_timeout();
+        let result = match tokio::time::timeout(budget, pipeline).await {
             Ok(r) => r,
             Err(_) => {
-                let budget = index_timeout();
                 tracing::warn!(
                     "[federation] index timed out after {:?} for {:?}; transitioning to Degraded",
                     budget,
                     self.source.local_path()
                 );
-                let message = format!("RepoIndex::index exceeded {:?} budget", budget);
+                let message = Self::timeout_message(budget);
                 *self.last_index_error.write() = Some(message.clone());
                 self.set_health(RepoHealth::Degraded);
                 return Err(LainError::Other(message));
@@ -752,6 +884,7 @@ impl RepoIndex {
                 }
             }
         }
+        self.retain_coverage(result.as_ref().expect("successful index outcome"))?;
         *self.last_indexed.write() = SystemTime::now();
         *self.last_index_error.write() = None;
         self.mark_ready();
@@ -861,16 +994,16 @@ impl RepoIndex {
             })
             .await
         };
-        let result = match tokio::time::timeout(index_timeout(), pipeline).await {
+        let budget = self.effective_index_timeout();
+        let result = match tokio::time::timeout(budget, pipeline).await {
             Ok(r) => r,
             Err(_) => {
-                let budget = index_timeout();
                 tracing::warn!(
                     "[federation] index_forced timed out after {:?} for {:?}; transitioning to Degraded",
                     budget,
                     self.source.local_path()
                 );
-                let message = format!("RepoIndex::index_forced exceeded {:?} budget", budget);
+                let message = Self::timeout_message(budget);
                 *self.last_index_error.write() = Some(message.clone());
                 self.set_health(RepoHealth::Degraded);
                 return Err(LainError::Other(message));
@@ -888,6 +1021,7 @@ impl RepoIndex {
             return Err(result.unwrap_err());
         }
 
+        self.retain_coverage(result.as_ref().expect("successful index outcome"))?;
         *self.last_indexed.write() = SystemTime::now();
         *self.last_index_error.write() = None;
         self.mark_ready();
@@ -1526,6 +1660,101 @@ mod tests {
     use crate::federation::repo_id::RepoId;
     use crate::federation::repo_source::WorkspaceDirSource;
 
+    #[tokio::test]
+    async fn successful_index_still_marks_ready_when_ledger_write_fails() {
+        let data = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let git = git2::Repository::init(root.path()).unwrap();
+        std::fs::write(root.path().join("sample.py"), "x = 1\n").unwrap();
+        let mut git_index = git.index().unwrap();
+        git_index.add_path(Path::new("sample.py")).unwrap();
+        git_index.write().unwrap();
+        let tree_id = git_index.write_tree().unwrap();
+        let tree = git.find_tree(tree_id).unwrap();
+        let signature = git2::Signature::now("fixture", "fixture@example.invalid").unwrap();
+        git.commit(Some("HEAD"), &signature, &signature, "fixture", &tree, &[])
+            .unwrap();
+        let source = Box::new(
+            WorkspaceDirSource::new(RepoId::new("r").unwrap(), root.path().to_path_buf()).unwrap(),
+        );
+        let index = Arc::new(RepoIndex::new(source, data.path()).unwrap());
+        std::fs::create_dir_all(&index.coverage_ledger_path).unwrap();
+        index.index_local().await.unwrap();
+        assert_eq!(index.health(), RepoHealth::Ready);
+        assert!(index.indexed_signal_was_fired());
+        assert!(index.coverage().unwrap().unwrap().error.is_some());
+    }
+
+    #[test]
+    fn coverage_write_failure_is_visible_without_failing_the_index() {
+        let data = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        git2::Repository::init(repo.path()).unwrap();
+        let source = Box::new(
+            WorkspaceDirSource::new(RepoId::new("r").unwrap(), repo.path().to_path_buf()).unwrap(),
+        );
+        let index = RepoIndex::new(source, data.path()).unwrap();
+        // A directory at the ledger destination makes atomic rename fail.
+        std::fs::create_dir_all(&index.coverage_ledger_path).unwrap();
+        let outcome = crate::server::ingest::ingestion::IndexOutcome {
+            sensor_counts: Default::default(),
+            sensor_reports: vec![("sql", crate::server::sensors::ScanReport::default())],
+        };
+        index.retain_coverage(&outcome).unwrap();
+        assert!(index
+            .coverage()
+            .unwrap()
+            .unwrap()
+            .error
+            .unwrap()
+            .contains("coverage"));
+    }
+
+    #[test]
+    fn live_coverage_survives_warm_restart_and_unchanged_pass() {
+        let data = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        git2::Repository::init(repo.path()).unwrap();
+        std::fs::write(repo.path().join("validators.py"), "x = 1\n").unwrap();
+        std::fs::write(
+            repo.path().join("schema.graphql"),
+            "type Query { health: String! }",
+        )
+        .unwrap();
+        let source = || {
+            Box::new(
+                WorkspaceDirSource::new(RepoId::new("saleor").unwrap(), repo.path().to_path_buf())
+                    .unwrap(),
+            )
+        };
+        let index = RepoIndex::new(source(), data.path()).unwrap();
+        let (sensor_counts, sensor_reports) = crate::server::sensors::run_all_with_reports(
+            index.db(),
+            repo.path(),
+            &index.id_namespace,
+            "saleor",
+        );
+        index
+            .retain_coverage(&crate::server::ingest::ingestion::IndexOutcome {
+                sensor_counts,
+                sensor_reports,
+            })
+            .unwrap();
+        let expected = index.coverage().unwrap().unwrap();
+        assert!(expected.languages_present.contains("python"));
+        assert!(!expected.sensor_counts.is_empty());
+        assert!(!expected.ledger.is_empty());
+        drop(index);
+        let reopened = RepoIndex::new(source(), data.path()).unwrap();
+        reopened
+            .retain_coverage(&crate::server::ingest::ingestion::IndexOutcome {
+                sensor_counts: Default::default(),
+                sensor_reports: vec![],
+            })
+            .unwrap();
+        assert_eq!(reopened.coverage().unwrap().unwrap(), expected);
+    }
+
     #[test]
     fn index_timeout_defaults_to_the_per_repo_budget() {
         assert_eq!(parse_index_timeout(None), INDEX_TIMEOUT);
@@ -1539,6 +1768,51 @@ mod tests {
     #[test]
     fn index_timeout_falls_back_on_garbage() {
         assert_eq!(parse_index_timeout(Some("soon")), INDEX_TIMEOUT);
+    }
+
+    #[test]
+    fn per_repo_index_timeout_overrides_the_default_and_can_be_cleared() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_dir = tempfile::tempdir().unwrap();
+        git2::Repository::init(repo_dir.path()).unwrap();
+        let src = Box::new(
+            WorkspaceDirSource::new(RepoId::new("r").unwrap(), repo_dir.path().to_path_buf())
+                .unwrap(),
+        );
+        let ri = RepoIndex::new(src, tmp.path()).unwrap();
+        let default = ri.effective_index_timeout();
+        assert!(default >= INDEX_TIMEOUT);
+        ri.set_index_timeout(Some(900));
+        assert_eq!(ri.effective_index_timeout(), Duration::from_secs(900));
+        ri.set_index_timeout(None);
+        assert_eq!(ri.effective_index_timeout(), default);
+    }
+
+    #[test]
+    fn default_budget_scales_with_repo_size_and_is_capped() {
+        assert_eq!(scaled_index_timeout(0), INDEX_TIMEOUT);
+        assert_eq!(scaled_index_timeout(9), INDEX_TIMEOUT);
+        // OpenShell-sized: 60 s + 213 s.
+        assert_eq!(scaled_index_timeout(2130), Duration::from_secs(273));
+        assert_eq!(scaled_index_timeout(6656), Duration::from_secs(725));
+        assert_eq!(scaled_index_timeout(10_000_000), MAX_SCALED_INDEX_TIMEOUT);
+    }
+
+    #[test]
+    fn count_repo_files_counts_files_not_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("a.rs"), "").unwrap();
+        std::fs::write(dir.path().join("sub/b.rs"), "").unwrap();
+        assert_eq!(count_repo_files(dir.path()), 2);
+    }
+
+    #[test]
+    fn timeout_message_names_the_cause_budget_and_the_knob() {
+        let message = RepoIndex::timeout_message(Duration::from_secs(60));
+        assert!(message.starts_with(INDEX_TIMEOUT_CAUSE), "{message}");
+        assert!(message.contains("60s"), "{message}");
+        assert!(message.contains("index_timeout_secs"), "{message}");
     }
 
     #[test]

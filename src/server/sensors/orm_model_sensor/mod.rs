@@ -353,10 +353,21 @@ pub fn scan_workspace_orm_models_with_report(
     }
     let emitted = nodes.len();
     graph.replace_sensor_output(SensorOwner::OrmModelSensor, &nodes, &edges)?;
+    let mut locations = crate::federation::contracts::coverage::LocationCounts::default();
+    for site in &analysis.unresolved {
+        // Sensor diagnostics are `path:line: detail` or `path: detail`.
+        let path = site.split_once(": ").map_or(site.as_str(), |(p, _)| p);
+        let path = path
+            .rsplit_once(':')
+            .filter(|(_, n)| n.parse::<u32>().is_ok())
+            .map_or(path, |(p, _)| p);
+        locations.add(path, 1);
+    }
     let unresolved = if analysis.unresolved.is_empty() {
         Vec::new()
     } else {
         vec![UnresolvedRecord {
+            locations: Some(locations),
             reason: UnresolvedReason::OrmDynamicQuery,
             count: analysis.unresolved.len(),
             sample_ids: analysis.unresolved.iter().take(5).cloned().collect(),

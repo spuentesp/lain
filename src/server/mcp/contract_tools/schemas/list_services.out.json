@@ -14,6 +14,7 @@
         "properties": {
           "service": { "type": "string" },
           "repo":   { "type": "string" },
+          "repo_path": { "type": "string", "description": "Absolute on-disk checkout of the repo (live reads only)." },
           "paths":  { "type": "array", "items": { "type": "string" } },
           "endpoints": { "type": "integer", "minimum": 0 },
           "consumer_services": { "type": "integer", "minimum": 0 },

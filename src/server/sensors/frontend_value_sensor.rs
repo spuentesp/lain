@@ -495,6 +495,7 @@ fn grouped_unresolved(sites: &[String]) -> Vec<UnresolvedRecord> {
         return Vec::new();
     }
     vec![UnresolvedRecord {
+        locations: None,
         reason: UnresolvedReason::FrontendValueUnclassified,
         count: sites.len(),
         sample_ids: sites.iter().take(5).cloned().collect(),

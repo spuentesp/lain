@@ -34,6 +34,7 @@ fn register_declared_packages(fed: &FederatedIndex, config: &FederationConfig) {
     for repo in &config.repos {
         if let Ok(id) = crate::federation::repo_id::RepoId::new(&repo.id) {
             fed.set_declared_packages(&id, repo.packages.clone());
+            fed.set_index_timeout(&id, repo.index_timeout_secs);
         }
     }
 }

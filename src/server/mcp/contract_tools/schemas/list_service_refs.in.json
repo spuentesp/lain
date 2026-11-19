@@ -47,7 +47,7 @@
     },
     "suggestions": {
       "type": "boolean",
-      "description": "Also return suggested routes for production references that match no route of their service. Suggestions are proposals with a score, never links. Needs an installed embedding model."
+      "description": "Also return suggested routes for production references that match no route of their service. Suggestions are proposals with a score, never links. Needs an installed embedding model. Suggestions are computed independently of limit and cursor, across all references in the selected repo scope; cached until the contract index or references change."
     },
     "min_score": {
       "type": "number",

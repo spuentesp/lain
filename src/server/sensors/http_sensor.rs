@@ -480,9 +480,42 @@ fn decorator_routes_with_queries(
     // and the test asserts content, not order).
     let mut seen: std::collections::HashSet<(HttpMethod, String)> =
         std::collections::HashSet::new();
+    all_routes.retain(|r| is_plausible_route_path(r.method, &r.path));
     all_routes.retain(|r| seen.insert((r.method, r.path.clone())));
 
     all_routes
+}
+
+/// A string literal that merely sits in a `x.y("literal", ident)` call
+/// shape is not a route. These shapes are provably not URL paths:
+///   - a `%` not followed by two hex digits (a `fmt` verb such as `%w`,
+///     `%s`, `%d:`) — a percent-escape is always `%HH`;
+///   - any whitespace (prose error messages, e.g. Go `fmt.Errorf`);
+///   - a verbless (`ANY`) pattern that is neither rooted (`/…`), a wildcard
+///     (`*`), an anchored regex (`^…`, Django `re_path`) nor multi-segment
+///     (`users/`, Django `path`) — browser event names, test data, labels.
+fn is_plausible_route_path(method: HttpMethod, path: &str) -> bool {
+    if path.chars().any(char::is_whitespace) {
+        return false;
+    }
+    let bytes = path.as_bytes();
+    for (i, b) in bytes.iter().enumerate() {
+        if *b == b'%'
+            && !(bytes.get(i + 1).is_some_and(u8::is_ascii_hexdigit)
+                && bytes.get(i + 2).is_some_and(u8::is_ascii_hexdigit))
+        {
+            return false;
+        }
+    }
+    if method == HttpMethod::Any
+        && !(path.starts_with('/')
+            || path.starts_with('*')
+            || path.starts_with('^')
+            || path.contains('/'))
+    {
+        return false;
+    }
+    true
 }
 
 /// Run the tree-sitter query for one (lang, framework) pair, if its
@@ -1190,6 +1223,37 @@ response.headers.set('x-session-id', sessionId);
         assert_eq!(r.len(), 1, "express GET route should be found: {r:?}");
         assert_eq!(r[0].method, HttpMethod::Get);
         assert_eq!(r[0].path, "/api/items");
+    }
+
+    /// Live OpenShell run: Go `fmt.Errorf("%w: …", ErrX)` literals and
+    /// browser event names were emitted as `ANY` routes.
+    #[test]
+    fn format_strings_and_prose_are_not_routes() {
+        let go = "\
+func f() error {
+\treturn fmt.Errorf(\"%w: client secret is required (use WithClientSecret)\", ErrInvalid)
+\treturn fmt.Errorf(\"%s/items\", base)
+\treturn log.Printf(\"%d:\", n)
+}
+http.HandleFunc(\"/real\", realHandler)
+http.HandleFunc(\"/esc%20aped\", escHandler)
+";
+        let r = scan_file_for_routes(std::path::Path::new("a.go"), go, Patterns::patterns());
+        let mut paths: Vec<_> = r.iter().map(|x| x.path.as_str()).collect();
+        paths.sort();
+        assert_eq!(paths, vec!["/esc%20aped", "/real"], "{r:?}");
+    }
+
+    #[test]
+    fn rooted_unrooted_any_paths() {
+        assert!(is_plausible_route_path(HttpMethod::Any, "/x"));
+        assert!(is_plausible_route_path(HttpMethod::Any, "*"));
+        assert!(is_plausible_route_path(HttpMethod::Any, "users/"));
+        assert!(is_plausible_route_path(HttpMethod::Any, "^users/$"));
+        assert!(!is_plausible_route_path(HttpMethod::Any, "click"));
+        assert!(!is_plausible_route_path(HttpMethod::Any, "a b"));
+        assert!(!is_plausible_route_path(HttpMethod::Any, "/%w"));
+        assert!(is_plausible_route_path(HttpMethod::Get, "users"));
     }
 
     #[test]

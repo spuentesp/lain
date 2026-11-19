@@ -663,6 +663,7 @@ async fn binding_config_requires_repreparing_both_sides_of_a_snapshot_diff() {
             .map(|id| RepoConfig {
                 id: (*id).into(),
                 packages: Vec::new(),
+                index_timeout_secs: None,
                 source: SourceConfig::WorkspaceDir {
                     path: fixture.root.path().join(id),
                 },

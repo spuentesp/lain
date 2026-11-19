@@ -1347,7 +1347,8 @@ fn symbol_weight(kind: &NodeType) -> u32 {
         // is rarely co-edited by two agents, so weight 1 is the
         // same bucket as the other contract-federation leaves.
         | NodeType::Table
-        | NodeType::Column => 1,
+        | NodeType::Column
+        | NodeType::ServiceRef => 1,
     }
 }
 

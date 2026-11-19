@@ -5,6 +5,170 @@ All notable changes to LAIN are documented here. Versions follow
 
 ## Unreleased
 
+- **A timed-out repo says why, and its budget is configurable.** A repo whose
+  indexing exceeded the budget was reported `failed` with `error: null`; only
+  the server log had the reason. `get_coverage` (live), the scope's `unreviewed`
+  entries and `/health` now carry the indexer's error, and scope adds
+  `cause: "index_timeout" | "index_error"`. The message names the budget and
+  the knob. `repos[].index_timeout_secs` sets a per-repo budget (it wins over
+  `LAIN_INDEX_TIMEOUT`). With neither set, the default budget scales with the
+  repo: 60 s plus one second per ten files, capped at 30 minutes (OpenShell's
+  2.1k files get 273 s, NemoClaw's 6.7k get 725 s). A fixed 60 s failed both
+  on a clean scan.
+- **Linux release binary runs on Ubuntu 22.04 and 24.04.** The release job
+  built on `ubuntu-latest` (glibc 2.43). It now builds on `ubuntu-22.04`
+  (glibc 2.35) and fails the release if either binary needs a newer glibc.
+- **Federation graph schema bump: `FEDERATION_GRAPH_VERSION` 6 → 7.** Reference
+  edges (`list_service_refs`, provenance `ref` with `usage`) add an
+  `EdgeProvenance` variant. Older graphs are refused at load; run `lain reindex`
+  to back up and rebuild.
+- **Merge same-reason unresolved records in `get_coverage`.** Two sensors can
+  report `OrmDynamicQuery` for one repository (SQL and Django ORM); the repo's
+  ledger listed it twice. It is now one row per reason with the summed count,
+  at most five distinct sample ids, and merged exact locations.
+
+- **Refresh changed Rust wrapper proofs.** A source/config cache miss rebuilds
+  local delegation evidence and withholds name-only inference until a complete
+  repository refresh; contract resolution borrows the prepared configuration.
+- **Share the Rust candidate query during repository preparation.** Candidate
+  discovery and semantic probes reuse one compiled query across all files.
+- **Count empty files in the Rust analysis cache budget.** File paths, hashes,
+  and container overhead count toward the limit even without RPC candidates.
+- **Preserve lower binding confidence.** URL defaults cap confidence instead of
+  raising ambiguous matches; URL-default and wrapper provenance record the
+  confidence actually retained on the binding.
+- **Retract interrupted reference generations.** Track reference-node ids before
+  persistence and inventory loaded graphs once, so orphan nodes are removed on
+  retry or restart while unchanged rejoins still perform zero saves.
+
+- **Persist contract rejoin differences only.** Unchanged executable/reference
+  edges and reference nodes cause zero saves; usage changes still update edges,
+  and removed reference endpoints are checked directly for cleanup.
+- **Keep exact root bindings valid.** Exact-method root handlers can be confirmed
+  for matching service consumers; wildcard, ANY-root, external-root, and hostless
+  root proposals retain the catch-all refusal.
+- **Keep indexing ready when coverage persistence fails.** Log ledger write
+  failures and expose the repository coverage error from the live index while
+  preserving the successful graph and readiness transition.
+- **Identify URL fallback evidence explicitly.** Consumer facts carry optional
+  URL-default environment names instead of docstrings, and fallback-only joins
+  use `url_default` heuristic provenance at confidence at most 0.5. Declared
+  environment service identity takes precedence. Repository/federation graph schemas are
+  now version 6; run `lain reindex` to rebuild older graphs.
+- **Require evidence for Rust wrapper receivers.** Unresolved receivers must
+  match the wrapper name before unique-method fallback can bind; typed
+  provenance replaces description parsing. Reuse bounded, content/config-hashed
+  repository candidate sets and borrow prepared config during per-file lookup.
+- **Analyze Django sites once per index.** Generic SQL deduplication and the
+  Django sensor share one pass-scoped analysis, discarded after indexing.
+
+- **Reuse lightweight federation query views.** Cache one embedding-free view by
+  graph revision and contract snapshot generation, invalidate it on graph writes,
+  and retain the last view when contract rejoining fails.
+- **Honor repository scope in graph queries.** Keep local symbol IDs and only
+  include the selected repository and its binding neighbours; semantic filters
+  read each symbol from its owning repository checkout.
+- **Read query properties without serializing graph nodes.** Common fields come
+  from query references, edge lookup is deferred, label groups use query labels
+  (including the empty unlabeled key), and vanished group nodes return errors.
+- **Keep query groups aligned with results.** Remove filtered or paginated nodes
+  from group membership and refresh counts after filters and result caps.
+
+- **Follow Rust gRPC wrapper bodies automatically.** Repository-local methods
+  delegating to one generated client RPC now bind their callers without config,
+  with `wrapper_followed` provenance and reduced confidence for unique-name
+  fallback. Ambiguous bodies and denied methods stay excluded; explicit
+  mappings retain priority, and snapshots rebuild from pinned source.
+
+- **Query federation bindings in `query_graph`.** Queries now read the joined
+  federation instead of a local placeholder, exposing consumer-to-provider
+  `Binds` edges with confidence, provenance kind, and source. HTTP bindings
+  also expose direct `Consumes`/`SendsHttp` legs in the in-memory query view.
+- **Group graph queries by properties and property pairs.** Node properties,
+  consumer/provider repo or service, neighbour properties, edge properties,
+  and path-prefix buckets support count aggregates sorted by `count` or
+  `call_sites`, with limits applied to groups.
+- **Reject unknown graph filter keys.** Invalid filters now return
+  `invalid_argument` naming the key and accepted fields; repo, path,
+  resolution, provenance, and confidence filters support comparisons.
+- **Explain graph query cardinalities.** Optional `explain: true` reports
+  `{op, nodes, edges}` after every step; `meta.matched_before_limit` now
+  accompanies explicit limits, including limits that do not truncate.
+- **Derive GraphQL request and response schemas from SDL.** Root arguments
+  and scalar/object results are available for queries, mutations, and
+  subscriptions, with SDL type references such as `ID!` and `JSONString`
+  preserved by `get_contract`. Descriptions, directives, and same-line
+  fields no longer swallow declarations or shift their source locations.
+- **Serve indexing coverage ledgers for live repositories.** `get_coverage`
+  now reads retained sensor counts, languages, skips, and unresolved records
+  from the live indexing pass, including after a warm restart.
+- **Correct unsupported-language skips for supported source files.** Missing
+  detailed sensor counts no longer label Python and other supported languages
+  as `UnsupportedLanguage`; oversized files retain a separate `SizeCap` skip.
+- **Map hand-written Rust gRPC wrappers to RPCs.** Repository
+  `.lain/patterns/rust-grpc.yaml` overrides can declare exact wrapper types
+  and methods, generated client targets, RPC methods, and provenance;
+  each original call site binds through the proto catalog.
+- **Exclude Rust Result helpers from gRPC detection.** `unwrap`, `expect`,
+  their fallback/error variants, and `map_err` no longer become RPC calls.
+- **Reject root-route binding confirmations.** `check_binding` returns
+  `catch_all_route` for HTTP `/` candidates, and `apply_contract_context`
+  refuses the same mappings.
+- **Exclude same-service-only HTTP calls from unresolved coverage.**
+  Relative calls with dynamic methods and only a compatible internal
+  endpoint are classified as internal without a cross-service bind.
+- **Keep file basenames ambiguous in cross-repo blast radius.** A file with
+  the requested name no longer hides same-named symbols in other repositories;
+  only an exact file path selects a File node before ambiguity checks.
+
+- **Resolve chained JavaScript URL defaults.** Immutable aliases and template
+  concatenation can use `process.env.X || "https://host"` (and `??`) defaults;
+  coverage records the external host and flags source defaults in `url_defaults`.
+- **Honor declared environment service mappings.** `services[].env` resolves
+  without a source env file and no longer increments the unmapped-env ledger.
+- **Persist service-reference bindings.** Resolved URL literals now produce typed
+  federation `Binds` edges from ServiceRef sites to service Module anchors, with `Ref`
+  provenance and production/test/config/doc usage. `query_graph` traverses these
+  edges and filters their provenance, resolution and usage; reindex/rejoin
+  retracts stale references. References remain separate from executable calls.
+  The append-only node/provenance variants preserve existing bincode
+  discriminants and graph layout, so existing graphs remain readable without
+  a schema-header bump.
+- **Require an unambiguous blast-radius seed.** Cross-repo blast radius accepts
+  node ids or unique paths and rejects duplicate names with candidate ids and
+  paths before traversal; `find_symbol` supplies ids for follow-up tools.
+- **Cache service-reference suggestions.** Repeated requests reuse the current
+  contract generation and reference set; embedding paths are reused within the
+  initial request. Suggestions remain independent of item pagination.
+- **Scope unresolved targets consistently.** A single candidate service is
+  exposed as `target_service`; the service filter matches owners, targets, or
+  candidate endpoint services.
+- **Count dynamic ORM sites exactly by location.** Django, SQL and ORM-model
+  sensors retain per-file and per-directory counts independently of bounded
+  site samples, and persist them in live and pinned coverage ledgers. Generic
+  SQL ORM reports delegate sites recognized by the Django detector so the
+  same site is counted once.
+  `get_coverage` and `list_unresolved` report exact pre-pagination groups with
+  `groups_are_samples: false`; maps retain 4096 paths plus an explicit `<other>`
+  bucket whose count preserves the total. Legacy ledgers without location counts
+  remain marked as sampled until `lain reindex` rebuilds them.
+
+- **Stop emitting format strings and prose as `HttpRoute`.** Go
+  `fmt.Errorf("%w: …", err)` literals and browser event names matched the
+  `x.y("literal", ident)` route shape. A candidate path now must contain no
+  whitespace and no `%` that is not a `%HH` escape, and a verbless (`ANY`)
+  route must be rooted (`/…`) or `*`.
+- **Bind hostless gRPC stubs by proto contract.** A stub with no dial address
+  (tonic/python generated client, non-literal host) used to land
+  `rpc_stub_unknown`. It now binds to the single other service exposing that
+  `service.method`; two owners still stay unresolved.
+- **Expose each repo's absolute checkout path** as `repo_path` on
+  `list_services` / `get_service` (live reads) so consumers stop guessing the
+  directory from the repo id.
+- **New unresolved reason `not_a_call`.** An unmatched call site in
+  test/fixture/mock code (`no_match` / `no_route_in_service`) is reclassified
+  instead of counted as a loose end. Test sites that bind keep their edge.
+
 ## [0.15.0] - 2026-11-10
 
 - **Fix the startup cache on a repository reached through a symlink.** The

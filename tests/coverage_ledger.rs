@@ -166,6 +166,7 @@ fn a3_wrapper_call_emits_unresolved_reason() {
     let sensor_ledger = SensorLedger {
         files_analyzed: 3,
         unresolved: vec![UnresolvedRecord {
+            locations: None,
             reason: UnresolvedReason::WrapperUnconfigured,
             count: 1,
             sample_ids: vec!["billing:HttpClientCall:src/billing.py:fetch_order:10".into()],
@@ -309,3 +310,325 @@ fn a8_file_record_carries_lang_ignored_size_capped() {
 }
 
 use std::io::Write;
+
+/// The live view reads the same ledger shape as pinned snapshots, including
+/// skip and unresolved buckets; it must not replace it with node counts.
+#[tokio::test]
+async fn live_coverage_serves_indexing_ledger() {
+    use lain::federation::{
+        federated_index::FederatedIndex, graph_backend::PetgraphBackend, repo_id::RepoId,
+        repo_source::WorkspaceDirSource,
+    };
+    use lain::server::mcp::{
+        contract_tools::analysis::get_coverage_handle,
+        handler::{HandlerStatus, McpContext},
+    };
+    use std::sync::Arc;
+    let root = tempfile::tempdir().unwrap();
+    let repo = root.path().join("saleor");
+    std::fs::create_dir(&repo).unwrap();
+    git2::Repository::init(&repo).unwrap();
+    let data = root.path().join("data");
+    std::fs::create_dir(&data).unwrap();
+    let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(&data).unwrap()));
+    fed.set_contract_config(Default::default());
+    fed.add_repo(
+        Box::new(WorkspaceDirSource::new(RepoId::new("saleor").unwrap(), repo).unwrap()),
+        &data,
+    )
+    .await
+    .unwrap();
+    let mut cover = RepoCoverage {
+        cache_key: CacheKey::new(
+            "saleor",
+            "",
+            &lain::federation::contracts::analyzer_version(),
+        ),
+        ..Default::default()
+    };
+    cover.languages_present.insert("python".into());
+    cover.sensor_counts.insert("graphql".into(), 4);
+    cover
+        .ledger
+        .entry("graphql_provider".into())
+        .or_default()
+        .insert(
+            "python".into(),
+            SensorLedger {
+                files_skipped: vec![lain::federation::contracts::coverage::SkipRecord {
+                    reason: SkipReason::SizeCap,
+                    count: 1,
+                    sample_paths: vec!["big.py".into()],
+                }],
+                unresolved: vec![UnresolvedRecord {
+                    locations: None,
+                    reason: UnresolvedReason::WrapperUnconfigured,
+                    count: 1,
+                    sample_ids: vec!["call:1".into()],
+                }],
+                ..Default::default()
+            },
+        );
+    let mut ledger = CoverageLedger::default();
+    ledger.insert("saleor".into(), cover);
+    write_ledger(&data.join("repos/saleor/coverage_ledger.json"), &ledger).unwrap();
+    let status = HandlerStatus::for_test();
+    let ctx = McpContext {
+        server: None,
+        federation: Some(&fed),
+        workspaces: None,
+        status: &status,
+        reload_bus: None,
+        snapshots: None,
+    };
+    let out = get_coverage_handle(&ctx, serde_json::json!({"snapshot":"live"}))
+        .await
+        .unwrap();
+    assert!(!out.is_error, "{:?}", out.structured);
+    let repos = out.structured["data"]["repos"].as_array().unwrap();
+    let saleor = repos.iter().find(|r| r["repo"] == "saleor").unwrap();
+    assert!(saleor["error"].is_null(), "{saleor}");
+    assert_eq!(saleor["languages"], serde_json::json!(["python"]));
+    assert_eq!(saleor["sensors"]["graphql"], 4);
+    assert_eq!(saleor["skips"][0]["count"], 1);
+    assert_eq!(saleor["unresolved"][0]["count"], 1);
+    let schema: serde_json::Value = serde_json::from_str(include_str!(
+        "../src/server/mcp/contract_tools/schemas/get_coverage.out.json"
+    ))
+    .unwrap();
+    let repo_schema = &schema["properties"]["repos"]["items"];
+    let validator = jsonschema::options()
+        .with_draft(jsonschema::Draft::Draft7)
+        .build(repo_schema)
+        .unwrap();
+    assert!(validator.is_valid(saleor), "{saleor}");
+}
+
+#[tokio::test]
+async fn saleor_graphql_tools_expose_sdl_types_and_schema_coverage() {
+    use lain::federation::{
+        federated_index::FederatedIndex, graph_backend::PetgraphBackend, repo_id::RepoId,
+        repo_source::WorkspaceDirSource,
+    };
+    use lain::server::mcp::{
+        contract_tools::contracts::{get_contract_handle, list_contracts_handle},
+        handler::{HandlerStatus, McpContext},
+    };
+    use std::sync::Arc;
+    let root = tempfile::tempdir().unwrap();
+    let repo = root.path().join("saleor");
+    std::fs::create_dir(&repo).unwrap();
+    git2::Repository::init(&repo).unwrap();
+    std::fs::write(
+        repo.join("schema.graphql"),
+        r#"
+scalar JSONString
+type Query {
+  checkout(id: ID!): Checkout
+  health: String!
+}
+type Mutation {
+  """Finish a checkout; metadata may contain type names and {braces}."""
+  checkoutComplete(checkoutId: ID!, paymentData: JSONString, redirectUrl: String): CheckoutComplete
+}
+type Subscription { checkoutUpdated: Checkout }
+type Checkout { id: ID! metadata: JSONString }
+type CheckoutComplete { checkout: Checkout errors: [CheckoutError!]! }
+type CheckoutError { field: String message: String! }
+"#,
+    )
+    .unwrap();
+    let data = root.path().join("data");
+    std::fs::create_dir(&data).unwrap();
+    let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(&data).unwrap()));
+    fed.set_contract_config(Default::default());
+    let id = RepoId::new("saleor").unwrap();
+    fed.add_repo(
+        Box::new(WorkspaceDirSource::new(id.clone(), repo.clone()).unwrap()),
+        &data,
+    )
+    .await
+    .unwrap();
+    let indexed = fed.get_repo(&id).unwrap();
+    lain::server::sensors::graphql_provider_sensor::scan_workspace_graphql_provider(
+        indexed.db(),
+        &repo,
+        &lain::schema::RepoNamespace::for_test(),
+    )
+    .unwrap();
+    fed.project_repo(&id).await.unwrap();
+    let status = HandlerStatus::for_test();
+    let ctx = McpContext {
+        server: None,
+        federation: Some(&fed),
+        workspaces: None,
+        status: &status,
+        reload_bus: None,
+        snapshots: None,
+    };
+    let listed = list_contracts_handle(
+        &ctx,
+        serde_json::json!({"snapshot":"live", "kind":"graphql"}),
+    )
+    .await
+    .unwrap();
+    assert!(!listed.is_error, "{:?}", listed.structured);
+    let items = listed.structured["data"]["items"].as_array().unwrap();
+    assert_eq!(items.len(), 4, "{:?}", listed.structured);
+    assert!(items.iter().filter(|i| i["has_schema"] == true).count() * 100 >= items.len() * 95);
+    let out = get_contract_handle(
+        &ctx,
+        serde_json::json!({"snapshot":"live", "key":"graphql:mutation:checkoutComplete"}),
+    )
+    .await
+    .unwrap();
+    assert!(!out.is_error, "{:?}", out.structured);
+    let schemas = out.structured["data"]["items"][0]["schemas"]
+        .as_array()
+        .unwrap();
+    let request = schemas
+        .iter()
+        .find(|s| s["direction"] == "request")
+        .expect("request schema");
+    let fields = request["fields"].as_array().unwrap();
+    for (name, ty) in [
+        ("checkoutId", "ID!"),
+        ("paymentData", "JSONString"),
+        ("redirectUrl", "String"),
+    ] {
+        assert!(
+            fields
+                .iter()
+                .any(|f| f["json_path"] == name && f["ty"] == ty),
+            "{request}"
+        );
+    }
+    let response = schemas
+        .iter()
+        .find(|s| s["direction"] == "response")
+        .expect("response schema");
+    assert!(
+        response["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["json_path"] == "checkout" && f["ty"] == "Checkout"),
+        "{response}"
+    );
+}
+
+#[path = "support/contracts_snapshot_harness.rs"]
+mod snapshot_harness;
+
+#[tokio::test]
+async fn orm_dynamic_counts_are_exact_in_live_and_pinned_tools() {
+    use lain::federation::contracts::{
+        config::ContractFederationConfig, index_cache::IndexCache,
+        snapshots::manager::SnapshotManager,
+    };
+    use lain::federation::{
+        config::{FederationConfig, RepoConfig, SourceConfig},
+        federated_index::FederatedIndex,
+        graph_backend::PetgraphBackend,
+        repo_id::RepoId,
+        repo_source::WorkspaceDirSource,
+    };
+    use lain::server::mcp::{
+        contract_tools::analysis::get_coverage_handle,
+        handler::{HandlerStatus, McpContext},
+    };
+    use std::sync::Arc;
+    let root = tempfile::tempdir().unwrap();
+    let repo = root.path().join("app");
+    std::fs::create_dir_all(&repo).unwrap();
+    for i in 0..40 {
+        let dir = repo.join(format!("group{}", i / 10));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(format!("queries{i}.py")),
+            "dynamic_receiver.objects.filter(id=1)\n".repeat(125),
+        )
+        .unwrap();
+    }
+    let git = git2::Repository::init(&repo).unwrap();
+    let mut index = git.index().unwrap();
+    index
+        .add_all(["*"], git2::IndexAddOption::DEFAULT, None)
+        .unwrap();
+    index.write().unwrap();
+    let tree_id = index.write_tree().unwrap();
+    let tree = git.find_tree(tree_id).unwrap();
+    let sig = git2::Signature::now("fixture", "fixture@example.invalid").unwrap();
+    let sha = git
+        .commit(Some("HEAD"), &sig, &sig, "fixture", &tree, &[])
+        .unwrap();
+    let data = root.path().join("data");
+    let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(&data).unwrap()));
+    let config = Arc::new(
+        ContractFederationConfig::load_from_str("services:\n  - name: app\n    repo: app\n")
+            .unwrap(),
+    );
+    fed.set_contract_config((*config).clone());
+    let id = RepoId::new("app").unwrap();
+    fed.add_repo(
+        Box::new(WorkspaceDirSource::new(id.clone(), repo.clone()).unwrap()),
+        &data,
+    )
+    .await
+    .unwrap();
+    fed.get_repo(&id).unwrap().index().await.unwrap();
+    fed.project_repo(&id).await.unwrap();
+    let retained = fed.get_repo(&id).unwrap().coverage().unwrap().unwrap();
+    let orm_total: usize = retained
+        .ledger
+        .values()
+        .flat_map(|l| l.values())
+        .flat_map(|l| &l.unresolved)
+        .filter(|r| r.reason == UnresolvedReason::OrmDynamicQuery)
+        .map(|r| r.count)
+        .sum();
+    assert_eq!(orm_total, 5000, "retained live ledger: {retained:?}");
+    let sources = FederationConfig {
+        data_dir: data.clone(),
+        repos: vec![RepoConfig {
+            id: "app".into(),
+            packages: Vec::new(),
+            index_timeout_secs: None,
+            source: SourceConfig::WorkspaceDir { path: repo },
+        }],
+        ..Default::default()
+    };
+    let manager = SnapshotManager::with_cap(&data, IndexCache::new(&data), 2);
+    manager.set_repo_source_resolver(SnapshotManager::resolver_from_config(&sources));
+    let pinned = snapshot_harness::prepare_ready(
+        &manager,
+        BTreeMap::from([("app".into(), sha.to_string())]),
+        None,
+        config,
+    )
+    .await;
+    let status = HandlerStatus::for_test();
+    let ctx = McpContext {
+        server: None,
+        federation: Some(&fed),
+        workspaces: None,
+        status: &status,
+        reload_bus: None,
+        snapshots: Some(&manager),
+    };
+    for snapshot in ["live", pinned.as_str()] {
+        let out = get_coverage_handle(&ctx, serde_json::json!({"snapshot": snapshot}))
+            .await
+            .unwrap();
+        assert!(!out.is_error, "{:?}", out.structured);
+        let counts = &out.structured["data"]["summary"]["orm_dynamic_query"];
+        assert_eq!(counts["total"], 5000, "{snapshot}: {counts}");
+        assert_eq!(counts["groups_are_samples"], false);
+        let files = counts["files"].as_array().unwrap();
+        assert_eq!(files.len(), 40);
+        assert!(files.iter().all(|f| f["count"] == 125));
+        let dirs = counts["directories"].as_array().unwrap();
+        assert_eq!(dirs.len(), 4);
+        assert!(dirs.iter().all(|d| d["count"] == 1250));
+    }
+}

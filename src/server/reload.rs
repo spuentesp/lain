@@ -526,6 +526,7 @@ mod tests {
                     git_sensor: None,
                     repos: vec![crate::server::federation::config::RepoConfig {
                         packages: Vec::new(),
+                        index_timeout_secs: None,
                         id: (*id).to_string(),
                         source: crate::server::federation::config::SourceConfig::WorkspaceDir {
                             path: path.to_path_buf(),

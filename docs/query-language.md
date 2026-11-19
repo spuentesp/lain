@@ -430,7 +430,7 @@ traversing one always returns nothing.
 | `HasField` | `Schema` → its flattened `Field` |
 | `ReadsField` | Function/method → `FieldRef` (a response-field read) |
 | `ReadsFrom` | `FieldRef` → the `HttpClientCall` whose response it reads |
-| `Binds` | Federation-only: consumer → matched provider |
+| `Binds` | Federation-only: consumer → matched provider, or `ServiceRef` → service Module with `ref` provenance |
 | `ReadsTable` / `WritesTable` | Function/method/file → `Table` (SELECT / INSERT·UPDATE·DELETE) |
 | `MapsTo` | ORM model → mapped `Table` |
 | `HasColumn` | `Table` → contained `Column` |
@@ -455,3 +455,23 @@ with `indexed: false` — no indexer emits it yet.
 languages most code is a `Method`, so a query filtered to `Function`
 alone silently misses it — call `describe_schema` if in doubt, and note
 that `find` without a `type` matches every kind.
+
+Service URL references are persisted as `Binds` edges from ServiceRef nodes labelled
+`service_reference` to Module nodes labelled `service_anchor`. Their provenance
+kind is `ref`; their usage is `production`, `test`, `config`, or `doc`. A reference
+identifies a declared service and does not establish an executable call. Both
+nodes and the edge's source site survive federation graph reloads.
+
+Filter reference sources before traversal to exclude test references, including
+when several sources lead to the same service (results keep one path per target):
+
+```json
+{"ops":[
+  {"op":"find","type":"ServiceRef"},
+  {"op":"filter","provenance":"ref","resolution":"resolved","usage":{"ne":"test"}},
+  {"op":"connect","edge":"Binds"}
+]}
+```
+
+The returned edges include `kind: "ref"`, typed `provenance.Ref.usage`, top-level
+`usage`, and `site`. Grouping by `edge.usage` uses the selected traversal path.

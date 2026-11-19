@@ -388,9 +388,27 @@ impl ContractJoiner {
                 .get(call_id.as_str())
                 .cloned()
                 .unwrap_or_else(|| implicit_service(node));
-            let resolution = consumer_http::resolve_consumer(
+            // A source fallback supplies a usable URL, but an explicit
+            // services[].env declaration still establishes service identity.
+            // Preserve the literal on the node for default evidence and use
+            // the declared env identity only for this resolution.
+            let default_names = consumer.url_defaults.clone();
+            let declared_default = default_names
+                .filter(|names| {
+                    config
+                        .services
+                        .iter()
+                        .any(|service| service.env.iter().any(|name| names.contains(name)))
+                })
+                .map(|names| {
+                    let mut effective = consumer.clone();
+                    effective.url.host = crate::federation::contracts::model::HostPart::Env(names);
+                    effective
+                });
+            let binds_before = binds.len();
+            let mut resolution = consumer_http::resolve_consumer(
                 &call_id,
-                consumer,
+                declared_default.as_ref().unwrap_or(consumer),
                 &own_service,
                 config,
                 &http_clients,
@@ -402,6 +420,40 @@ impl ContractJoiner {
                 &mut unresolved_env_vars,
                 &mut ambiguous_env_vars,
             );
+            // A source fallback is contingent on deployment environment. Its
+            // bindings carry lower confidence unless an explicit env mapping
+            // resolved identity or an operator confirmed the binding.
+            if consumer
+                .url_defaults
+                .as_ref()
+                .is_some_and(|names| !names.is_empty())
+                && declared_default.is_none()
+            {
+                let provenance_for = |confidence| crate::schema::EdgeProvenance::Heuristic {
+                    detector: "url_default".into(),
+                    confidence,
+                };
+                for bind in &mut binds[binds_before..] {
+                    if !matches!(
+                        bind.provenance,
+                        crate::schema::EdgeProvenance::Confirmed { .. }
+                    ) {
+                        bind.confidence = bind.confidence.min(0.5);
+                        bind.provenance = provenance_for(bind.confidence);
+                    }
+                }
+                if let Some(ConsumerTarget::Binds {
+                    provenance: p,
+                    confidence,
+                    ..
+                }) = &mut resolution.target
+                {
+                    if !matches!(p, crate::schema::EdgeProvenance::Confirmed { .. }) {
+                        *confidence = confidence.min(0.5);
+                        *p = provenance_for(*confidence);
+                    }
+                }
+            }
             if matches!(
                 resolution.target,
                 Some(ConsumerTarget::Unresolved {
@@ -415,6 +467,36 @@ impl ContractJoiner {
                 .entry(call_id.clone())
                 .or_default()
                 .push(resolution);
+        }
+
+        // Step 4b — an unmatched call site in test/fixture/mock code is
+        // not a call the product makes. Reclassify it so it stops
+        // inflating the loose-ends backlog; a test site that bound keeps
+        // its edge.
+        {
+            let test_sites: std::collections::BTreeSet<&str> = nodes
+                .iter()
+                .filter(|n| {
+                    crate::federation::contracts::service_refs::classify_usage(&n.path)
+                        == crate::federation::contracts::service_refs::Usage::Test
+                })
+                .map(|n| n.id.as_str())
+                .collect();
+            for (call_id, resolutions) in consumers.iter_mut() {
+                if !test_sites.contains(call_id.as_str()) {
+                    continue;
+                }
+                for r in resolutions.iter_mut() {
+                    if let Some(ConsumerTarget::Unresolved { reason, .. }) = r.target.as_mut() {
+                        if matches!(
+                            reason,
+                            UnresolvedReason::NoMatch | UnresolvedReason::NoRouteInService
+                        ) {
+                            *reason = UnresolvedReason::NotACall;
+                        }
+                    }
+                }
+            }
         }
 
         // Step 6 — apply confirmed bindings (§7.6).
