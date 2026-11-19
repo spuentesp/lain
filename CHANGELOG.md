@@ -5,6 +5,22 @@ All notable changes to LAIN are documented here. Versions follow
 
 ## Unreleased
 
+- **TypeScript / JavaScript gRPC consumer sensor.** `.ts`, `.tsx`, `.js`, `.jsx`,
+  `.mjs` and `.cjs` files now emit RPC consumers. A client handle is recognised
+  where it is built or typed (`new FooClient(..)`, `FooClient.connect(..)`,
+  `createPromiseClient(FooService, ..)`, `x: FooClient`) and only when the type
+  is imported from a gRPC-style module or named by one (`@nvidia/openshell-sdk`
+  vouches for `OpenShell`), so an app's own `SandboxClient` is not read as a
+  stub. Calls are `client.method(..)`, `this.client.method(..)` and
+  `client.raw.method(..)`, PascalCased to the proto method; a narrowed view such
+  as `OpenShellReadClient` names its underlying service. The host comes from a
+  literal or template address (`gateway: "https://127.0.0.1:${port}"`) or a
+  `process.env` read. An SDK facade (`client.sandbox.execStream(..)`) names no
+  proto method and stays unbound.
+- **Go `net/http` clients are not gRPC stubs.** `oidcHTTPClient.Do(req)` was read
+  as an RPC stub because the receiver ends in `Client`. A receiver declared as
+  `http.Client` is skipped, and `Do`/`Get`/`Post`/`PostForm`/`Head` on a `*Client`
+  receiver count only with a context first argument, as a generated stub takes.
 - **Rust gRPC wrappers are followed on real code.** Three separate causes kept
   OpenShell's `CachedOpenShellClient` from binding: (1) a file the bundled
   grammar cannot parse (`#[cfg(..)]` on a field of a destructuring pattern)
