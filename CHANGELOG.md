@@ -5,6 +5,17 @@ All notable changes to LAIN are documented here. Versions follow
 
 ## Unreleased
 
+- **Blind-spot counts stop counting things that are not blind spots.**
+  - The Rust gRPC sensor recorded one `RpcStubUnknown` for the whole repository
+    whose count was the number of `.rs` files (774 for OpenShell). It now counts
+    only Rust files that name a generated client type (`*_client::FooClient`) yet
+    yielded no identified call, which is where an unfollowed wrapper could hide
+    an RPC.
+  - Dynamic SQL, dynamic ORM queries (SQL and Django sensors) and unclassified
+    frontend values in test or fixture files no longer count in the coverage
+    ledger. Their graph edges stay. NeMo Agent Toolkit's `OrmDynamicQuery` total
+    was entirely test code, and NemoClaw's 981 unclassified frontend values were
+    mostly tests.
 - **TypeScript / JavaScript gRPC consumer sensor.** `.ts`, `.tsx`, `.js`, `.jsx`,
   `.mjs` and `.cjs` files now emit RPC consumers. A client handle is recognised
   where it is built or typed (`new FooClient(..)`, `FooClient.connect(..)`,

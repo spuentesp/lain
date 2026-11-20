@@ -444,7 +444,10 @@ pub fn scan_workspace_frontend_values_with_report(
                                     emit(
                                         &mut edges, &mut seen, edge_type, binding, &path, use_line,
                                     );
-                                } else {
+                                } else if !is_test_path(&path) {
+                                    // A test or fixture that renders a value is not a
+                                    // production blind spot; counting it inflated the
+                                    // ledger (981 for NemoClaw).
                                     unclassified_sites.push(format!("{path}:{use_line}"));
                                 }
                             }
@@ -490,6 +493,11 @@ pub fn scan_workspace_frontend_values_with_report(
     })
 }
 
+fn is_test_path(path: &str) -> bool {
+    crate::federation::contracts::service_refs::classify_usage(path)
+        == crate::federation::contracts::service_refs::Usage::Test
+}
+
 fn grouped_unresolved(sites: &[String]) -> Vec<UnresolvedRecord> {
     if sites.is_empty() {
         return Vec::new();
@@ -508,4 +516,25 @@ pub fn scan_workspace_frontend_values(
     namespace: &RepoNamespace,
 ) -> Result<usize, LainError> {
     scan_workspace_frontend_values_with_report(graph, root, namespace).map(|report| report.emitted)
+}
+
+#[cfg(test)]
+mod noise_tests {
+    use super::*;
+
+    #[test]
+    fn test_and_fixture_paths_are_not_production_blind_spots() {
+        for p in [
+            "src/__tests__/Orders.test.tsx",
+            "test/e2e/live/page.ts",
+            "src/components/Orders.spec.tsx",
+            "fixtures/app/Orders.tsx",
+            "src/testUtils/render.tsx",
+        ] {
+            assert!(is_test_path(p), "{p} should count as test code");
+        }
+        for p in ["src/Orders.tsx", "src/components/Cart.tsx", "pages/index.tsx"] {
+            assert!(!is_test_path(p), "{p} is production code");
+        }
+    }
 }

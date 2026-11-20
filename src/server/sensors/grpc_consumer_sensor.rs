@@ -114,23 +114,7 @@ impl crate::server::sensors::Sensor for GrpcConsumerSensor {
         namespace: &RepoNamespace,
     ) -> Result<crate::server::sensors::ScanReport, LainError> {
         let emitted = self.scan(graph, root, namespace)?;
-        let rust_files: Vec<String> = crate::server::sensors::util::scan_files(root, |p| {
-            (p.extension()?.to_str()? == "rs").then(|| "rs".to_string())
-        })
-        .map(|(path, _, _)| graph_path(root, &path))
-        .collect();
-        // PR2 proves individual identities, not absence of RPCs behind arbitrary
-        // Rust wrappers. A missing mapping must never turn into clean coverage.
-        let unresolved = if rust_files.is_empty() {
-            vec![]
-        } else {
-            vec![crate::federation::contracts::coverage::UnresolvedRecord {
-                locations: None,
-                reason: crate::federation::contracts::model::UnresolvedReason::RpcStubUnknown,
-                count: rust_files.len(),
-                sample_ids: rust_files.iter().take(5).cloned().collect(),
-            }]
-        };
+        let unresolved = unproven_rust_rpc_files(root)?;
         Ok(crate::server::sensors::ScanReport {
             emitted,
             unresolved,
@@ -138,6 +122,43 @@ impl crate::server::sensors::Sensor for GrpcConsumerSensor {
         })
     }
 }
+/// The gap in Rust RPC coverage: files that name a generated gRPC client type
+/// but yielded no identified call. A wrapper this sensor cannot follow can hide
+/// an RPC exactly there, so a gap must not read as clean coverage. This used to
+/// be one record counting every Rust file in the repo (774 for OpenShell), which
+/// inflated every blind-spot figure for a Rust repository.
+fn unproven_rust_rpc_files(
+    root: &Path,
+) -> Result<Vec<crate::federation::contracts::coverage::UnresolvedRecord>, LainError> {
+    use std::sync::OnceLock;
+    static CLIENT_TYPE: OnceLock<regex::Regex> = OnceLock::new();
+    let client_type = CLIENT_TYPE.get_or_init(|| {
+        regex::Regex::new(r"\b[a-zA-Z_][a-zA-Z_0-9]*_client::[A-Z][A-Za-z_0-9]*Client\b")
+            .expect("generated client type regex")
+    });
+    let with_candidates: BTreeSet<String> = discover_rust_grpc_candidates(root)?
+        .into_iter()
+        .map(|c| c.site.path)
+        .collect();
+    let gaps: Vec<String> = crate::server::sensors::util::scan_files(root, |p| {
+        (p.extension()?.to_str()? == "rs").then(|| "rs".to_string())
+    })
+    .filter(|(_, content, _)| client_type.is_match(content))
+    .map(|(path, _, _)| graph_path(root, &path))
+    .filter(|path| !with_candidates.contains(path))
+    .collect();
+    Ok(if gaps.is_empty() {
+        vec![]
+    } else {
+        vec![crate::federation::contracts::coverage::UnresolvedRecord {
+            locations: None,
+            reason: crate::federation::contracts::model::UnresolvedReason::RpcStubUnknown,
+            count: gaps.len(),
+            sample_ids: gaps.iter().take(5).cloned().collect(),
+        }]
+    })
+}
+
 inventory::submit!(SensorEntry(&GrpcConsumerSensor));
 
 /// Walk `root`, find every recognised stub call, resolve the
@@ -1057,5 +1078,46 @@ x := helper.foo(1)
         let calls = detect_stub_calls(src, "go", "p/x.go");
         assert_eq!(calls.len(), 2, "{calls:?}");
         assert_eq!(calls[0].method, "Get");
+    }
+
+    fn rust_repo(files: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        git2::Repository::init(dir.path()).unwrap();
+        for (path, body) in files {
+            let full = dir.path().join(path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(full, body).unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn rust_repo_without_generated_clients_reports_no_rpc_gap() {
+        let dir = rust_repo(&[
+            ("src/a.rs", "fn a() { let x = 1; }"),
+            ("src/b.rs", "fn b() { println!(\"hi\"); }"),
+        ]);
+        assert!(unproven_rust_rpc_files(dir.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn rust_files_with_identified_calls_are_not_a_gap() {
+        let dir = rust_repo(&[(
+            "src/c.rs",
+            "fn call(c: api::orders_client::OrdersClient<Channel>) { c.get_order(req); }",
+        )]);
+        assert!(unproven_rust_rpc_files(dir.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn rust_file_naming_a_client_type_without_an_identified_call_is_a_gap() {
+        let dir = rust_repo(&[
+            ("src/d.rs", "use api::orders_client::OrdersClient;\nfn unused() {}"),
+            ("src/e.rs", "fn other() {}"),
+        ]);
+        let gaps = unproven_rust_rpc_files(dir.path()).unwrap();
+        assert_eq!(gaps.len(), 1, "{gaps:?}");
+        assert_eq!(gaps[0].count, 1, "only the file naming a client type counts");
+        assert_eq!(gaps[0].sample_ids, vec!["src/d.rs".to_string()]);
     }
 }

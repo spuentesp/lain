@@ -182,19 +182,25 @@ pub fn scan_workspace_django_orm_with_report(
 
     let mut locations = crate::federation::contracts::coverage::LocationCounts::default();
     let mut sample_ids: Vec<String> = Vec::new();
-    for u in &analysis.unresolved {
+    // A dynamic query in a test or fixture is not a production blind spot.
+    let mut count = 0usize;
+    for u in analysis.unresolved.iter().filter(|u| {
+        crate::federation::contracts::service_refs::classify_usage(&u.path)
+            != crate::federation::contracts::service_refs::Usage::Test
+    }) {
+        count += 1;
         locations.add(&u.path, 1);
         if sample_ids.len() < 5 {
             sample_ids.push(format!("{}:{}", u.path, u.line));
         }
     }
-    let unresolved = if analysis.unresolved.is_empty() {
+    let unresolved = if count == 0 {
         Vec::new()
     } else {
         vec![UnresolvedRecord {
             locations: Some(locations),
             reason: UnresolvedReason::OrmDynamicQuery,
-            count: analysis.unresolved.len(),
+            count,
             sample_ids,
         }]
     };

@@ -176,7 +176,12 @@ pub fn scan_workspace_sql_with_report(
             build_graph(graph, &sites, &graph_path_str, namespace);
         all_nodes.extend(nodes);
         all_edges.extend(edges);
-        for rec in file_unresolved {
+        // Dynamic SQL in a test or fixture is not a production blind spot. Its
+        // table edges stay in the graph; only the ledger count leaves out the
+        // file (NeMo Agent Toolkit's ORM total was entirely test code).
+        let test_file = crate::federation::contracts::service_refs::classify_usage(&graph_path_str)
+            == crate::federation::contracts::service_refs::Usage::Test;
+        for rec in file_unresolved.into_iter().filter(|_| !test_file) {
             if rec.reason == UnresolvedReason::OrmDynamicQuery {
                 locations.add(&graph_path_str, rec.count);
             }
@@ -1120,6 +1125,31 @@ mod tests {
         assert_eq!(locations.files.len(), 40);
         assert!(locations.files.values().all(|n| *n == 125));
         assert_eq!(locations.directories["src"], 5000);
+    }
+
+    #[test]
+    fn dynamic_orm_queries_in_test_files_do_not_count_as_blind_spots() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("tests")).unwrap();
+        std::fs::write(tmp.path().join("src/repo.py"), "session.query(Order).all()\n").unwrap();
+        std::fs::write(
+            tmp.path().join("tests/test_repo.py"),
+            "session.query(Order).all()\nsession.query(User).all()\n",
+        )
+        .unwrap();
+        let graph = GraphDatabase::new(&tmp.path().join("graph.bin")).unwrap();
+        let report =
+            scan_workspace_sql_with_report(&graph, tmp.path(), &RepoNamespace::for_test()).unwrap();
+        let orm = report
+            .unresolved
+            .iter()
+            .find(|r| r.reason == UnresolvedReason::OrmDynamicQuery)
+            .unwrap();
+        assert_eq!(orm.count, 1, "only src/repo.py is production code");
+        let locations = orm.locations.as_ref().unwrap();
+        assert_eq!(locations.files.len(), 1);
+        assert!(locations.files.contains_key("src/repo.py"));
     }
 
     #[test]
