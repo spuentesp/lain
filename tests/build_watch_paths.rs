@@ -30,11 +30,20 @@ fn build_script_output() -> String {
     let out = std::path::Path::new(env!("OUT_DIR"));
     let script_dir = out.parent().expect("OUT_DIR has a parent");
     let mut tried = Vec::new();
-    for dir in [Some(script_dir), script_dir.parent()]
-        .into_iter()
-        .flatten()
-    {
-        let candidate = dir.join("output");
+    // Old layout: `build/<pkg>-<hash>/output`. Newer cargo (the per-package
+    // build directory) keeps it under the script's `run` directory, and the
+    // newest names that directory's file `output` too.
+    let candidates = [
+        script_dir.join("output"),
+        script_dir.join("run").join("output"),
+        script_dir.join("run"),
+        script_dir.join("run").join("stdout"),
+    ];
+    for candidate in candidates {
+        if !candidate.is_file() {
+            tried.push(format!("{} (not a file)", candidate.display()));
+            continue;
+        }
         match std::fs::read_to_string(&candidate) {
             Ok(text) if text.contains("cargo:rerun-if-changed=") => return text,
             Ok(_) => tried.push(format!(
@@ -42,6 +51,22 @@ fn build_script_output() -> String {
                 candidate.display()
             )),
             Err(error) => tried.push(format!("{} ({error})", candidate.display())),
+        }
+    }
+    // Any other layout: the script's recorded stdout is whichever file in its
+    // directory (or its `run` directory) carries the rerun-if-changed lines.
+    for dir in [script_dir.to_path_buf(), script_dir.join("run")] {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        let mut files: Vec<_> = entries.flatten().map(|e| e.path()).collect();
+        files.sort();
+        for file in files.into_iter().filter(|f| f.is_file()) {
+            if let Ok(text) = std::fs::read_to_string(&file) {
+                if text.contains("cargo:rerun-if-changed=") {
+                    return text;
+                }
+            }
         }
     }
     let listing = |dir: &std::path::Path| {
@@ -57,9 +82,9 @@ fn build_script_output() -> String {
             .unwrap_or_else(|error| format!("unreadable: {error}"))
     };
     panic!(
-        "build script output not found.\nOUT_DIR = {}\ntried: {tried:#?}\nscript dir holds: {}\nparent holds: {}",
+        "build script output not found.\nOUT_DIR = {}\ntried: {tried:#?}\nscript dir holds: {}\nrun holds: {}",
         out.display(),
         listing(script_dir),
-        script_dir.parent().map(listing).unwrap_or_default(),
+        listing(&script_dir.join("run")),
     );
 }
