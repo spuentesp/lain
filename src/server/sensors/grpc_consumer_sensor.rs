@@ -1112,12 +1112,18 @@ x := helper.foo(1)
     #[test]
     fn rust_file_naming_a_client_type_without_an_identified_call_is_a_gap() {
         let dir = rust_repo(&[
-            ("src/d.rs", "use api::orders_client::OrdersClient;\nfn unused() {}"),
+            (
+                "src/d.rs",
+                "use api::orders_client::OrdersClient;\nfn unused() {}",
+            ),
             ("src/e.rs", "fn other() {}"),
         ]);
         let gaps = unproven_rust_rpc_files(dir.path()).unwrap();
         assert_eq!(gaps.len(), 1, "{gaps:?}");
-        assert_eq!(gaps[0].count, 1, "only the file naming a client type counts");
+        assert_eq!(
+            gaps[0].count, 1,
+            "only the file naming a client type counts"
+        );
         assert_eq!(gaps[0].sample_ids, vec!["src/d.rs".to_string()]);
     }
 }

@@ -949,7 +949,9 @@ impl FederatedIndex {
         if !(message.contains("node") && message.contains("not found")) {
             return false;
         }
-        tracing::debug!("[federation] projection of {id} raced a re-index ({message}); will project again");
+        tracing::debug!(
+            "[federation] projection of {id} raced a re-index ({message}); will project again"
+        );
         if let Some(repo) = self.get_repo(id) {
             repo.mark_projection_stale();
         }

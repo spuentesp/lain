@@ -1132,7 +1132,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join("src")).unwrap();
         std::fs::create_dir_all(tmp.path().join("tests")).unwrap();
-        std::fs::write(tmp.path().join("src/repo.py"), "session.query(Order).all()\n").unwrap();
+        std::fs::write(
+            tmp.path().join("src/repo.py"),
+            "session.query(Order).all()\n",
+        )
+        .unwrap();
         std::fs::write(
             tmp.path().join("tests/test_repo.py"),
             "session.query(Order).all()\nsession.query(User).all()\n",

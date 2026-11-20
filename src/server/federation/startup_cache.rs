@@ -89,7 +89,9 @@ pub(crate) fn inputs(
         let Some(source) = source_key(repo.local_path(), repo.git())? else {
             return Ok(None);
         };
-        let (commit, _) = retry_while_busy(SOURCE_KEY_GIT_WAIT, || repo.git().try_get_latest_commit_info())?;
+        let (commit, _) = retry_while_busy(SOURCE_KEY_GIT_WAIT, || {
+            repo.git().try_get_latest_commit_info()
+        })?;
         hash.update(id.as_str().as_bytes());
         hash.update(commit.as_bytes());
         hash.update(
@@ -319,12 +321,13 @@ pub(crate) fn analysis_environment(
         std::env::var("LAIN_DISABLE_LSP").ok().as_deref(),
     ) || std::env::var("LAIN_TEST_NO_LSP").is_ok_and(|v| !v.is_empty());
     if !disabled {
-        let binaries: std::collections::BTreeSet<_> = retry_while_busy(SOURCE_KEY_GIT_WAIT, || git.try_get_all_tracked_files())?
-            .iter()
-            .filter_map(|p| p.extension().and_then(|e| e.to_str()))
-            .filter_map(crate::server::lsp::language_server_for)
-            .map(|server| server.binary)
-            .collect();
+        let binaries: std::collections::BTreeSet<_> =
+            retry_while_busy(SOURCE_KEY_GIT_WAIT, || git.try_get_all_tracked_files())?
+                .iter()
+                .filter_map(|p| p.extension().and_then(|e| e.to_str()))
+                .filter_map(crate::server::lsp::language_server_for)
+                .map(|server| server.binary)
+                .collect();
         for binary in binaries {
             hash.update(binary.as_bytes());
             if let Ok(path) = which::which(binary) {

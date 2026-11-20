@@ -573,8 +573,9 @@ impl RepoIndex {
             .index_timeout_override
             .load(std::sync::atomic::Ordering::Relaxed)
         {
-            0 => explicit_env_timeout()
-                .unwrap_or_else(|| scaled_index_timeout(count_repo_files(self.source.local_path()))),
+            0 => explicit_env_timeout().unwrap_or_else(|| {
+                scaled_index_timeout(count_repo_files(self.source.local_path()))
+            }),
             secs => Duration::from_secs(secs),
         }
     }

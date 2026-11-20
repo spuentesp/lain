@@ -27,20 +27,93 @@ use std::sync::OnceLock;
 
 /// Client type bases that are not gRPC services.
 const NOT_GRPC_CLIENTS: &[&str] = &[
-    "Http", "Https", "Axios", "Fetch", "Query", "Apollo", "Redis", "Mongo", "S3", "Supabase",
-    "Prisma", "Pg", "Mysql", "Sql", "Kafka", "Web", "Rest", "Graphql", "GraphQL", "Api", "Ws",
-    "WebSocket", "Socket", "Stripe", "Github", "Octokit", "Slack", "Discord", "Telegram",
-    "Docker", "Ssh", "Sftp", "Ftp", "Smtp", "Mqtt", "Nats", "Amqp", "Memcached", "Elastic",
-    "Openai", "OpenAI", "Anthropic", "Mcp", "MCP", "Oauth", "OAuth", "Jwt", "Trpc", "Rpc",
+    "Http",
+    "Https",
+    "Axios",
+    "Fetch",
+    "Query",
+    "Apollo",
+    "Redis",
+    "Mongo",
+    "S3",
+    "Supabase",
+    "Prisma",
+    "Pg",
+    "Mysql",
+    "Sql",
+    "Kafka",
+    "Web",
+    "Rest",
+    "Graphql",
+    "GraphQL",
+    "Api",
+    "Ws",
+    "WebSocket",
+    "Socket",
+    "Stripe",
+    "Github",
+    "Octokit",
+    "Slack",
+    "Discord",
+    "Telegram",
+    "Docker",
+    "Ssh",
+    "Sftp",
+    "Ftp",
+    "Smtp",
+    "Mqtt",
+    "Nats",
+    "Amqp",
+    "Memcached",
+    "Elastic",
+    "Openai",
+    "OpenAI",
+    "Anthropic",
+    "Mcp",
+    "MCP",
+    "Oauth",
+    "OAuth",
+    "Jwt",
+    "Trpc",
+    "Rpc",
 ];
 
 /// Methods that are channel/lifecycle plumbing, not RPCs.
 const NOT_RPC_METHODS: &[&str] = &[
-    "close", "waitForReady", "getChannel", "makeUnaryRequest", "makeServerStreamRequest",
-    "makeClientStreamRequest", "makeBidiStreamRequest", "on", "once", "off", "emit", "then",
-    "catch", "finally", "toString", "constructor", "connect", "disconnect", "end", "destroy",
-    "dispose", "cancel", "clone", "bind", "call", "apply", "unref", "ref", "setMaxListeners",
-    "addListener", "removeListener", "removeAllListeners", "listeners", "valueOf",
+    "close",
+    "waitForReady",
+    "getChannel",
+    "makeUnaryRequest",
+    "makeServerStreamRequest",
+    "makeClientStreamRequest",
+    "makeBidiStreamRequest",
+    "on",
+    "once",
+    "off",
+    "emit",
+    "then",
+    "catch",
+    "finally",
+    "toString",
+    "constructor",
+    "connect",
+    "disconnect",
+    "end",
+    "destroy",
+    "dispose",
+    "cancel",
+    "clone",
+    "bind",
+    "call",
+    "apply",
+    "unref",
+    "ref",
+    "setMaxListeners",
+    "addListener",
+    "removeListener",
+    "removeAllListeners",
+    "listeners",
+    "valueOf",
 ];
 
 fn re(cell: &'static OnceLock<Regex>, pattern: &str) -> &'static Regex {
@@ -139,7 +212,12 @@ impl<'a> GrpcImports<'a> {
             .map(|c| c[1].to_string())
             .filter(|spec| keyword.is_match(spec))
             .collect();
-        Self { content, named, namespaces, specifiers }
+        Self {
+            content,
+            named,
+            namespaces,
+            specifiers,
+        }
     }
 
     /// `client_type` (`OrdersClient`) of service `service` (`Orders`) is a
@@ -157,7 +235,11 @@ impl<'a> GrpcImports<'a> {
             return true;
         }
         let service = normalize(service);
-        !service.is_empty() && self.specifiers.iter().any(|s| normalize(s).contains(&service))
+        !service.is_empty()
+            && self
+                .specifiers
+                .iter()
+                .any(|s| normalize(s).contains(&service))
     }
 }
 
@@ -224,8 +306,11 @@ fn host_of(literal: &str) -> Option<String> {
         host.split(':').next().unwrap_or(host)
     };
     let host = host.trim();
-    (!host.is_empty() && host.chars().all(|c| c.is_alphanumeric() || "._-[]:".contains(c)))
-        .then(|| host.to_string())
+    (!host.is_empty()
+        && host
+            .chars()
+            .all(|c| c.is_alphanumeric() || "._-[]:".contains(c)))
+    .then(|| host.to_string())
 }
 
 /// The dial address of the file: a literal first argument of a client
@@ -253,7 +338,11 @@ fn channel_of(content: &str) -> Option<ChannelTarget> {
     }
     let vars: BTreeSet<String> = env
         .captures_iter(content)
-        .filter_map(|c| c.get(1).or_else(|| c.get(2)).map(|m| m.as_str().to_string()))
+        .filter_map(|c| {
+            c.get(1)
+                .or_else(|| c.get(2))
+                .map(|m| m.as_str().to_string())
+        })
         .collect();
     (!vars.is_empty()).then(|| ChannelTarget::Env(vars.into_iter().collect()))
 }
@@ -339,7 +428,10 @@ mod tests {
         let src = "import * as grpc from '@grpc/grpc-js';\nimport { OrdersClient } from './gen/orders_grpc_pb';\nconst orders = new OrdersClient('orders:50051', grpc.credentials.createInsecure());\norders.getOrder(req, cb);\n";
         let c = calls(src);
         assert_eq!(c.len(), 1, "{c:?}");
-        assert_eq!((c[0].service.as_str(), c[0].method.as_str()), ("Orders", "GetOrder"));
+        assert_eq!(
+            (c[0].service.as_str(), c[0].method.as_str()),
+            ("Orders", "GetOrder")
+        );
         assert_eq!(c[0].channel_target.as_deref(), Some("orders"));
     }
 
@@ -348,7 +440,10 @@ mod tests {
         let src = "import { createPromiseClient } from '@connectrpc/connect';\nimport { OrdersService } from './gen/orders_connect';\nclass A { private readonly orders = createPromiseClient(OrdersService, transport);\n async f() { await this.orders.listOrders({}); } }\n";
         let c = calls(src);
         assert_eq!(c.len(), 1, "{c:?}");
-        assert_eq!((c[0].service.as_str(), c[0].method.as_str()), ("Orders", "ListOrders"));
+        assert_eq!(
+            (c[0].service.as_str(), c[0].method.as_str()),
+            ("Orders", "ListOrders")
+        );
     }
 
     #[test]
@@ -356,7 +451,10 @@ mod tests {
         let src = "import type { BillingClient } from './gen/billing_grpc_pb';\nasync function f(client: BillingClient) { await client.charge(req); client.close(); }\n";
         let c = calls(src);
         assert_eq!(c.len(), 1, "{c:?}");
-        assert_eq!((c[0].service.as_str(), c[0].method.as_str()), ("Billing", "Charge"));
+        assert_eq!(
+            (c[0].service.as_str(), c[0].method.as_str()),
+            ("Billing", "Charge")
+        );
     }
 
     #[test]
@@ -382,7 +480,11 @@ mod tests {
         let src = "import * as grpc from '@grpc/grpc-js';\nimport { OrdersClient } from './gen/orders_grpc_pb';\nconst orders = new OrdersClient(process.env.ORDERS_ADDR!, c);\norders.getOrder(req);\n";
         let c = calls(src);
         assert_eq!(c.len(), 1, "{c:?}");
-        assert!(matches!(&c[0].channel_host_part, crate::federation::contracts::model::HostPart::Env(v) if v == &["ORDERS_ADDR".to_string()]), "{:?}", c[0].channel_host_part);
+        assert!(
+            matches!(&c[0].channel_host_part, crate::federation::contracts::model::HostPart::Env(v) if v == &["ORDERS_ADDR".to_string()]),
+            "{:?}",
+            c[0].channel_host_part
+        );
     }
 
     #[test]
@@ -406,6 +508,9 @@ mod tests {
         let src = "import { type OpenShellReadClient } from '@nvidia/openshell-sdk';\nasync function f(client: OpenShellReadClient) { await client.raw.getProviderProfile(req, opts); }\n";
         let c = calls(src);
         assert_eq!(c.len(), 1, "{c:?}");
-        assert_eq!((c[0].service.as_str(), c[0].method.as_str()), ("OpenShell", "GetProviderProfile"));
+        assert_eq!(
+            (c[0].service.as_str(), c[0].method.as_str()),
+            ("OpenShell", "GetProviderProfile")
+        );
     }
 }

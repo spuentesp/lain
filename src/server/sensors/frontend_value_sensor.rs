@@ -533,7 +533,11 @@ mod noise_tests {
         ] {
             assert!(is_test_path(p), "{p} should count as test code");
         }
-        for p in ["src/Orders.tsx", "src/components/Cart.tsx", "pages/index.tsx"] {
+        for p in [
+            "src/Orders.tsx",
+            "src/components/Cart.tsx",
+            "pages/index.tsx",
+        ] {
             assert!(!is_test_path(p), "{p} is production code");
         }
     }

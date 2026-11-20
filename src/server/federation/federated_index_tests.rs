@@ -1408,7 +1408,10 @@ async fn projection_racing_a_reindex_is_deferred_not_failed() {
     // An edge naming a node the projection does not hold: queue another pass.
     let race = LainError::NotFound("Source node repo-a:Schema:p.proto:Draft:3 not found".into());
     assert!(fed.defer_projection_race(&id, &race));
-    assert!(repo.take_projection_stale(), "the repo must be queued again");
+    assert!(
+        repo.take_projection_stale(),
+        "the repo must be queued again"
+    );
 
     // Real failures are not swallowed and do not queue a retry.
     let other = LainError::NotFound("repo missing".into());

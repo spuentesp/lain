@@ -1288,7 +1288,9 @@ impl<'a> Context<'a> {
                 // the receiver's identity is lost. A type's own `clone` method
                 // (counted above) still takes precedence.
                 if accessors.is_empty() && methods.is_empty() && method == "clone" {
-                    evidence.push(self.evidence(expr, "Clone::clone preserves the receiver type".to_string()));
+                    evidence.push(
+                        self.evidence(expr, "Clone::clone preserves the receiver type".to_string()),
+                    );
                     return Some((owner, evidence));
                 }
                 if accessors.len() + methods.len() != 1 {
@@ -1465,7 +1467,11 @@ mod followup_review {
 
     fn candidate_types(src: &str) -> Vec<(String, String)> {
         let mut config = RustGrpcConfig::from_sources(None, None).unwrap();
-        follow_rust_grpc_wrappers(&mut config, &[("crates/c/src/grpc_client.rs".into(), src.into())]).unwrap();
+        follow_rust_grpc_wrappers(
+            &mut config,
+            &[("crates/c/src/grpc_client.rs".into(), src.into())],
+        )
+        .unwrap();
         let out = detect_rust_grpc_candidates(src, "crates/c/src/grpc_client.rs", &config)
             .unwrap()
             .into_iter()
@@ -1508,7 +1514,13 @@ mod followup_review {
     #[test]
     fn cfg_attribute_on_a_pattern_field_does_not_void_the_file() {
         let src = "use crate::proto::open_shell_client::OpenShellClient; struct T { a: u8, b: u8 } pub struct W { client: OpenShellClient<Chan> } impl W { pub async fn draft(&self, t: T) { let T { #[cfg(feature = \"jwt\")] a, b } = t; let r = self.client.clone().get_draft_policy(req).await; } }";
-        assert!(parse_for_lang(Lang::Rust, src).unwrap().root_node().has_error(), "fixture must trip the grammar");
+        assert!(
+            parse_for_lang(Lang::Rust, src)
+                .unwrap()
+                .root_node()
+                .has_error(),
+            "fixture must trip the grammar"
+        );
         let types = candidate_types(src);
         assert_eq!(types.len(), 1, "{types:?}");
         assert_eq!(types[0].0, "get_draft_policy");
@@ -1539,7 +1551,11 @@ mod followup_review {
         let out = detect_rust_grpc_candidates(CALLER_SRC, CALLER_FILE, &config).unwrap();
         if let Some(prepared) = config.prepared.as_ref() {
             let mut cache = repository_cache().lock();
-            let keys: Vec<_> = cache.iter().filter(|(_, v)| Arc::ptr_eq(v, prepared)).map(|(k, _)| *k).collect();
+            let keys: Vec<_> = cache
+                .iter()
+                .filter(|(_, v)| Arc::ptr_eq(v, prepared))
+                .map(|(k, _)| *k)
+                .collect();
             for key in keys {
                 cache.pop(&key);
             }
@@ -1550,11 +1566,18 @@ mod followup_review {
     #[test]
     fn wrapper_with_a_self_helper_call_still_maps_to_its_rpc() {
         let calls = two_file_candidates();
-        let poll = calls.iter().find(|c| c.site.line == 1 && c.receiver == "client" && c.method != "workspace");
+        let poll = calls
+            .iter()
+            .find(|c| c.site.line == 1 && c.receiver == "client" && c.method != "workspace");
         let poll = poll.unwrap_or_else(|| panic!("poll_settings not mapped: {calls:?}"));
         assert_eq!(poll.method, "get_sandbox_config");
         assert_eq!(poll.provenance, RustGrpcProvenance::FollowedWrapper);
-        assert!(poll.generated_type.ends_with("open_shell_client::OpenShellClient"), "{}", poll.generated_type);
+        assert!(
+            poll.generated_type
+                .ends_with("open_shell_client::OpenShellClient"),
+            "{}",
+            poll.generated_type
+        );
     }
 
     #[test]
