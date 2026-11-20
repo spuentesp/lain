@@ -5,6 +5,12 @@ All notable changes to LAIN are documented here. Versions follow
 
 ## Unreleased
 
+- **The startup checkpoint is no longer skipped when the git sensor is briefly busy.**
+  Publishing `startup-complete.json` used fail-fast git calls and gave up with
+  `GitSensor mutex held by another thread` whenever anchor mining or a sibling
+  index held the sensor, so a restart sometimes found no checkpoint (and the
+  `federation_startup_cache` test failed on a quiet machine). The three calls
+  now retry for up to five seconds; any other error still fails at once.
 - **Startup no longer warns about, or degrades a repo for, a projection that raced a re-index.**
   A `Not found: Source/Target node ... not found` while projecting edges means
   the graph changed between projecting nodes and edges. It was logged at `WARN`
