@@ -3,7 +3,7 @@
 All notable changes to LAIN are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## [0.16.0] - 2026-11-20
 
 - **The startup checkpoint is no longer skipped when the git sensor is briefly busy.**
   Publishing `startup-complete.json` used fail-fast git calls and gave up with
