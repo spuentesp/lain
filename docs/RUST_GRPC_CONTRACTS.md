@@ -25,6 +25,26 @@ normalized RPC method match a unique provider key in the federated catalog.
 Method spelling or a `Client` suffix alone is insufficient. Multiple matching
 service/package identities and normalization collisions remain unresolved.
 
+## Automatic wrapper following
+
+Repository-local wrapper methods are followed when their bodies directly call
+one generated client RPC identity. Tree-sitter receiver inference follows
+explicit types, imports, aliases, fields and the existing accessor rules. The
+wrapper name may differ from the RPC name. Bodies calling two different RPCs
+remain unresolved; methods in `deny_methods` are excluded at both ends.
+
+Callers with a known wrapper receiver retain confidence 1.0. When the receiver
+cannot be inferred, a method defined uniquely within the repository may match
+with confidence 0.6. A known different receiver never uses that fallback.
+Bindings carry the existing heuristic provenance with detector
+`wrapper_followed`; source evidence includes the wrapper definition. Explicit
+`wrappers` configuration mappings take priority over inferred delegation.
+
+The delegation table is transient and rebuilt from repository source during
+indexing and joining, including the pinned blobs for snapshots. Reindex existing
+repositories to discover newly supported call sites. This follows direct
+wrapper delegation; it does not establish complete Rust RPC coverage.
+
 ## Unresolved calls
 
 `list_unresolved` reports an identified RPC with `rpc.status: resolved`, its

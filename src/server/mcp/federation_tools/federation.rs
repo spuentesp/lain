@@ -260,6 +260,14 @@ fn select_fair(hits: Vec<SymbolMatch>, q: &str, limit: usize) -> Vec<SymbolMatch
 
 const BLAST_RADIUS_CAP: usize = 1000;
 
+fn ambiguous_blast_target(symbol: &str, candidates: &[crate::schema::GraphNode]) -> LainError {
+    LainError::Config(serde_json::json!({
+        "error": "ambiguous_target", "symbol": symbol,
+        "message": "Select a node id from find_symbol, or a unique path.",
+        "candidates": candidates.iter().map(|n| serde_json::json!({"id": n.id, "path": n.path, "name": n.name})).collect::<Vec<_>>()
+    }).to_string())
+}
+
 /// Resolve `symbol` to a single repo via `FederatedIndex::resolve_symbol`,
 /// then compute its blast radius. `AmbiguousSymbol` and `NotFound` from the
 /// resolver propagate unchanged so callers can prompt the user to disambiguate.
@@ -273,7 +281,48 @@ pub fn get_cross_repo_blast_radius(
     // advises; honour it here instead of re-running symbol resolution.
     let repo_id = match repo_id {
         Some(rid) => rid.to_string(),
-        None => fed.resolve_symbol(symbol)?.as_str().to_string(),
+        None => {
+            let mut matches = Vec::new();
+            fed.backend().visit_nodes(&mut |node| {
+                if node.id == symbol || node.path == symbol || node.name == symbol {
+                    matches.push(node.clone());
+                }
+            })?;
+            matches.sort_by(|a, b| a.path.cmp(&b.path).then_with(|| a.id.cmp(&b.id)));
+            if matches.iter().any(|n| n.id == symbol) {
+                matches.retain(|n| n.id == symbol);
+            } else if matches
+                .iter()
+                .any(|n| n.path == symbol && n.node_type == crate::schema::NodeType::File)
+            {
+                matches
+                    .retain(|n| n.path == symbol && n.node_type == crate::schema::NodeType::File);
+            }
+            if matches.len() > 1 {
+                return Err(ambiguous_blast_target(symbol, &matches));
+            }
+            match matches.first() {
+                Some(node) => GlobalId::parse(&node.id)?.repo_id().to_string(),
+                None => {
+                    let owners: Vec<_> = fed
+                        .list_repos()
+                        .into_iter()
+                        .filter_map(|(id, _)| {
+                            fed.get_repo(&id)
+                                .is_some_and(|repo| {
+                                    repo.db().get_node(symbol).ok().flatten().is_some()
+                                })
+                                .then_some(id)
+                        })
+                        .collect();
+                    match owners.as_slice() {
+                        [id] => id.as_str().to_string(),
+                        [] => fed.resolve_symbol(symbol)?.as_str().to_string(),
+                        _ => return Err(LainError::AmbiguousSymbol(owners)),
+                    }
+                }
+            }
+        }
     };
     get_cross_repo_blast_radius_for_repo(fed, repo_id.as_str(), symbol, depth)
 }
@@ -296,6 +345,14 @@ pub fn get_cross_repo_blast_radius_for_repo(
     depth: Range<u32>,
 ) -> Result<CrossRepoBlastRadius, LainError> {
     let rid = RepoId::new(repo_id)?;
+    let local_id = fed.get_repo(&rid).and_then(|repo| {
+        repo.db().get_node(symbol).ok().flatten().map(|n| {
+            GlobalId::new(&rid, n.node_type.clone(), &n.path, &n.name, n.line_start)
+                .as_str()
+                .to_string()
+        })
+    });
+    let symbol = local_id.as_deref().unwrap_or(symbol);
     let (qualifier, name) = symbol
         .rsplit_once("::")
         .map_or((None, symbol), |(qualifier, name)| (Some(qualifier), name));
@@ -303,19 +360,31 @@ pub fn get_cross_repo_blast_radius_for_repo(
     // global id. `backend.find_nodes_by_name` covers both repos added
     // through `add_repo` / `project_repo` and nodes inserted directly
     // into the backend (same fallback pattern `resolve_symbol` uses).
-    let mut candidates = fed
-        .backend()
-        .find_nodes_by_name(name)?
-        .into_iter()
-        .filter(|n| match GlobalId::parse(&n.id) {
-            Ok(g) => {
+    // Borrow nonmatches: cloning the complete graph would copy embeddings
+    // into temporary memory for every symbol lookup.
+    let mut candidates = Vec::new();
+    fed.backend().visit_nodes(&mut |node| {
+        if (node.id == symbol || node.path == symbol || node.name == name)
+            && GlobalId::parse(&node.id).is_ok_and(|g| {
                 g.repo_id() == rid.as_str()
-                    && qualifier.is_none_or(|q| n.container.as_deref() == Some(q))
-            }
-            Err(_) => false,
-        })
-        .collect::<Vec<_>>();
+                    && qualifier.is_none_or(|q| node.container.as_deref() == Some(q))
+            })
+        {
+            candidates.push(node.clone());
+        }
+    })?;
+    if candidates.iter().any(|n| n.id == symbol) {
+        candidates.retain(|n| n.id == symbol);
+    } else if candidates
+        .iter()
+        .any(|n| n.path == symbol && n.node_type == crate::schema::NodeType::File)
+    {
+        candidates.retain(|n| n.path == symbol && n.node_type == crate::schema::NodeType::File);
+    }
     candidates.sort_by(|a, b| a.path.cmp(&b.path).then_with(|| a.id.cmp(&b.id)));
+    if candidates.len() > 1 {
+        return Err(ambiguous_blast_target(symbol, &candidates));
+    }
     let seed = candidates.first().ok_or_else(|| {
         LainError::NotFound(format!("symbol {symbol} not found in repo {repo_id}"))
     })?;
@@ -665,6 +734,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cross_repo_blast_radius_does_not_prefer_file_names_over_symbols() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        for (repo, kind, path) in [
+            ("repo-a", crate::schema::NodeType::File, "src/shared"),
+            ("repo-b", crate::schema::NodeType::Function, "src/client.rs"),
+        ] {
+            fed.backend()
+                .upsert_node_global(
+                    &format!("{repo}:{kind:?}:{path}:shared:0"),
+                    kind,
+                    path,
+                    "shared",
+                )
+                .unwrap();
+        }
+        let err = get_cross_repo_blast_radius(&fed, "shared", 1..3, None)
+            .expect_err("a file basename must not hide another symbol candidate");
+        assert!(err.to_string().contains("ambiguous_target"));
+        assert!(err.to_string().contains("src/client.rs"));
+        let result = get_cross_repo_blast_radius(&fed, "src/shared", 1..3, None).unwrap();
+        assert_eq!(result.total_count, 0);
+    }
+
+    #[tokio::test]
     async fn cross_repo_blast_radius_scopes_duplicate_names_within_a_repo() {
         let tmp = tempfile::tempdir().unwrap();
         let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
@@ -678,12 +772,14 @@ mod tests {
                 )
                 .unwrap();
         }
-        let result = get_cross_repo_blast_radius_for_repo(&fed, "repo-a", "shared", 1..3).unwrap();
-        assert_eq!(result.total_count, 0);
-        assert_eq!(
-            result.answer_scope.map(|s| s.wire_label()),
-            Some("ambiguous_target")
-        );
+        let err = get_cross_repo_blast_radius_for_repo(&fed, "repo-a", "shared", 1..3)
+            .expect_err("ambiguous names must not return traversal data");
+        assert!(err.to_string().contains("src/a.rs"));
+        assert!(err.to_string().contains("src/b.rs"));
+        for selector in ["src/a.rs", "repo-a:Function:src/a.rs:shared:0"] {
+            let result = get_cross_repo_blast_radius(&fed, selector, 1..3, None).unwrap();
+            assert_eq!(result.total_count, 0);
+        }
     }
 
     #[tokio::test]

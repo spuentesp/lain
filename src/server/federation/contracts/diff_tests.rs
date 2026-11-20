@@ -2709,6 +2709,7 @@ fn build_coverage_aggregates_external_schema_refs() {
     let repo_a = crate::federation::contracts::diff::RepoCoverage {
         repo: "a".into(),
         unresolved: vec![UnresolvedRecord {
+            locations: None,
             reason: crate::federation::contracts::model::UnresolvedReason::ExternalSchemaRef,
             count: 1,
             sample_ids: vec!["shared.yaml#/components/schemas/Order".into()],
@@ -2718,6 +2719,7 @@ fn build_coverage_aggregates_external_schema_refs() {
     let repo_b = crate::federation::contracts::diff::RepoCoverage {
         repo: "b".into(),
         unresolved: vec![UnresolvedRecord {
+            locations: None,
             reason: crate::federation::contracts::model::UnresolvedReason::ExternalSchemaRef,
             count: 3,
             sample_ids: vec!["shared.yaml#/components/schemas/Order".into()],
@@ -4304,6 +4306,7 @@ fn no_known_impact_sound_for_arbitrary_repos_and_changes() {
                 SensorLedger {
                     unresolved: if !complete {
                         vec![UnresolvedRecord {
+                            locations: None,
                             reason: UnresolvedReason::NoMatch,
                             count: 1,
                             sample_ids: vec!["sample_call".into()],

@@ -270,6 +270,7 @@ pub async fn run_add_workspaces(server: &LainServer, args: &Value) -> Result<Val
                     path: path.clone(),
                 },
                 packages: Vec::new(),
+                index_timeout_secs: None,
             });
         additions.push((id, path.clone()));
     }

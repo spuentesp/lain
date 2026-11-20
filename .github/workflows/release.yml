@@ -111,7 +111,10 @@ jobs:
   build-linux:
     needs: version-check
     if: github.event_name == 'push'
-    runs-on: ubuntu-latest
+    # Pinned, not `ubuntu-latest`: the binary links the build host's glibc,
+    # so a moving base (glibc 2.43) produced a release that would not start
+    # on Ubuntu 22.04 or 24.04. 22.04 (glibc 2.35) runs on both.
+    runs-on: ubuntu-22.04
     permissions:
       contents: write
       id-token: write
@@ -151,6 +154,18 @@ jobs:
       - name: Verify built version before publishing
         shell: bash
         run: python scripts/check-release-version.py --tag "$GITHUB_REF_NAME" --binary target/x86_64-unknown-linux-gnu/release/lain
+      - name: Verify glibc floor (must run on Ubuntu 22.04, glibc 2.35)
+        shell: bash
+        run: |
+          for bin in lain lain-git-sidecar; do
+            max=$(objdump -T "target/x86_64-unknown-linux-gnu/release/$bin" \
+              | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -V | tail -1)
+            echo "$bin needs glibc >= $max"
+            if [ "$(printf '%s\n2.35\n' "$max" | sort -V | tail -1)" != "2.35" ]; then
+              echo "::error::$bin requires glibc $max; the floor is 2.35"
+              exit 1
+            fi
+          done
       - name: Package tarball
         run: |
           mkdir -p release

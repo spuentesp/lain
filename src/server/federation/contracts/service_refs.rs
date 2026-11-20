@@ -35,17 +35,7 @@ pub enum RefOutcome {
 }
 
 /// Where the literal lives, decided from the path alone.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Usage {
-    /// Shipped code.
-    Production,
-    /// Test, e2e, or mock code.
-    Test,
-    /// Deployment or environment configuration.
-    Configuration,
-    /// Prose: READMEs, docs, changelogs. A literal there is an example, not a call.
-    Documentation,
-}
+pub use crate::schema::ReferenceUsage as Usage;
 
 /// One URL literal found in a source file.
 #[derive(Debug, Clone, PartialEq, Eq)]

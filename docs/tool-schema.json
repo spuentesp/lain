@@ -802,7 +802,7 @@
     "name": "get_context_for_prompt"
   },
   {
-    "description": "Use this when asking 'what changes together?': hidden coupling between files from historical git co-change. `find_related` adds graph and semantic neighbours to the same question.",
+    "description": "Use this when asking 'what changes together?': hidden coupling between files from historical git co-change. `find_related` adds graph and semantic neighbours to the same question. Accepts a node UUID; use find_symbol to get one.",
     "inputSchema": {
       "properties": {
         "symbol": {
@@ -1116,6 +1116,31 @@
                 "Confirmed"
               ],
               "type": "object"
+            },
+            {
+              "properties": {
+                "Ref": {
+                  "properties": {
+                    "usage": {
+                      "enum": [
+                        "production",
+                        "test",
+                        "config",
+                        "doc"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "usage"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "Ref"
+              ],
+              "type": "object"
             }
           ]
         },
@@ -1133,16 +1158,38 @@
             "id": {
               "type": "string"
             },
+            "kind": {
+              "enum": [
+                "static",
+                "heuristic",
+                "runtime",
+                "confirmed",
+                "ref"
+              ],
+              "type": "string"
+            },
             "provenance": {
               "$ref": "#/definitions/edge_provenance"
             },
             "site": {
               "$ref": "#/definitions/source_site"
             },
+            "source": {
+              "type": "string"
+            },
             "to": {
               "type": "string"
             },
             "type": {
+              "type": "string"
+            },
+            "usage": {
+              "enum": [
+                "production",
+                "test",
+                "config",
+                "doc"
+              ],
               "type": "string"
             }
           },
@@ -1160,6 +1207,7 @@
               "type": "string"
             },
             "id": {
+              "description": "Repository-local symbol ID when repo_id scopes the query; binding neighbours retain global IDs.",
               "type": "string"
             },
             "label": {
@@ -1221,7 +1269,33 @@
           },
           "type": "array"
         },
+        "explain": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "edges": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "nodes": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "op": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "op",
+              "nodes",
+              "edges"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
         "groups": {
+          "description": "Groups contain only returned nodes after filters, limits, and pagination; counts describe retained members. Unlabeled nodes use the empty string key.",
           "items": {
             "properties": {
               "count": {
@@ -1737,7 +1811,7 @@
     "name": "search_org"
   },
   {
-    "description": "Use this when you want to know what breaks across repositories: resolve a symbol, traverse INCOMING Calls edges (its callers — \"if I change this, what breaks?\") in [min_depth, max_depth), and group visited nodes by repo. depth is a string range like \"1..3\", not a number. Returns {by_repo: {repo_id: [global_ids...]}, total_count, truncated}. Caps at 1000 nodes; truncated=true when the cap is hit. When the symbol matches several repos, pass repo_id to choose one.",
+    "description": "Use this when you want to know what breaks across repositories: resolve a symbol, traverse INCOMING Calls edges (its callers — \"if I change this, what breaks?\") in [min_depth, max_depth), and group visited nodes by repo. depth is a string range like \"1..3\", not a number. Returns {by_repo: {repo_id: [global_ids...]}, total_count, truncated}. Caps at 1000 nodes; truncated=true when the cap is hit. Accepts a node id from find_symbol or a unique repo-relative path as symbol. Ambiguous names return an error listing candidate ids and paths; use find_symbol to choose a precise node. When the symbol matches several repos, pass repo_id to choose one.",
     "inputSchema": {
       "properties": {
         "depth": {
@@ -1883,6 +1957,10 @@
                 "type": "array"
               },
               "repo": {
+                "type": "string"
+              },
+              "repo_path": {
+                "description": "Absolute on-disk checkout of the repo (live reads only).",
                 "type": "string"
               },
               "service": {
@@ -2115,7 +2193,8 @@
                 "static",
                 "heuristic",
                 "runtime",
-                "confirmed"
+                "confirmed",
+                "ref"
               ],
               "type": "string"
             },
@@ -2214,7 +2293,8 @@
               "enum": [
                 "no_route_in_service",
                 "no_match",
-                "dynamic_target"
+                "dynamic_target",
+                "not_a_call"
               ],
               "type": "string"
             },
@@ -2374,6 +2454,10 @@
           "type": "boolean"
         },
         "repo": {
+          "type": "string"
+        },
+        "repo_path": {
+          "description": "Absolute on-disk checkout of the repo (live reads only).",
           "type": "string"
         },
         "scope": {
@@ -2642,7 +2726,7 @@
           "type": "string"
         },
         "suggestions": {
-          "description": "Also return suggested routes for production references that match no route of their service. Suggestions are proposals with a score, never links. Needs an installed embedding model.",
+          "description": "Also return suggested routes for production references that match no route of their service. Suggestions are proposals with a score, never links. Needs an installed embedding model. Suggestions are computed independently of limit and cursor, across all references in the selected repo scope; cached until the contract index or references change.",
           "type": "boolean"
         },
         "usage": {
@@ -2675,6 +2759,54 @@
           "items": {
             "additionalProperties": false,
             "properties": {
+              "edge": {
+                "description": "A service reference relation for UI rendering, separate from executable call bindings; null when the service is not uniquely resolved.",
+                "properties": {
+                  "provenance": {
+                    "const": "ref"
+                  },
+                  "source": {
+                    "properties": {
+                      "line": {
+                        "type": "integer"
+                      },
+                      "path": {
+                        "type": "string"
+                      },
+                      "repo": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "repo",
+                      "path",
+                      "line"
+                    ],
+                    "type": "object"
+                  },
+                  "target_service": {
+                    "type": "string"
+                  },
+                  "usage": {
+                    "enum": [
+                      "production",
+                      "test",
+                      "configuration",
+                      "documentation"
+                    ]
+                  }
+                },
+                "required": [
+                  "source",
+                  "target_service",
+                  "provenance",
+                  "usage"
+                ],
+                "type": [
+                  "object",
+                  "null"
+                ]
+              },
               "host": {
                 "type": "string"
               },
@@ -2973,7 +3105,7 @@
       },
       "$schema": "http://json-schema.org/draft-07/schema#",
       "additionalProperties": false,
-      "description": "`data` field of the `list_contracts` envelope (§10.2). Endpoints sorted by `(service, key)`.",
+      "description": "`data` field of the `list_contracts` envelope (§10.2). Endpoints sorted by `(service, key)`. GraphQL SDL operations include request and response schemas; has_schema reports available field schemas.",
       "properties": {
         "cursor": {
           "type": "string"
@@ -3001,6 +3133,7 @@
                 "type": "object"
               },
               "has_schema": {
+                "description": "At least one request, response or payload schema contains fields, including GraphQL scalar results and SDL arguments.",
                 "type": "boolean"
               },
               "providers": {
@@ -3137,7 +3270,8 @@
                 "static",
                 "heuristic",
                 "runtime",
-                "confirmed"
+                "confirmed",
+                "ref"
               ],
               "type": "string"
             },
@@ -3180,7 +3314,7 @@
       },
       "$schema": "http://json-schema.org/draft-07/schema#",
       "additionalProperties": false,
-      "description": "`data` field of the `get_contract` envelope (§10.2). `items` is keyed per service.",
+      "description": "`data` field of the `get_contract` envelope (§10.2). `items` is keyed per service. GraphQL fields preserve SDL scalar/object type references, including list and non-null markers, for request arguments and response fields.",
       "properties": {
         "items": {
           "items": {
@@ -3301,6 +3435,7 @@
                             "type": "boolean"
                           },
                           "ty": {
+                            "description": "GraphQL fields use their SDL type reference, such as ID!, JSONString or [CheckoutError!]!. Other protocols use normalized type labels.",
                             "type": "string"
                           }
                         },
@@ -3366,6 +3501,7 @@
           "type": "string"
         },
         "service": {
+          "description": "Match the consumer service, target_service, or any candidate endpoint service.",
           "type": "string"
         },
         "snapshot": {
@@ -3440,6 +3576,16 @@
             "method": {
               "type": "string"
             },
+            "provenance": {
+              "description": "Typed candidate identity evidence; descriptions are display text only.",
+              "enum": [
+                "Generated",
+                "ConfiguredWrapper",
+                "FollowedWrapper",
+                "InferredWrapper"
+              ],
+              "type": "string"
+            },
             "receiver": {
               "type": "string"
             },
@@ -3454,7 +3600,8 @@
             "site",
             "evidence",
             "enclosing_name",
-            "enclosing_start_line"
+            "enclosing_start_line",
+            "provenance"
           ],
           "type": "object"
         },
@@ -3794,7 +3941,8 @@
                   "dynamic_sql",
                   "orm_dynamic_query",
                   "external_schema_ref",
-                  "dynamic_target"
+                  "dynamic_target",
+                  "not_a_call"
                 ],
                 "type": "string"
               },
@@ -3829,6 +3977,106 @@
         },
         "scope": {
           "$ref": "#/$defs/Scope"
+        },
+        "summary": {
+          "description": "Counts of ORM dynamic query sites across the complete filtered result, before pagination. Grouped by repo, directory, and file.",
+          "properties": {
+            "orm_dynamic_query": {
+              "properties": {
+                "directories": {
+                  "items": {
+                    "properties": {
+                      "count": {
+                        "minimum": 1,
+                        "type": "integer"
+                      },
+                      "directory": {
+                        "type": "string"
+                      },
+                      "repo": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "repo",
+                      "directory",
+                      "count"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "files": {
+                  "items": {
+                    "properties": {
+                      "count": {
+                        "minimum": 1,
+                        "type": "integer"
+                      },
+                      "path": {
+                        "type": "string"
+                      },
+                      "repo": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "repo",
+                      "path",
+                      "count"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "groups_are_samples": {
+                  "description": "False for exact sensor location counts (including explicit <other> overflow buckets); true only for legacy ledgers without location counts.",
+                  "type": "boolean"
+                },
+                "repos": {
+                  "items": {
+                    "properties": {
+                      "count": {
+                        "minimum": 1,
+                        "type": "integer"
+                      },
+                      "repo": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "repo",
+                      "count"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "source": {
+                  "description": "Live views contain consumer-index evidence only; pinned sensor ledgers also count sites that emit no consumer nodes.",
+                  "enum": [
+                    "consumer_index",
+                    "sensor_ledger"
+                  ]
+                },
+                "total": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "total",
+                "repos",
+                "directories",
+                "files"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "orm_dynamic_query"
+          ],
+          "type": "object"
         }
       },
       "required": [
@@ -3898,6 +4146,7 @@
               "method_mismatch",
               "template_mismatch",
               "same_service",
+              "catch_all_route",
               "already_bound",
               "op_mismatch",
               "field_mismatch"
@@ -4801,7 +5050,7 @@
     "outputSchema": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "additionalProperties": false,
-      "description": "`data` field of the `get_coverage` envelope (§10.2). `complete` is true iff `scope.unreviewed` is empty and (with an endpoint) no unresolved consumer could match it.",
+      "description": "`data` field of the `get_coverage` envelope (§10.2). `complete` is true iff `scope.unreviewed` is empty and (with an endpoint) no unresolved consumer could match it. Live and pinned views return indexing ledgers, including per-repository sensors, languages, skips and unresolved records.",
       "properties": {
         "ambiguous": {
           "items": {
@@ -4829,6 +5078,12 @@
         "repos": {
           "items": {
             "properties": {
+              "analyzer_version": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "commit": {
                 "type": [
                   "string",
@@ -4836,16 +5091,113 @@
                 ]
               },
               "error": {
-                "type": "string"
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "languages": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array",
+                "uniqueItems": true
               },
               "repo": {
                 "type": "string"
               },
               "sensors": {
+                "additionalProperties": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
                 "type": "object"
+              },
+              "skips": {
+                "items": {
+                  "properties": {
+                    "count": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "reason": {
+                      "enum": [
+                        "UnsupportedLanguage",
+                        "Unreadable",
+                        "ParseError",
+                        "SizeCap"
+                      ],
+                      "type": "string"
+                    },
+                    "sample_paths": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "maxItems": 5,
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "reason",
+                    "count",
+                    "sample_paths"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
               },
               "state": {
                 "type": "string"
+              },
+              "unresolved": {
+                "items": {
+                  "properties": {
+                    "count": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "locations": {
+                      "description": "Exact counts independent of samples; each map holds up to 4096 paths and an explicit <other> overflow bucket. Absent in legacy ledgers.",
+                      "properties": {
+                        "directories": {
+                          "additionalProperties": {
+                            "minimum": 0,
+                            "type": "integer"
+                          },
+                          "type": "object"
+                        },
+                        "files": {
+                          "additionalProperties": {
+                            "minimum": 0,
+                            "type": "integer"
+                          },
+                          "type": "object"
+                        }
+                      },
+                      "required": [
+                        "files",
+                        "directories"
+                      ],
+                      "type": "object"
+                    },
+                    "reason": {
+                      "type": "string"
+                    },
+                    "sample_ids": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "reason",
+                    "count",
+                    "sample_ids"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
               }
             },
             "type": "object"
@@ -4926,6 +5278,106 @@
         "stale_bindings": {
           "type": "integer"
         },
+        "summary": {
+          "description": "Counts of ORM dynamic query sites across the complete filtered result, before pagination. Grouped by repo, directory, and file.",
+          "properties": {
+            "orm_dynamic_query": {
+              "properties": {
+                "directories": {
+                  "items": {
+                    "properties": {
+                      "count": {
+                        "minimum": 1,
+                        "type": "integer"
+                      },
+                      "directory": {
+                        "type": "string"
+                      },
+                      "repo": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "repo",
+                      "directory",
+                      "count"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "files": {
+                  "items": {
+                    "properties": {
+                      "count": {
+                        "minimum": 1,
+                        "type": "integer"
+                      },
+                      "path": {
+                        "type": "string"
+                      },
+                      "repo": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "repo",
+                      "path",
+                      "count"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "groups_are_samples": {
+                  "description": "False for exact sensor location counts (including explicit <other> overflow buckets); true only for legacy ledgers without location counts.",
+                  "type": "boolean"
+                },
+                "repos": {
+                  "items": {
+                    "properties": {
+                      "count": {
+                        "minimum": 1,
+                        "type": "integer"
+                      },
+                      "repo": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "repo",
+                      "count"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "source": {
+                  "description": "Live views contain consumer-index evidence only; pinned sensor ledgers also count sites that emit no consumer nodes.",
+                  "enum": [
+                    "consumer_index",
+                    "sensor_ledger"
+                  ]
+                },
+                "total": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "total",
+                "repos",
+                "directories",
+                "files"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "orm_dynamic_query"
+          ],
+          "type": "object"
+        },
         "unnormalized": {
           "items": {
             "type": "string"
@@ -4935,6 +5387,36 @@
         "unresolved_consumers": {
           "items": {
             "type": "string"
+          },
+          "type": "array"
+        },
+        "url_defaults": {
+          "description": "Source-declared URL fallbacks from typed consumer facts; fallback-only bindings carry url_default heuristic provenance at confidence at most 0.5. Explicit environment service declarations take precedence.",
+          "items": {
+            "properties": {
+              "consumer": {
+                "type": "string"
+              },
+              "default": {
+                "const": true
+              },
+              "env": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "host": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "consumer",
+              "host",
+              "env",
+              "default"
+            ],
+            "type": "object"
           },
           "type": "array"
         }

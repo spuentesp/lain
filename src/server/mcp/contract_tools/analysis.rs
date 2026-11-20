@@ -1086,7 +1086,7 @@ fn build_scope(head: &SnapshotRecord) -> DiffScope {
     }
 }
 
-fn build_repo_coverage_with_ledgers(
+pub(super) fn build_repo_coverage_with_ledgers(
     data_dir: &std::path::Path,
     head: &SnapshotRecord,
 ) -> (
@@ -1835,7 +1835,7 @@ fn coverage_to_value(c: &DiffCoverage) -> Value {
                 "sensors": r.sensor_counts,
                 "languages": r.languages,
                 "skips": r.skips,
-                "unresolved": r.unresolved,
+                "unresolved": crate::federation::contracts::coverage::merge_unresolved_records(&r.unresolved),
                 "analyzer_version": r.analyzer_version,
                 "error": r.error,
             })
@@ -2303,12 +2303,14 @@ pub(super) fn provenance_label(p: Option<&EdgeProvenance>) -> Value {
         EdgeProvenance::Confirmed { .. } => "confirmed",
         EdgeProvenance::Heuristic { .. } => "heuristic",
         EdgeProvenance::Runtime { .. } => "runtime",
+        EdgeProvenance::Ref { .. } => "ref",
     };
     let confidence = match p {
         EdgeProvenance::Static { .. } => 1.0_f32,
         EdgeProvenance::Confirmed { .. } => 1.0_f32,
         EdgeProvenance::Heuristic { confidence, .. } => *confidence,
         EdgeProvenance::Runtime { .. } => 0.9_f32,
+        EdgeProvenance::Ref { .. } => 1.0_f32,
     };
     let mut v = json!({"kind": kind, "confidence": confidence});
     if let EdgeProvenance::Confirmed { source } = p {
@@ -2397,53 +2399,54 @@ async fn run_get_coverage(
                     crate::federation::health::RepoHealth::Indexing => "not_ready",
                     _ => "failed",
                 };
-                let mut sensor_counts: BTreeMap<String, u32> = BTreeMap::new();
-                if let Some(r) = fed.get_repo(&id) {
-                    let all_nodes = r.db().get_all_nodes();
-                    let mut http_routes = 0u32;
-                    let mut tables = 0u32;
-                    for n in all_nodes {
-                        match n.node_type {
-                            crate::schema::NodeType::HttpRoute => http_routes += 1,
-                            crate::schema::NodeType::Table => tables += 1,
-                            _ => {}
-                        }
-                    }
-                    if http_routes > 0 {
-                        sensor_counts.insert("http_routes".into(), http_routes);
-                    }
-                    if tables > 0 {
-                        sensor_counts.insert("sql_tables".into(), tables);
+                let loaded = fed.get_repo(&id).map(|repo| repo.coverage()).transpose();
+                let cover = match loaded {
+                    Ok(Some(Some(cover))) => cover,
+                    other => crate::federation::contracts::coverage::RepoCoverage {
+                        cache_key: crate::federation::contracts::index_cache::CacheKey::new(
+                            id.as_str(),
+                            commit.as_deref().unwrap_or(""),
+                            crate::federation::contracts::analyzer_version(),
+                        ),
+                        error: Some(match other {
+                            Err(error) => format!("coverage ledger unreadable: {error}"),
+                            _ => "coverage ledger missing; reindex required".to_string(),
+                        }),
+                        ..Default::default()
+                    },
+                };
+                let mut skips = Vec::new();
+                let mut unresolved = Vec::new();
+                for bucket in cover.ledger.values() {
+                    for sensor in bucket.values() {
+                        skips.extend(sensor.files_skipped.clone());
+                        unresolved.extend(sensor.unresolved.clone());
                     }
                 }
-                let live_coverage_error =
-                    "coverage ledger unavailable for live view; prepare a pinned snapshot"
-                        .to_string();
-                let cover = crate::federation::contracts::coverage::RepoCoverage {
-                    cache_key: crate::federation::contracts::index_cache::CacheKey::new(
-                        id.as_str(),
-                        commit.as_deref().unwrap_or(""),
-                        crate::federation::contracts::analyzer_version(),
-                    ),
-                    sensor_counts: sensor_counts
-                        .iter()
-                        .map(|(k, v)| (k.clone(), *v as u64))
-                        .collect(),
-                    error: Some(live_coverage_error.clone()),
-                    ..Default::default()
-                };
-                coverages.insert(id.as_str().to_string(), cover);
                 repos.push(crate::federation::contracts::diff::RepoCoverage {
                     repo: id.as_str().to_string(),
                     commit,
                     state: state_str.to_string(),
-                    sensor_counts,
-                    error: Some(live_coverage_error),
-                    languages: std::collections::BTreeSet::new(),
-                    skips: Vec::new(),
-                    unresolved: Vec::new(),
-                    analyzer_version: Some(crate::federation::contracts::analyzer_version()),
+                    sensor_counts: cover
+                        .sensor_counts
+                        .iter()
+                        .map(|(k, v)| (k.clone(), *v as u32))
+                        .collect(),
+                    // A failed repo reports why (e.g. `index_timeout: ...`); the
+                    // ledger error is only the fallback for ledger problems.
+                    error: if state_str == "failed" {
+                        fed.get_repo(&id)
+                            .and_then(|r| r.last_index_error())
+                            .or_else(|| cover.error.clone())
+                    } else {
+                        cover.error.clone()
+                    },
+                    languages: cover.languages_present.clone(),
+                    skips,
+                    unresolved,
+                    analyzer_version: Some(cover.cache_key.analyzer_version.clone()),
                 });
+                coverages.insert(id.as_str().to_string(), cover);
             }
         }
         (repos, coverages)
@@ -2467,6 +2470,37 @@ async fn run_get_coverage(
     coverage.complete = complete;
     let mut value = coverage_to_value(&coverage);
     value["complete"] = json!(complete);
+    let unresolved: Vec<_> = view.consumer_resolutions().filter_map(|(id, r)| {
+        matches!(r.target, Some(crate::federation::contracts::index::ConsumerTarget::Unresolved { reason: crate::federation::contracts::index::UnresolvedReason::OrmDynamicQuery, .. }))
+            .then(|| json!({"reason":"orm_dynamic_query","consumer":{"repo":id.repo_id(),"path":id.path().unwrap_or_default()}}))
+    }).collect();
+    value["summary"] = if coverage.repo_coverages.is_empty() {
+        super::contracts::unresolved_groups(&unresolved)
+    } else {
+        super::contracts::unresolved_ledger_groups(&coverage.repo_coverages, None, None)
+    };
+    let backend = resolved.backend();
+    let url_defaults: Vec<_> = view
+        .consumer_resolutions()
+        .filter_map(|(id, _)| {
+            let node = backend.get_node(id.as_str()).ok()??;
+            let (host, env) = node.contract.iter().find_map(|fact| match fact {
+                crate::federation::contracts::model::ContractFact::Consumer(c) => match &c.url.host
+                {
+                    crate::federation::contracts::model::HostPart::Literal(h) => c
+                        .url_defaults
+                        .as_ref()
+                        .filter(|env| !env.is_empty())
+                        .map(|env| (h.clone(), env.clone())),
+                    _ => None,
+                },
+                _ => None,
+            })?;
+            Some(json!({"consumer":id.as_str(),"host":host,"env":env,"default":true}))
+        })
+        .collect();
+    value["url_defaults"] = json!(url_defaults);
+
     let envelope = success_envelope_with_view(
         value.clone(),
         resolved.label(),

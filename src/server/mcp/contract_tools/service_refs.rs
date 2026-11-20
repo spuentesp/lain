@@ -32,6 +32,51 @@ const DEFAULT_MIN_SCORE: f32 = 0.6;
 /// Routes proposed per reference, best first.
 const SUGGESTIONS_PER_REF: usize = 2;
 
+type ReferenceSnapshot = Vec<(String, Vec<ServiceRef>)>;
+#[derive(Default)]
+struct SuggestionCache {
+    entry: Option<(
+        std::sync::Weak<ContractIndex>,
+        ReferenceSnapshot,
+        Option<String>,
+        u32,
+        Vec<Value>,
+    )>,
+}
+impl SuggestionCache {
+    fn get_or_compute(
+        &mut self,
+        index: &Arc<ContractIndex>,
+        refs: &[(String, Vec<ServiceRef>)],
+        repo: Option<&str>,
+        score: f32,
+        compute: impl FnOnce() -> Vec<Value>,
+    ) -> Vec<Value> {
+        if let Some((generation, old_refs, old_repo, old_score, result)) = &self.entry {
+            if generation.ptr_eq(&Arc::downgrade(index))
+                && old_refs == refs
+                && old_repo.as_deref() == repo
+                && *old_score == score.to_bits()
+            {
+                return result.clone();
+            }
+        }
+        let result = compute();
+        self.entry = Some((
+            Arc::downgrade(index),
+            refs.to_vec(),
+            repo.map(str::to_owned),
+            score.to_bits(),
+            result.clone(),
+        ));
+        result
+    }
+}
+// Bounded to one generation/query; a rejoin publishes a new index Arc, so
+// reindex invalidates the cache even if route selectors are unchanged.
+static SUGGESTION_CACHE: std::sync::Mutex<SuggestionCache> =
+    std::sync::Mutex::new(SuggestionCache { entry: None });
+
 fn object_or_empty(args: Value) -> Map<String, Value> {
     match args {
         Value::Object(m) => m,
@@ -101,36 +146,55 @@ fn suggestions_for(
     let Some(index) = index else {
         return (Vec::new(), "no_contract_index");
     };
-    let routes: Vec<(ServiceName, String)> = index
-        .endpoints
-        .iter()
-        .filter_map(|(id, _)| {
-            let key = id.1.to_string();
-            key.strip_prefix("http:")
-                .map(|selector| (id.0.clone(), selector.to_string()))
-        })
+    let references: ReferenceSnapshot = federation
+        .list_repos()
+        .into_iter()
+        .filter(|(id, _)| repo_filter.is_none_or(|r| id.as_str() == r))
+        .map(|(id, _)| (id.to_string(), federation.service_refs(&id)))
         .collect();
-    let embed = |text: &str| embedder.embed(text).ok();
-    let mut out = Vec::new();
-    for (repo_id, _) in federation.list_repos() {
-        if repo_filter.is_some_and(|r| repo_id.as_str() != r) {
-            continue;
-        }
-        let refs = federation.service_refs(&repo_id);
-        for s in suggest_routes(&refs, &routes, &embed, min_score, SUGGESTIONS_PER_REF) {
-            out.push(json!({
-                "repo": repo_id.as_str(),
-                "path": s.path,
-                "line": s.line,
-                "url": s.url,
-                "service": s.service.0,
-                "route": s.route,
-                "score": s.score,
-                "suggested": true,
-            }));
-        }
-    }
-    (out, "ok")
+    let result = SUGGESTION_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_or_compute(&index, &references, repo_filter, min_score, || {
+            let routes: Vec<(ServiceName, String)> = index
+                .endpoints
+                .iter()
+                .filter_map(|(id, _)| {
+                    let key = id.1.to_string();
+                    key.strip_prefix("http:")
+                        .map(|selector| (id.0.clone(), selector.to_string()))
+                })
+                .collect();
+            let vectors = std::cell::RefCell::new(std::collections::BTreeMap::<
+                String,
+                Option<Vec<f32>>,
+            >::new());
+            let embed = |text: &str| {
+                if let Some(value) = vectors.borrow().get(text) {
+                    return value.clone();
+                }
+                let value = embedder.embed(text).ok();
+                vectors.borrow_mut().insert(text.to_owned(), value.clone());
+                value
+            };
+            let mut out = Vec::new();
+            for (repo_id, refs) in &references {
+                for s in suggest_routes(refs, &routes, &embed, min_score, SUGGESTIONS_PER_REF) {
+                    out.push(json!({
+                        "repo": repo_id,
+                        "path": s.path,
+                        "line": s.line,
+                        "url": s.url,
+                        "service": s.service.0,
+                        "route": s.route,
+                        "score": s.score,
+                        "suggested": true,
+                    }));
+                }
+            }
+            out
+        });
+    (result, "ok")
 }
 
 fn ref_json(repo: &str, r: &ServiceRef) -> Value {
@@ -142,7 +206,14 @@ fn ref_json(repo: &str, r: &ServiceRef) -> Value {
         }),
         RefOutcome::UnknownHost => json!({"kind": "unknown"}),
     };
+    let edge = match &r.outcome {
+        RefOutcome::Resolved(service) => {
+            json!({"source": {"repo": repo, "path": r.path, "line": r.line}, "target_service": service.0, "provenance": "ref", "usage": usage_name(r.usage)})
+        }
+        _ => Value::Null,
+    };
     json!({
+        "edge": edge,
         "repo": repo,
         "path": r.path,
         "line": r.line,
@@ -303,4 +374,51 @@ async fn run_list_service_refs(
         data["items"].as_array().map_or(0, |a| a.len())
     );
     Ok(outcome(envelope, &data, text))
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+    #[test]
+    fn test_reference_emits_a_reference_edge_with_usage() {
+        let r = ServiceRef {
+            path: "tests/client.py".into(),
+            line: 3,
+            value: "https://api".into(),
+            url: "https://api/items".into(),
+            host: "api".into(),
+            outcome: RefOutcome::Resolved(ServiceName("api".into())),
+            usage: crate::federation::contracts::service_refs::classify_usage("tests/client.py"),
+            self_reference: false,
+            linked_to_call: false,
+        };
+        let item = ref_json("web", &r);
+        assert_eq!(item["edge"]["provenance"], "ref");
+        assert_eq!(item["edge"]["usage"], "test");
+        assert_eq!(item["edge"]["target_service"], "api");
+    }
+    #[test]
+    fn suggestions_reuse_index_and_invalidate_on_reindex_or_reference_change() {
+        let index = Arc::new(ContractIndex::default());
+        let mut cache = SuggestionCache::default();
+        let mut computes = 0;
+        for _ in 0..2 {
+            cache.get_or_compute(&index, &[], None, 0.6, || {
+                computes += 1;
+                vec![]
+            });
+        }
+        assert_eq!(computes, 1);
+        let next = Arc::new(ContractIndex::default());
+        cache.get_or_compute(&next, &[], None, 0.6, || {
+            computes += 1;
+            vec![]
+        });
+        assert_eq!(computes, 2);
+        cache.get_or_compute(&next, &[("repo".into(), vec![])], None, 0.6, || {
+            computes += 1;
+            vec![]
+        });
+        assert_eq!(computes, 3);
+    }
 }

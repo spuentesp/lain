@@ -155,6 +155,12 @@ pub struct RepoConfig {
     /// `@nvidia/openshell-sdk` both defeat the token match.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub packages: Vec<String>,
+    /// Wall-clock budget, in seconds, for one indexing pass of this
+    /// repo. Unset uses `LAIN_INDEX_TIMEOUT` or the 60 s default. Large
+    /// repositories (OpenShell, NemoClaw) need more than the default
+    /// even when every file scans cleanly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -337,6 +343,17 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn repo_index_timeout_secs_parses_and_round_trips() {
+        let yaml = "data_dir: /d\nrepos:\n  - id: big\n    index_timeout_secs: 900\n    source:\n      type: workspace_dir\n      path: /srv/big\n  - id: small\n    source:\n      type: workspace_dir\n      path: /srv/small\n";
+        let cfg: FederationConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.repos[0].index_timeout_secs, Some(900));
+        assert_eq!(cfg.repos[1].index_timeout_secs, None);
+        let out = serde_yaml::to_string(&cfg).unwrap();
+        assert!(out.contains("index_timeout_secs: 900"), "{out}");
+        assert_eq!(out.matches("index_timeout_secs").count(), 1, "{out}");
+    }
 
     #[test]
     fn parses_minimal_config() {

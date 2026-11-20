@@ -459,20 +459,24 @@ fn test_contract_edge_endpoints_match_node_type_definitions() {
             NodeType::Method
         ]
     );
-    // `Binds`: consumer → provider. Three source shapes (HttpClientCall,
-    // FieldRef, Topic) and three target shapes (HttpRoute, Field,
-    // Topic). Order-preserving check so the wire form stays stable.
+    // `Binds`: executable consumer → provider, or ServiceRef → service Module. Order-preserving check so the wire form stays stable.
     assert_eq!(
         EdgeType::Binds.source_types(),
         &[
             NodeType::HttpClientCall,
             NodeType::FieldRef,
-            NodeType::Topic
+            NodeType::Topic,
+            NodeType::ServiceRef
         ]
     );
     assert_eq!(
         EdgeType::Binds.target_types(),
-        &[NodeType::HttpRoute, NodeType::Field, NodeType::Topic]
+        &[
+            NodeType::HttpRoute,
+            NodeType::Field,
+            NodeType::Topic,
+            NodeType::Module
+        ]
     );
 }
 
@@ -668,4 +672,31 @@ fn test_edge_type_bincode_discriminants_are_append_only() {
             "bincode discriminant for {variant:?} shifted"
         );
     }
+}
+
+#[test]
+fn reference_variants_preserve_existing_bincode_discriminants() {
+    // Both variants are append-only: existing graph bytes need no migration.
+    use crate::schema::{EdgeProvenance, NodeType, ReferenceUsage};
+    let config = bincode::config::legacy();
+    assert_eq!(
+        bincode::serde::encode_to_vec(NodeType::Column, config).unwrap(),
+        23_u32.to_le_bytes()
+    );
+    let confirmed = EdgeProvenance::Confirmed { source: "x".into() };
+    assert_eq!(
+        &bincode::serde::encode_to_vec(&confirmed, config).unwrap()[..4],
+        &3_u32.to_le_bytes()
+    );
+    let reference = EdgeProvenance::Ref {
+        usage: ReferenceUsage::Configuration,
+    };
+    let encoded = bincode::serde::encode_to_vec(&reference, config).unwrap();
+    let (decoded, _): (EdgeProvenance, usize) =
+        bincode::serde::decode_from_slice(&encoded, config).unwrap();
+    assert_eq!(decoded, reference);
+    assert_eq!(
+        serde_json::to_value(reference).unwrap(),
+        serde_json::json!({"Ref":{"usage":"config"}})
+    );
 }

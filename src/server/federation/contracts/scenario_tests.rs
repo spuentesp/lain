@@ -97,6 +97,7 @@ fn consumer(
         name,
         line,
         ContractFact::Consumer(ConsumerFact {
+            url_defaults: None,
             method,
             url,
             via,

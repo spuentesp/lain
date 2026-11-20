@@ -356,7 +356,7 @@ pub struct WebSocketHandlerFact {
 // ─── HTTP consumer ────────────────────────────────────────────────────
 
 /// One outbound HTTP call site. Emitted by `http_client_sensor`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct ConsumerFact {
     /// `Known(HttpMethod)` for literal verbs; `Unknown` for
     /// non-literal expressions (e.g. `method=` arg).
@@ -369,6 +369,47 @@ pub struct ConsumerFact {
     /// a caller, passed out of scope, stored, spread, serialized,
     /// yielded, …). Reads and iteration are not escapes.
     pub reads_complete: bool,
+    /// Environment overrides whose source literal fallback supplied this URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url_defaults: Option<Vec<String>>,
+}
+
+// JSON omits absent default evidence; bincode must retain the positional
+// option slot. The binary layout is guarded by graph schema version 6.
+impl Serialize for ConsumerFact {
+    fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        if ser.is_human_readable() {
+            #[derive(Serialize)]
+            struct Repr<'a> {
+                method: &'a MethodSpec,
+                url: &'a NormalizedUrl,
+                via: &'a CallVia,
+                url_expr: &'a str,
+                reads_complete: bool,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                url_defaults: &'a Option<Vec<String>>,
+            }
+            Repr {
+                method: &self.method,
+                url: &self.url,
+                via: &self.via,
+                url_expr: &self.url_expr,
+                reads_complete: self.reads_complete,
+                url_defaults: &self.url_defaults,
+            }
+            .serialize(ser)
+        } else {
+            (
+                &self.method,
+                &self.url,
+                &self.via,
+                &self.url_expr,
+                self.reads_complete,
+                &self.url_defaults,
+            )
+                .serialize(ser)
+        }
+    }
 }
 
 /// How the call was made. `Library` is a known client
@@ -1162,6 +1203,11 @@ pub enum UnresolvedReason {
     /// A frontend value was used, but its disposition was not established by
     /// structural evidence. It must not be reported as discarded or guessed.
     FrontendValueUnclassified,
+    /// The site is in test/fixture/mock code and matched nothing in the
+    /// federation: a test literal (`ws://client:test*.com`, a mocked
+    /// URL) is not a call the product makes, so it is not a gap to fix.
+    /// Test sites that DO bind keep their edge (tagged `usage=test`).
+    NotACall,
 }
 
 /// A JSON pointer (or, here, JSON path) into a payload. Segments are
@@ -1335,3 +1381,26 @@ pub fn service_name_is_valid(s: &str) -> bool {
 /// The joiner indexes endpoints by this; tools serialize it as two
 /// fields in every payload (§4.4).
 pub type EndpointId = (ServiceName, ContractKey);
+
+#[cfg(test)]
+mod default_evidence_regressions {
+    use super::*;
+    #[test]
+    fn url_default_metadata_preserves_json_compatibility_and_binary_roundtrips() {
+        let raw = r#"{"method":{"Known":"Get"},"url":{"host":{"Literal":"api"},"template":"/"},"via":{"Library":{"name":"fetch"}},"url_expr":"api","reads_complete":true}"#;
+        let mut fact: ConsumerFact = serde_json::from_str(raw).unwrap();
+        assert!(fact.url_defaults.is_none());
+        assert!(serde_json::to_value(&fact)
+            .unwrap()
+            .get("url_defaults")
+            .is_none());
+        for value in [None, Some(vec!["API_URL".into()])] {
+            fact.url_defaults = value;
+            let bytes = bincode::serde::encode_to_vec(&fact, bincode::config::legacy()).unwrap();
+            let (decoded, used): (ConsumerFact, usize) =
+                bincode::serde::decode_from_slice(&bytes, bincode::config::legacy()).unwrap();
+            assert_eq!(used, bytes.len());
+            assert_eq!(decoded, fact);
+        }
+    }
+}

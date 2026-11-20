@@ -377,6 +377,7 @@ impl ProducerGaps {
         self.by_reason
             .into_iter()
             .map(|(reason, (count, sample_ids))| UnresolvedRecord {
+                locations: None,
                 reason,
                 count,
                 sample_ids,

@@ -203,6 +203,7 @@ pub fn with_current_patterns<R>(patterns: &Patterns, f: impl FnOnce() -> R) -> R
 
 struct WorkspaceScanCache {
     root: std::path::PathBuf,
+    django_analysis: Option<std::sync::Arc<super::django_orm_sensor::Analysis>>,
     walked_files: Option<std::sync::Arc<Vec<std::path::PathBuf>>>,
     file_contents: std::collections::HashMap<std::path::PathBuf, Option<std::sync::Arc<str>>>,
 }
@@ -220,6 +221,7 @@ pub fn with_workspace_scan_cache<R>(root: &Path, f: impl FnOnce() -> R) -> R {
     let prev = WORKSPACE_SCAN_CACHE.with(|cell| {
         cell.replace(Some(WorkspaceScanCache {
             root: root.to_path_buf(),
+            django_analysis: None,
             walked_files: None,
             file_contents: std::collections::HashMap::new(),
         }))
@@ -232,6 +234,30 @@ pub fn with_workspace_scan_cache<R>(root: &Path, f: impl FnOnce() -> R) -> R {
         Ok(v) => v,
         Err(payload) => std::panic::resume_unwind(payload),
     }
+}
+
+/// Share Django's site ownership and graph analysis for one indexing pass.
+/// The scan scope drops the result on return, including after a panic.
+pub(crate) fn django_analysis(root: &Path) -> std::sync::Arc<super::django_orm_sensor::Analysis> {
+    if let Some(hit) = WORKSPACE_SCAN_CACHE.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .filter(|cache| cache.root == root)
+            .and_then(|cache| cache.django_analysis.clone())
+    }) {
+        return hit;
+    }
+    let analysis = std::sync::Arc::new(super::django_orm_sensor::analyze_workspace(root));
+    WORKSPACE_SCAN_CACHE.with(|cell| {
+        if let Some(cache) = cell
+            .borrow_mut()
+            .as_mut()
+            .filter(|cache| cache.root == root)
+        {
+            cache.django_analysis = Some(analysis.clone());
+        }
+    });
+    analysis
 }
 
 fn read_cached_or_fs(root: &Path, path: &Path) -> Option<String> {

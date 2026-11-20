@@ -5,6 +5,15 @@ package. Run this in order when cutting a release tag. The checks preserve
 lessons from the 2026-09-16 incident, when npm `latest` contained the old
 launcher and the matching GitHub release had no `SHA256SUMS` asset.
 
+## Linux glibc floor
+
+The Linux binaries link the glibc of the machine that builds them, so
+`release.yml::build-linux` runs on `ubuntu-22.04` (glibc 2.35), not
+`ubuntu-latest`. A release built on a newer image would not start on
+Ubuntu 22.04 or 24.04. The job also fails the release if `lain` or
+`lain-git-sidecar` needs a glibc newer than 2.35 (`objdump -T`), so a
+runner change cannot ship that silently.
+
 ## Windows clean-room install
 
 The Windows packaging repair (shipped since v0.12.0) is in tree and

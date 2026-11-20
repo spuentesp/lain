@@ -1,11 +1,13 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "get_coverage data",
-  "description": "`data` field of the `get_coverage` envelope (§10.2). `complete` is true iff `scope.unreviewed` is empty and (with an endpoint) no unresolved consumer could match it.",
+  "description": "`data` field of the `get_coverage` envelope (\u00a710.2). `complete` is true iff `scope.unreviewed` is empty and (with an endpoint) no unresolved consumer could match it. Live and pinned views return indexing ledgers, including per-repository sensors, languages, skips and unresolved records.",
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "complete": { "type": "boolean" },
+    "complete": {
+      "type": "boolean"
+    },
     "scope": {
       "type": "object",
       "additionalProperties": false,
@@ -15,9 +17,18 @@
           "items": {
             "type": "object",
             "properties": {
-              "repo": { "type": "string" },
-              "commit": { "type": ["string", "null"] },
-              "dirty": { "type": "boolean" }
+              "repo": {
+                "type": "string"
+              },
+              "commit": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "dirty": {
+                "type": "boolean"
+              }
             }
           }
         },
@@ -26,53 +37,346 @@
           "items": {
             "type": "object",
             "properties": {
-              "repo": { "type": "string" },
-              "reason": { "type": "string", "enum": ["failed", "fetch_failed", "excluded", "not_ready"] },
-              "error": { "type": "string" }
+              "repo": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "failed",
+                  "fetch_failed",
+                  "excluded",
+                  "not_ready"
+                ]
+              },
+              "error": {
+                "type": "string"
+              }
             }
           }
         },
-        "configured_only": { "type": "boolean" }
+        "configured_only": {
+          "type": "boolean"
+        }
       },
-      "required": ["reviewed", "unreviewed", "configured_only"]
+      "required": [
+        "reviewed",
+        "unreviewed",
+        "configured_only"
+      ]
     },
     "repos": {
       "type": "array",
       "items": {
         "type": "object",
         "properties": {
-          "repo": { "type": "string" },
-          "commit": { "type": ["string", "null"] },
-          "state": { "type": "string" },
-          "sensors": { "type": "object" },
-          "error": { "type": "string" }
+          "repo": {
+            "type": "string"
+          },
+          "commit": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "state": {
+            "type": "string"
+          },
+          "sensors": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "languages": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "uniqueItems": true
+          },
+          "skips": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string",
+                  "enum": [
+                    "UnsupportedLanguage",
+                    "Unreadable",
+                    "ParseError",
+                    "SizeCap"
+                  ]
+                },
+                "count": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "sample_paths": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 5
+                }
+              },
+              "required": [
+                "reason",
+                "count",
+                "sample_paths"
+              ]
+            }
+          },
+          "unresolved": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string"
+                },
+                "count": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "sample_ids": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "locations": {
+                  "type": "object",
+                  "description": "Exact counts independent of samples; each map holds up to 4096 paths and an explicit <other> overflow bucket. Absent in legacy ledgers.",
+                  "properties": {
+                    "files": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "integer",
+                        "minimum": 0
+                      }
+                    },
+                    "directories": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "integer",
+                        "minimum": 0
+                      }
+                    }
+                  },
+                  "required": [
+                    "files",
+                    "directories"
+                  ]
+                }
+              },
+              "required": [
+                "reason",
+                "count",
+                "sample_ids"
+              ]
+            }
+          },
+          "analyzer_version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
         }
       }
     },
-    "unresolved_consumers": { "type": "array", "items": { "type": "string" } },
-    "ambiguous": { "type": "array", "items": { "type": "string" } },
-    "unnormalized": { "type": "array", "items": { "type": "string" } },
+    "unresolved_consumers": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "ambiguous": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "unnormalized": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
     "external": {
       "type": "array",
       "items": {
         "type": "object",
         "properties": {
-          "host": { "type": "string" },
-          "calls": { "type": "integer" }
+          "host": {
+            "type": "string"
+          },
+          "calls": {
+            "type": "integer"
+          }
         }
       }
     },
-    "stale_bindings": { "type": "integer" },
+    "stale_bindings": {
+      "type": "integer"
+    },
     "schemaless_endpoints": {
       "type": "array",
       "items": {
         "type": "object",
         "properties": {
-          "service": { "type": "string" },
-          "key": { "type": "string" }
+          "service": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          }
         }
       }
+    },
+    "url_defaults": {
+      "type": "array",
+      "description": "Source-declared URL fallbacks from typed consumer facts; fallback-only bindings carry url_default heuristic provenance at confidence at most 0.5. Explicit environment service declarations take precedence.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "consumer": {
+            "type": "string"
+          },
+          "host": {
+            "type": "string"
+          },
+          "env": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "default": {
+            "const": true
+          }
+        },
+        "required": [
+          "consumer",
+          "host",
+          "env",
+          "default"
+        ]
+      }
+    },
+    "summary": {
+      "type": "object",
+      "description": "Counts of ORM dynamic query sites across the complete filtered result, before pagination. Grouped by repo, directory, and file.",
+      "properties": {
+        "orm_dynamic_query": {
+          "type": "object",
+          "properties": {
+            "total": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "directories": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "repo": {
+                    "type": "string"
+                  },
+                  "directory": {
+                    "type": "string"
+                  },
+                  "count": {
+                    "type": "integer",
+                    "minimum": 1
+                  }
+                },
+                "required": [
+                  "repo",
+                  "directory",
+                  "count"
+                ]
+              }
+            },
+            "files": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "repo": {
+                    "type": "string"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "count": {
+                    "type": "integer",
+                    "minimum": 1
+                  }
+                },
+                "required": [
+                  "repo",
+                  "path",
+                  "count"
+                ]
+              }
+            },
+            "repos": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "repo": {
+                    "type": "string"
+                  },
+                  "count": {
+                    "type": "integer",
+                    "minimum": 1
+                  }
+                },
+                "required": [
+                  "repo",
+                  "count"
+                ]
+              }
+            },
+            "groups_are_samples": {
+              "type": "boolean",
+              "description": "False for exact sensor location counts (including explicit <other> overflow buckets); true only for legacy ledgers without location counts."
+            },
+            "source": {
+              "enum": [
+                "consumer_index",
+                "sensor_ledger"
+              ],
+              "description": "Live views contain consumer-index evidence only; pinned sensor ledgers also count sites that emit no consumer nodes."
+            }
+          },
+          "required": [
+            "total",
+            "repos",
+            "directories",
+            "files"
+          ]
+        }
+      },
+      "required": [
+        "orm_dynamic_query"
+      ]
     }
   },
-  "required": ["complete", "scope", "repos"]
+  "required": [
+    "complete",
+    "scope",
+    "repos"
+  ]
 }

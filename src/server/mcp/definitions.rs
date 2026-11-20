@@ -124,7 +124,7 @@ pub const FEDERATION_TOOL_DEFS: &[ToolDef] = &[
     ),
     ToolDef::legacy(
         "get_cross_repo_blast_radius",
-        "Use this when you want to know what breaks across repositories: resolve a symbol, traverse INCOMING Calls edges (its callers — \"if I change this, what breaks?\") in [min_depth, max_depth), and group visited nodes by repo. depth is a string range like \"1..3\", not a number. Returns {by_repo: {repo_id: [global_ids...]}, total_count, truncated}. Caps at 1000 nodes; truncated=true when the cap is hit. When the symbol matches several repos, pass repo_id to choose one.",
+        "Use this when you want to know what breaks across repositories: resolve a symbol, traverse INCOMING Calls edges (its callers — \"if I change this, what breaks?\") in [min_depth, max_depth), and group visited nodes by repo. depth is a string range like \"1..3\", not a number. Returns {by_repo: {repo_id: [global_ids...]}, total_count, truncated}. Caps at 1000 nodes; truncated=true when the cap is hit. Accepts a node id from find_symbol or a unique repo-relative path as symbol. Ambiguous names return an error listing candidate ids and paths; use find_symbol to choose a precise node. When the symbol matches several repos, pass repo_id to choose one.",
         &["symbol", "depth"],
         &["repo_id"],
     ),

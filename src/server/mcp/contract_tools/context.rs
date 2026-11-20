@@ -484,6 +484,15 @@ fn validate_bindings(
                 ));
             }
             let (consumer_id, consumer_node) = &matches[0];
+            let http_consumer = consumer_node.contract.iter().find_map(|fact| match fact {
+                crate::federation::contracts::model::ContractFact::Consumer(c) => Some(c),
+                _ => None,
+            });
+            let external = index.consumers.get(consumer_id).is_some_and(|resolutions| resolutions.iter()
+                .any(|r| matches!(r.target, Some(ConsumerTarget::External { .. }))));
+            if crate::federation::contracts::key_compat::is_catch_all_binding(&endpoint.1, http_consumer, external) {
+                return Err(refuse("catch_all_route"));
+            }
             let matching_facts = consumer_node
                 .contract
                 .iter()
@@ -601,6 +610,109 @@ mod tests {
     use crate::federation::repo_id::RepoId;
     use crate::schema::NodeType;
     use std::collections::BTreeMap;
+
+    #[tokio::test]
+    async fn stored_exact_root_binding_remains_valid_after_rejoin() {
+        use crate::federation::contracts::model::{
+            CallVia, ConsumerFact, ContractFact, HostPart, MethodSpec, NormalizedUrl, ProviderFact,
+            ProviderOrigin,
+        };
+        use crate::federation::graph_backend::{GraphBackend, PetgraphBackend};
+        use crate::federation::repo_source::WorkspaceDirSource;
+        use crate::schema::{GraphNode, RepoNamespace};
+        use std::sync::Arc;
+        let data = tempfile::tempdir().unwrap();
+        let backend = Arc::new(PetgraphBackend::new(data.path()).unwrap());
+        let fed = FederatedIndex::new(backend.clone());
+        let config: ContractFederationConfig = serde_yaml::from_str("services: [{name: api, repo: api, hosts: [api]}, {name: client, repo: client}]\nbindings:\n  - consumer: {repo: client, path: src/client.js, symbol: send, key: 'http:GET /'}\n    provider: {service: api, key: 'http:GET /'}\n").unwrap();
+        let binding = config.bindings[0].clone();
+        fed.set_contract_config(config);
+        let mut roots = Vec::new();
+        for name in ["api", "client"] {
+            let root = tempfile::tempdir().unwrap();
+            git2::Repository::init(root.path()).unwrap();
+            fed.add_repo(
+                Box::new(
+                    WorkspaceDirSource::new(RepoId::new(name).unwrap(), root.path().to_path_buf())
+                        .unwrap(),
+                ),
+                data.path(),
+            )
+            .await
+            .unwrap();
+            roots.push(root);
+        }
+        let mut provider = GraphNode::new_in(
+            NodeType::HttpRoute,
+            "GET /".into(),
+            "src/server.py".into(),
+            &RepoNamespace::for_test(),
+        );
+        provider.id = GlobalId::new(
+            &RepoId::new("api").unwrap(),
+            NodeType::HttpRoute,
+            &provider.path,
+            &provider.name,
+            Some(1),
+        )
+        .as_str()
+        .into();
+        provider.repo_id = Some("api".into());
+        provider.contract.push(ContractFact::Provider(ProviderFact {
+            method: HttpMethod::Get,
+            template: "/".into(),
+            handler: None,
+            operation_id: None,
+            origin: ProviderOrigin::Code,
+        }));
+        let mut consumer = GraphNode::new_in(
+            NodeType::HttpClientCall,
+            "GET /".into(),
+            "src/client.js".into(),
+            &RepoNamespace::for_test(),
+        );
+        consumer.id = GlobalId::new(
+            &RepoId::new("client").unwrap(),
+            NodeType::HttpClientCall,
+            &consumer.path,
+            &consumer.name,
+            Some(1),
+        )
+        .as_str()
+        .into();
+        consumer.repo_id = Some("client".into());
+        consumer.container = Some("send".into());
+        consumer.contract.push(ContractFact::Consumer(ConsumerFact {
+            url_defaults: None,
+            method: MethodSpec::Known(HttpMethod::Get),
+            url: NormalizedUrl {
+                host: HostPart::Literal("api".into()),
+                template: Some("/".into()),
+            },
+            via: CallVia::Library {
+                name: "fetch".into(),
+            },
+            url_expr: "http://api/".into(),
+            reads_complete: true,
+        }));
+        for (repo, node) in [("api", provider), ("client", consumer)] {
+            fed.register_contract_node_for_test(RepoId::new(repo).unwrap(), node.id.clone());
+            backend.upsert_nodes_batch(&[node]).unwrap();
+        }
+        let mut previous_saves = None;
+        for _ in 0..2 {
+            fed.rejoin_contracts().unwrap();
+            if let Some(previous) = previous_saves {
+                assert_eq!(
+                    backend.save_count(),
+                    previous,
+                    "unchanged executable joins must not save"
+                );
+            }
+            previous_saves = Some(backend.save_count());
+            assert!(validate_bindings(&fed, std::slice::from_ref(&binding)).is_ok());
+        }
+    }
 
     fn decl(service: &str, key: &str) -> ProviderDecl {
         ProviderDecl {

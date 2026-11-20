@@ -214,6 +214,10 @@ pub fn evidence_from_provenance(provenance: Option<&EdgeProvenance>) -> (Evidenc
             Evidence::NeedsInvestigation,
             Some("runtime-observed edge (not static proof)".to_string()),
         ),
+        Some(EdgeProvenance::Ref { .. }) => (
+            Evidence::NeedsInvestigation,
+            Some("service reference (not proof of an executable call)".into()),
+        ),
         None => (
             Evidence::NeedsInvestigation,
             Some("edge provenance not recorded (confidence 0.0)".to_string()),
@@ -1121,5 +1125,18 @@ mod tests {
         );
         // The decoy from the ground truth's traps: never in affected.
         assert!(!rendered.contains("charge"));
+    }
+}
+
+#[cfg(test)]
+mod reference_evidence_tests {
+    use super::*;
+    #[test]
+    fn service_reference_is_not_verified_execution() {
+        let (evidence, reason) = evidence_from_provenance(Some(&EdgeProvenance::Ref {
+            usage: crate::schema::ReferenceUsage::Production,
+        }));
+        assert_eq!(evidence, Evidence::NeedsInvestigation);
+        assert!(reason.unwrap().contains("not proof"));
     }
 }

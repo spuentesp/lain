@@ -402,6 +402,7 @@ async fn select_dynamic(pool: &sqlx::PgPool, table: &str) -> sqlx::Result<()> {
         SensorLedger {
             emitted: count,
             unresolved: vec![UnresolvedRecord {
+                locations: None,
                 reason: UnresolvedReason::DynamicSql,
                 count: 1,
                 sample_ids: vec!["src/repo.rs:select_dynamic:3".to_string()],

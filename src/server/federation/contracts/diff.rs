@@ -2204,7 +2204,7 @@ fn binding_reason(consumer: &ConsumerDef) -> Reason {
             EdgeProvenance::Static { .. } => Reason::StaticBinding,
             EdgeProvenance::Confirmed { .. } => Reason::ConfirmedBinding,
             EdgeProvenance::Heuristic { .. } => Reason::HeuristicBinding,
-            EdgeProvenance::Runtime { .. } => Reason::HeuristicBinding,
+            EdgeProvenance::Runtime { .. } | EdgeProvenance::Ref { .. } => Reason::HeuristicBinding,
         },
         _ => Reason::HeuristicBinding,
     }
@@ -2284,7 +2284,7 @@ fn is_certain(consumer: &ConsumerDef) -> bool {
             EdgeProvenance::Static { .. } => true,
             EdgeProvenance::Confirmed { .. } => true,
             EdgeProvenance::Heuristic { .. } => false,
-            EdgeProvenance::Runtime { .. } => false,
+            EdgeProvenance::Runtime { .. } | EdgeProvenance::Ref { .. } => false,
         },
         _ => false,
     }

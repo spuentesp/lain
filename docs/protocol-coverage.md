@@ -193,9 +193,33 @@ each kind and are backlog, not silence.
   edges: 42 of its functions call OpenShell's `parse_sandbox_policy`.
   That call-graph edge is the accepted result for this dependency. The
   Rust provider calls OpenShell through the SDK wrapper
-  (`OpenShellClient`), not generated stubs, so it is not an RPC contract
-  consumer. A Rust gRPC consumer detector, with a wrapper-to-RPC mapping,
-  is not built. Re-run the script to reproduce.
+  (`OpenShellClient`), not generated stubs. Rust wrappers are now
+  followed: a wrapper method whose body makes one generated call maps to
+  that RPC, so `client.poll_settings(..)` resolves to `GetSandboxConfig`
+  (see `RUST_GRPC_CANDIDATES.md`). Same-service calls resolve `Internal`
+  and are not counted as bound consumers. Re-run the script to reproduce.
+- **TypeScript / JavaScript consumers.** `grpc_consumer_sensor` also reads
+  `.ts`, `.tsx`, `.js`, `.jsx`, `.mjs` and `.cjs`. A client handle is
+  recognised where it is built or typed (`new FooClient(..)`,
+  `FooClient.connect(..)`, `createPromiseClient(FooService, ..)`,
+  `x: FooClient`) and only when the type is imported from a gRPC-style
+  module or named by one, so an app's own `SandboxClient` is not read as a
+  stub. Calls are `client.method(..)`, `this.client.method(..)` and
+  `client.raw.method(..)`, PascalCased to the proto method; a narrowed
+  view such as `OpenShellReadClient` names its underlying service. The
+  host comes from a literal or template address or a `process.env` read.
+  On the NVIDIA OpenShell cluster NemoClaw's `client.raw.getProvider(..)`
+  and `client.raw.getProviderProfile(..)` bind to OpenShell's
+  `GetProvider` and `GetProviderProfile`. An SDK facade
+  (`client.sandbox.execStream(..)`) names no proto method and stays
+  unbound.
+- **Go.** A receiver declared as `net/http` `Client` is not a stub, and
+  `Do`/`Get`/`Post`/`PostForm`/`Head` count only with a context first
+  argument.
+- **Ledger.** The Rust record counts files that name a generated client
+  type yet yielded no identified call, not every `.rs` file. Dynamic SQL,
+  ORM and unclassified frontend values in test or fixture files do not
+  count.
 
 ## websocket
 

@@ -100,6 +100,7 @@ fn library_consumer_node(
     n.id = make_id(repo, NodeType::HttpClientCall, path, name, line);
     n.line_start = Some(line);
     n.contract = vec![ContractFact::Consumer(ConsumerFact {
+        url_defaults: None,
         method,
         url,
         via: CallVia::Library {
@@ -513,6 +514,7 @@ fn c6_phase_b_registry_base_with_env_var_binds() {
     consumer.id = make_id("billing", NodeType::HttpClientCall, "src/c.ts", "do_get", 1);
     consumer.line_start = Some(1);
     consumer.contract = vec![ContractFact::Consumer(ConsumerFact {
+        url_defaults: None,
         method: MethodSpec::Known(HttpMethod::Get),
         url: NormalizedUrl {
             host: lain::federation::contracts::model::HostPart::None,
