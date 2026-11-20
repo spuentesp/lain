@@ -202,6 +202,85 @@ pub struct UnresolvedRecord {
     pub reason: crate::federation::contracts::model::UnresolvedReason,
     pub count: usize,
     pub sample_ids: Vec<String>,
+    /// Exact counts, independent of the bounded site samples. Absent in old ledgers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locations: Option<LocationCounts>,
+}
+
+/// Bounded file/directory counts. Each map retains at most 4096 paths plus an
+/// explicit `<other>` bucket; bucket totals remain exact even after overflow.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct LocationCounts {
+    pub files: BTreeMap<String, usize>,
+    pub directories: BTreeMap<String, usize>,
+}
+
+impl LocationCounts {
+    fn bucket(map: &mut BTreeMap<String, usize>, key: &str, count: usize) {
+        let key = if map.contains_key(key) || map.len() < 4096 {
+            key
+        } else {
+            "<other>"
+        };
+        *map.entry(key.to_string()).or_default() += count;
+    }
+    fn add_file_only(&mut self, path: &str, count: usize) {
+        Self::bucket(&mut self.files, path, count);
+    }
+    fn add_directory_only(&mut self, dir: &str, count: usize) {
+        Self::bucket(&mut self.directories, dir, count);
+    }
+    pub fn add(&mut self, path: &str, count: usize) {
+        fn add_bucket(map: &mut BTreeMap<String, usize>, path: &str, count: usize) {
+            let key = if map.contains_key(path) || map.len() < 4096 {
+                path
+            } else {
+                "<other>"
+            };
+            *map.entry(key.to_string()).or_default() += count;
+        }
+        add_bucket(&mut self.files, path, count);
+        let directory = Path::new(path)
+            .parent()
+            .and_then(|p| p.to_str())
+            .unwrap_or("");
+        add_bucket(&mut self.directories, directory, count);
+    }
+}
+
+/// Merge unresolved records that share a reason into one record each.
+///
+/// Several sensors can report the same reason for one repo (the SQL and
+/// Django ORM sensors both emit `OrmDynamicQuery`); a consumer of the ledger
+/// expects one row per reason with the summed count, a bounded sample list
+/// (first five distinct ids, in report order) and merged exact locations.
+pub fn merge_unresolved_records(records: &[UnresolvedRecord]) -> Vec<UnresolvedRecord> {
+    let mut merged: Vec<UnresolvedRecord> = Vec::new();
+    for rec in records {
+        let Some(into) = merged.iter_mut().find(|m| m.reason == rec.reason) else {
+            merged.push(rec.clone());
+            continue;
+        };
+        into.count += rec.count;
+        for id in &rec.sample_ids {
+            if into.sample_ids.len() < 5 && !into.sample_ids.contains(id) {
+                into.sample_ids.push(id.clone());
+            }
+        }
+        match (&mut into.locations, &rec.locations) {
+            (Some(a), Some(b)) => {
+                for (path, n) in &b.files {
+                    a.add_file_only(path, *n);
+                }
+                for (dir, n) in &b.directories {
+                    a.add_directory_only(dir, *n);
+                }
+            }
+            (None, Some(b)) => into.locations = Some(b.clone()),
+            _ => {}
+        }
+    }
+    merged
 }
 
 /// Why a consumer / call site could not be bound, or why a sensor
@@ -556,34 +635,44 @@ pub(crate) fn coverage_from_reports(
         }
     }
 
-    // Gap 26: record SkipReason::UnsupportedLanguage for unanalyzed languages present in the workspace.
-    let mut files_by_lang: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for r in &records {
-        if let Some(lang) = r.lang {
-            let label = lang_label(lang).to_string();
-            let path_str = r.path.to_string_lossy().to_string();
-            files_by_lang.entry(label).or_default().push(path_str);
+    // A legacy report has no detailed analyzed count. That is unknown
+    // coverage, not evidence that the language is unsupported.
+    let supported = consumer_capable_langs();
+    let mut skips: BTreeMap<(String, bool), Vec<String>> = BTreeMap::new();
+    for record in &records {
+        if let Some(lang) = record.lang {
+            if record.size_capped || !supported.contains(&lang) {
+                skips
+                    .entry((lang_label(lang).to_string(), record.size_capped))
+                    .or_default()
+                    .push(
+                        record
+                            .path
+                            .strip_prefix(root)
+                            .unwrap_or(&record.path)
+                            .to_string_lossy()
+                            .to_string(),
+                    );
+            }
         }
     }
-
-    for (lang_str, file_paths) in files_by_lang {
-        let has_analyzed = ledger.ledger.values().any(|sensor_map| {
-            sensor_map
-                .get(&lang_str)
-                .map(|s| s.files_analyzed > 0)
-                .unwrap_or(false)
-        });
-        if !has_analyzed {
-            let sample_paths: Vec<String> = file_paths.iter().take(5).cloned().collect();
-            let skip = SkipRecord {
-                reason: SkipReason::UnsupportedLanguage,
-                count: file_paths.len(),
-                sample_paths,
-            };
-            let bucket = ledger.ledger.entry("classifier".to_string()).or_default();
-            let entry = bucket.entry(lang_str).or_default();
-            entry.files_skipped.push(skip);
-        }
+    for ((lang, capped), paths) in skips {
+        ledger
+            .ledger
+            .entry("classifier".into())
+            .or_default()
+            .entry(lang)
+            .or_default()
+            .files_skipped
+            .push(SkipRecord {
+                reason: if capped {
+                    SkipReason::SizeCap
+                } else {
+                    SkipReason::UnsupportedLanguage
+                },
+                count: paths.len(),
+                sample_paths: paths.into_iter().take(5).collect(),
+            });
     }
 
     // Derive the per-sensor totals for back-compat with the existing
@@ -888,6 +977,7 @@ mod tests {
         let mut cover = empty_cover("orders", "abc", "0.9.0+c3");
         let mut py = SensorLedger::default();
         py.unresolved.push(UnresolvedRecord {
+            locations: None,
             reason: UnresolvedReason::WrapperUnconfigured,
             count: 1,
             sample_ids: vec!["call:1".into()],
@@ -1002,6 +1092,39 @@ mod tests {
     /// `write_ledger` + `read_ledger` round-trip a `CoverageLedger`
     /// to disk; the cache key survives the round-trip.
     #[test]
+    fn same_reason_records_merge_into_one_row() {
+        let mk = |n: usize, ids: &[&str], file: &str| {
+            let mut loc = LocationCounts::default();
+            loc.add(file, n);
+            UnresolvedRecord {
+                reason: UnresolvedReason::OrmDynamicQuery,
+                count: n,
+                sample_ids: ids.iter().map(|s| s.to_string()).collect(),
+                locations: Some(loc),
+            }
+        };
+        let other = UnresolvedRecord {
+            reason: UnresolvedReason::DynamicSql,
+            count: 7,
+            sample_ids: vec!["q:1".into()],
+            locations: None,
+        };
+        let merged = merge_unresolved_records(&[
+            mk(5, &["a:1", "a:2", "a:3", "a:4", "a:5"], "app/a.py"),
+            other,
+            mk(3, &["a:1", "b:9"], "app/b.py"),
+        ]);
+        assert_eq!(merged.len(), 2, "one row per reason: {merged:?}");
+        let orm = &merged[0];
+        assert_eq!(orm.reason, UnresolvedReason::OrmDynamicQuery);
+        assert_eq!(orm.count, 8);
+        assert_eq!(orm.sample_ids.len(), 5, "samples stay bounded");
+        let loc = orm.locations.as_ref().unwrap();
+        assert_eq!(loc.files.values().sum::<usize>(), 8, "exact counts merge");
+        assert_eq!(merged[1].count, 7);
+    }
+
+    #[test]
     fn ledger_round_trips_through_disk() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("coverage_ledger.json");
@@ -1064,6 +1187,7 @@ mod tests {
         cover.error = Some("walk failed".into());
         let mut py = SensorLedger::default();
         py.unresolved.push(UnresolvedRecord {
+            locations: None,
             reason: UnresolvedReason::WrapperUnconfigured,
             count: 1,
             sample_ids: vec!["call:1".into()],
@@ -1076,7 +1200,74 @@ mod tests {
     }
 
     #[test]
-    fn coverage_from_reports_records_unsupported_language() {
+    fn coverage_distinguishes_size_caps_from_language_support() {
+        let dir = tempfile::tempdir().unwrap();
+        let big = std::fs::File::create(dir.path().join("big.py")).unwrap();
+        big.set_len(SIZE_CAP_BYTES + 1).unwrap();
+        let key = IcCacheKey::new("saleor", "head", "test");
+        let reports = vec![(
+            "http",
+            crate::server::sensors::ScanReport {
+                emitted: 0,
+                error: None,
+                unresolved: vec![],
+            },
+        )];
+        let cover = coverage_from_reports(dir.path(), &key, &SensorCounts::default(), &reports);
+        let skips: Vec<_> = cover
+            .ledger
+            .values()
+            .flat_map(|b| b.values())
+            .flat_map(|s| &s.files_skipped)
+            .collect();
+        assert_eq!(skips.len(), 1);
+        assert_eq!(skips[0].reason, SkipReason::SizeCap);
+        assert_eq!(skips[0].count, 1);
+    }
+
+    #[test]
+    fn supported_python_without_detailed_reports_is_not_unsupported() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("validators.py"), "x = 1\n").unwrap();
+        let key = IcCacheKey::new("saleor", "head", "test");
+        let reports = vec![(
+            "http",
+            crate::server::sensors::ScanReport {
+                emitted: 0,
+                error: None,
+                unresolved: vec![],
+            },
+        )];
+        let cover = coverage_from_reports(dir.path(), &key, &SensorCounts::default(), &reports);
+        assert!(cover
+            .ledger
+            .values()
+            .flat_map(|b| b.values())
+            .flat_map(|s| &s.files_skipped)
+            .all(|s| s.reason != SkipReason::UnsupportedLanguage));
+        assert!(
+            !cover.is_complete(&consumer_capable_langs(), "test"),
+            "unknown detailed coverage stays incomplete"
+        );
+    }
+
+    #[test]
+    fn exact_location_buckets_are_bounded_and_preserve_totals() {
+        let mut counts = LocationCounts::default();
+        for i in 0..5000 {
+            counts.add(&format!("dir{i}/file.py"), 2);
+        }
+        counts.add("dir0/file.py", 3);
+        assert_eq!(counts.files.len(), 4097);
+        assert_eq!(counts.directories.len(), 4097);
+        assert_eq!(counts.files.values().sum::<usize>(), 10003);
+        assert_eq!(counts.directories.values().sum::<usize>(), 10003);
+        assert_eq!(counts.files["dir0/file.py"], 5);
+        assert_eq!(counts.files["<other>"], 1808);
+    }
+
+    #[test]
+    fn missing_reports_do_not_claim_supported_rust_is_unsupported() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("main.rs"), "fn main() {}\n").unwrap();
         let key =
@@ -1085,14 +1276,7 @@ mod tests {
         let reports = vec![];
         let cover = coverage_from_reports(dir.path(), &key, &counts, &reports);
 
-        let classifier = cover.ledger.get("classifier").expect("classifier ledger");
-        let rust_entry = classifier.get("rust").expect("rust entry");
-        assert!(
-            rust_entry
-                .files_skipped
-                .iter()
-                .any(|s| matches!(s.reason, SkipReason::UnsupportedLanguage)),
-            "rust files marked as UnsupportedLanguage when no sensor analyzes them"
-        );
+        assert!(!cover.ledger.contains_key("classifier"));
+        assert!(!cover.is_complete(&consumer_capable_langs(), "0.9.0"));
     }
 }

@@ -89,7 +89,9 @@ pub(crate) fn inputs(
         let Some(source) = source_key(repo.local_path(), repo.git())? else {
             return Ok(None);
         };
-        let (commit, _) = repo.git().try_get_latest_commit_info()?;
+        let (commit, _) = retry_while_busy(SOURCE_KEY_GIT_WAIT, || {
+            repo.git().try_get_latest_commit_info()
+        })?;
         hash.update(id.as_str().as_bytes());
         hash.update(commit.as_bytes());
         hash.update(
@@ -106,6 +108,33 @@ pub(crate) fn inputs(
 
 /// Context-independent source identity. Relative paths let identical checkouts
 /// share extracted references without sharing namespace-bound graph nodes.
+/// How long [`source_key`] waits for a busy git sensor. Publishing the startup
+/// checkpoint gave up the moment anchor mining or a sibling index held the
+/// sensor, so the checkpoint was missing at readiness. Bounded, because the
+/// fail-fast lock exists to never block on a wedged libgit2 (Bug #2).
+const SOURCE_KEY_GIT_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Run `attempt`, retrying while it reports the git sensor busy, for at most
+/// `budget`. Any other result, including the busy error once the budget is
+/// spent, is returned as is.
+fn retry_while_busy<T>(
+    budget: std::time::Duration,
+    mut attempt: impl FnMut() -> Result<T, LainError>,
+) -> Result<T, LainError> {
+    let deadline = std::time::Instant::now() + budget;
+    loop {
+        match attempt() {
+            Err(error)
+                if crate::git::is_git_sensor_busy(&error)
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            other => return other,
+        }
+    }
+}
+
 pub(crate) fn source_key(
     root: &Path,
     git: &crate::git::AnyGitSensor,
@@ -122,7 +151,7 @@ pub(crate) fn source_key(
     // short name, a symlinked checkout — and every tracked file then reads as
     // "outside repository". Canonicalize the root so both sides agree.
     let canonical_root = dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-    let mut files = git.try_get_all_tracked_files()?;
+    let mut files = retry_while_busy(SOURCE_KEY_GIT_WAIT, || git.try_get_all_tracked_files())?;
     files.sort();
     for file in files {
         let abs = if file.is_absolute() {
@@ -292,13 +321,13 @@ pub(crate) fn analysis_environment(
         std::env::var("LAIN_DISABLE_LSP").ok().as_deref(),
     ) || std::env::var("LAIN_TEST_NO_LSP").is_ok_and(|v| !v.is_empty());
     if !disabled {
-        let binaries: std::collections::BTreeSet<_> = git
-            .try_get_all_tracked_files()?
-            .iter()
-            .filter_map(|p| p.extension().and_then(|e| e.to_str()))
-            .filter_map(crate::server::lsp::language_server_for)
-            .map(|server| server.binary)
-            .collect();
+        let binaries: std::collections::BTreeSet<_> =
+            retry_while_busy(SOURCE_KEY_GIT_WAIT, || git.try_get_all_tracked_files())?
+                .iter()
+                .filter_map(|p| p.extension().and_then(|e| e.to_str()))
+                .filter_map(crate::server::lsp::language_server_for)
+                .map(|server| server.binary)
+                .collect();
         for binary in binaries {
             hash.update(binary.as_bytes());
             if let Ok(path) = which::which(binary) {
@@ -574,7 +603,68 @@ mod tests {
         let via_link = link_parent.join("repo");
 
         // The sensor reports canonical paths; `root` is the symlinked one.
-        let key = source_key(&via_link, &git).unwrap();
-        assert!(key.is_some(), "a clean repo must produce a source key");
+        // The property `source_key` exists for is that the key is the same
+        // either way — that is what lets identical checkouts share a cache
+        // entry. Asserting only `is_some` would accept a key that is wrong
+        // or empty, which the prefix-stripping bug produced silently.
+        let via_link_key = source_key(&via_link, &git).unwrap();
+        let canonical_key = source_key(&repo, &git).unwrap();
+        assert!(
+            via_link_key.is_some(),
+            "a clean repo must produce a source key"
+        );
+        assert_eq!(
+            via_link_key, canonical_key,
+            "the source key must not depend on whether the root is reached through a symlink"
+        );
+
+        // The key must also mean something: a constant (or empty) key is
+        // self-consistent across the symlink and so passes the equality
+        // above, but it would make two different checkouts collide on one
+        // cache entry. It must be non-empty and change with the content.
+        let key = via_link_key.clone().expect("source key");
+        assert!(!key.is_empty(), "a source key must not be empty");
+
+        std::fs::write(repo.join("extra.rs"), "fn extra() {}\n").unwrap();
+        git_cmd(&["add", "extra.rs"]);
+        git_cmd(&["commit", "-q", "-m", "different content"]);
+        let changed_key = source_key(&repo, &git).unwrap().expect("source key");
+        assert_ne!(
+            key, changed_key,
+            "the source key must change when the tracked files change"
+        );
+    }
+
+    #[test]
+    fn a_busy_git_sensor_is_retried_until_it_frees() {
+        let mut calls = 0;
+        let out = retry_while_busy(std::time::Duration::from_secs(2), || {
+            calls += 1;
+            if calls < 3 {
+                Err(crate::git::git_sensor_busy_error())
+            } else {
+                Ok(calls)
+            }
+        });
+        assert_eq!(out.unwrap(), 3);
+    }
+
+    #[test]
+    fn a_real_error_is_not_retried() {
+        let mut calls = 0;
+        let out: Result<(), _> = retry_while_busy(std::time::Duration::from_secs(2), || {
+            calls += 1;
+            Err(LainError::Other("not a repository".into()))
+        });
+        assert!(out.is_err());
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn a_sensor_that_stays_busy_gives_up_with_the_busy_error() {
+        let out: Result<(), _> = retry_while_busy(std::time::Duration::from_millis(60), || {
+            Err(crate::git::git_sensor_busy_error())
+        });
+        assert!(crate::git::is_git_sensor_busy(&out.unwrap_err()));
     }
 }

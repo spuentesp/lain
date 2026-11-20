@@ -319,6 +319,7 @@ fn scan_workspace_field_access_with_report(
         Vec::new()
     } else {
         vec![crate::federation::contracts::coverage::UnresolvedRecord {
+            locations: None,
             reason: crate::federation::contracts::model::UnresolvedReason::Unnormalized,
             count: incomplete_operations.len(),
             sample_ids: incomplete_operations.iter().take(5).cloned().collect(),
@@ -6432,6 +6433,7 @@ async function fetch_data() { return await fetch(\"/a\"); }
         );
         call_node.line_start = Some(call_line);
         call_node.contract = vec![ContractFact::Consumer(ConsumerFact {
+            url_defaults: None,
             method: MethodSpec::Known(HttpMethod::Get),
             url: NormalizedUrl {
                 host: HostPart::Literal("orders".into()),

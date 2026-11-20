@@ -103,3 +103,36 @@ Four items, all deliberate — none is a missing feature:
   JSON-in-text when convenient.
 - The startup cache (`LAIN_REQUIRE_STARTUP_CACHE=1` for prepared-cache-only
   launches) for faster CI gates.
+
+## Follow-up: the 0.15.0 failures and the 16-item report (v0.16.0)
+
+Status of the follow-up report, verified on real data (Saleor, the NVIDIA
+OpenShell cluster and the NVIDIA NeMo Agent Toolkit cluster) and by tests.
+
+| # | Item | State |
+|---|---|---|
+| 1 | `query_graph` sees federation bindings, counts, strict filters | Done: `Binds` edges, `group`, `explain`, unknown keys rejected |
+| 2 | GraphQL contract schemas | Done: 449 of 449 Saleor GraphQL contracts have one. HTTP, topic and table contracts have none |
+| 3 | Per-repo ledger on the live view | Done |
+| 4 | Linux binary needs glibc 2.43 | Done in `release.yml` (builds on 22.04, floor check); proven only by a release run |
+| 5 | A timed-out repo reports `error: null` | Done: the reason is in `/health`, `get_coverage` and the scope |
+| 6 | 60 s index budget too tight | Done: scales with repo size; `repos[].index_timeout_secs` overrides |
+| 7 | Rust wrapper gRPC not followed | Done on real OpenShell code (three causes fixed). Same-service calls resolve `Internal`, so OpenShell's own `bound_consumers` stays 0 |
+| 8 | Rust std methods read as RPC stubs | Done for the Rust deny list; Go `http.Client` receivers also excluded |
+| 9 | Variable host with a literal default | Implemented and tested; not measured on real data |
+| 10 | `check_binding` accepts root catch-alls | Implemented and tested; not measured on real data |
+| 11 | Same-service calls counted unresolved | Done: they resolve `Internal` (seen on OpenShell) |
+| 12 | Symbols resolved by name only | Implemented and tested; not measured on real data |
+| 13 | `list_service_refs` latency | Implemented (cached views) and tested; the ~35 s figure was not re-measured |
+| 14 | `target_service` rarely set | Implemented where the target is known; not measured on real data |
+| 15 | `UnsupportedLanguage` lists a `.py` file | Done |
+| 16 | `OrmDynamicQuery` volume | Done: grouped with exact locations; test files excluded |
+
+New in this batch: a TypeScript / JavaScript gRPC consumer sensor. On the
+OpenShell cluster NemoClaw's `client.raw.getProvider(..)` and
+`client.raw.getProviderProfile(..)` bind across repos to OpenShell. NemoClaw's
+`client.sandbox.execStream(..)` goes through an SDK facade that names no proto
+method and stays unbound.
+
+Known limits: the mutation gate and the macOS/Windows lanes were not run
+locally; the OpenShell cluster's other RPC consumers are same-service.

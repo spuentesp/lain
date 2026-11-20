@@ -11,6 +11,10 @@
     "repo": {
       "type": "string"
     },
+    "repo_path": {
+      "type": "string",
+      "description": "Absolute on-disk checkout of the repo (live reads only)."
+    },
     "paths": {
       "type": "array",
       "items": {
@@ -209,7 +213,8 @@
             "static",
             "heuristic",
             "runtime",
-            "confirmed"
+            "confirmed",
+            "ref"
           ]
         },
         "detector": {
@@ -289,7 +294,8 @@
           "enum": [
             "no_route_in_service",
             "no_match",
-            "dynamic_target"
+            "dynamic_target",
+            "not_a_call"
           ]
         },
         "target_service": {

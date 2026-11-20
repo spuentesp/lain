@@ -454,6 +454,7 @@ fn build_unresolved_records(
     by_ref
         .into_iter()
         .map(|(_url, mut samples)| UnresolvedRecord {
+            locations: None,
             reason: UnresolvedReason::ExternalSchemaRef,
             count: samples.len(),
             sample_ids: {

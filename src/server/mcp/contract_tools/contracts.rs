@@ -359,11 +359,27 @@ async fn run_get_contract(
         let mut schemas: Vec<Value> = Vec::new();
         for dir in [Direction::Request, Direction::Response, Direction::Payload] {
             if let Some(schema) = endpoint.schemas.get(&dir) {
+                // The normalized TypeDesc is used for compatibility analysis;
+                // SDL signatures preserve GraphQL scalar and object type names.
+                let mut sdl_types = std::collections::BTreeMap::new();
+                if matches!(endpoint_id.1, ContractKey::Graphql { .. }) {
+                    let backend = resolved.backend();
+                    for edge in backend
+                        .edges_from(schema.node_id.as_str(), crate::schema::EdgeType::HasField)
+                        .unwrap_or_default()
+                    {
+                        if let Ok(Some(node)) = backend.get_node(&edge.target_id) {
+                            if let Some(signature) = node.signature {
+                                sdl_types.insert(node.name, signature);
+                            }
+                        }
+                    }
+                }
                 let mut fields: Vec<Value> = Vec::new();
                 for (path, meta) in &schema.fields {
                     fields.push(json!({
                         "json_path": path.to_string(),
-                        "ty": type_desc_label(&meta.ty),
+                        "ty": sdl_types.get(&path.to_string()).map(String::as_str).unwrap_or_else(|| type_desc_label(&meta.ty)),
                         "required": meta.required,
                         "nullable": meta.nullable,
                         "enum_values": meta.enum_values.clone(),
@@ -442,14 +458,27 @@ async fn run_list_unresolved(
                 continue;
             }
         }
-        if let Some(ref svc) = service_filter {
-            if &resolution.service != svc {
-                continue;
-            }
-        }
         let backend = resolved.backend();
         let fact_keys = consumer_fact_keys(backend.as_ref(), call_id);
         let candidates = candidate_endpoints_for_keys(&view, call_id, resolution, &fact_keys);
+        let candidate_services: std::collections::BTreeSet<_> = candidates
+            .iter()
+            .filter_map(|c| c["endpoint"]["service"].as_str())
+            .collect();
+        let target_service = target_service.or_else(|| {
+            (candidate_services.len() == 1)
+                .then(|| ServiceName((*candidate_services.first().unwrap()).to_string()))
+        });
+        if service_filter.as_ref().is_some_and(|svc| {
+            !unresolved_service_matches(
+                svc,
+                &resolution.service,
+                target_service.as_ref(),
+                &candidates,
+            )
+        }) {
+            continue;
+        }
         let mut item = json!({
             "consumer": evidence_ref_from_call(call_id),
             "url_expr": url_expr_for(call_id),
@@ -502,20 +531,29 @@ async fn run_list_unresolved(
         {
             continue;
         }
+        let candidates = rust_rpc_candidates(&view, detail);
         if let Some(svc) = &service_filter {
-            let Some(info) = view.services.get(svc) else {
-                continue;
-            };
-            if info.repo.as_str() != id.repo_id()
-                || (!info.paths.is_empty()
-                    && !info
-                        .paths
-                        .iter()
-                        .any(|p| id.path().is_some_and(|path| path.starts_with(p))))
+            let owns_site = view.services.get(svc).is_some_and(|info| {
+                info.repo.as_str() == id.repo_id()
+                    && (info.paths.is_empty()
+                        || info
+                            .paths
+                            .iter()
+                            .any(|p| id.path().is_some_and(|path| path.starts_with(p))))
+            });
+            if !owns_site
+                && !candidates
+                    .iter()
+                    .any(|c| c["endpoint"]["service"].as_str() == Some(svc.0.as_str()))
             {
                 continue;
             }
         }
+        let services: std::collections::BTreeSet<_> = candidates
+            .iter()
+            .filter_map(|c| c["endpoint"]["service"].as_str())
+            .collect();
+        let target_service = (services.len() == 1).then(|| *services.first().unwrap());
         let mut consumer = evidence_ref_from_call(id);
         consumer["commit"] = json!(resolved
             .commits()
@@ -529,9 +567,9 @@ async fn run_list_unresolved(
             "consumer": consumer,
             "url_expr": url_expr_for(id),
             "method": detail.candidate.as_ref().map(|c| c.method.as_str()).unwrap_or(""),
-            "template": null, "host": null, "target_service": null,
+            "template": null, "host": null, "target_service": target_service,
             "reason": "rpc_stub_unknown", "rpc": detail,
-            "candidates": rust_rpc_candidates(&view, detail),
+            "candidates": candidates,
         }));
     }
 
@@ -539,9 +577,20 @@ async fn run_list_unresolved(
     for (call_id, resolution) in view.consumer_resolutions() {
         if let Some(ConsumerTarget::Binds { .. }) = &resolution.target {
             if resolution.bound_endpoints.len() > 1 {
+                if repo_filter
+                    .as_ref()
+                    .is_some_and(|repo| call_id.repo_id() != repo)
+                {
+                    continue;
+                }
                 let mut cands: Vec<Value> = Vec::new();
                 for ep in &resolution.bound_endpoints {
                     cands.push(json!({"service": ep.0 .0, "key": ep.1.to_string()}));
+                }
+                if service_filter.as_ref().is_some_and(|svc| {
+                    !unresolved_service_matches(svc, &resolution.service, None, &cands)
+                }) {
+                    continue;
                 }
                 ambiguous.push(json!({
                     "consumer": evidence_ref_from_call(call_id),
@@ -551,6 +600,53 @@ async fn run_list_unresolved(
         }
     }
 
+    let mut summary = unresolved_groups(&items);
+    if snap_label == "live" {
+        if let Some(fed) = ctx.federation {
+            let ledgers: std::collections::BTreeMap<_, _> = fed
+                .list_repos()
+                .into_iter()
+                .filter_map(|(id, _)| {
+                    fed.get_repo(&id)
+                        .and_then(|r| r.coverage().ok().flatten())
+                        .map(|c| (id.to_string(), c))
+                })
+                .collect();
+            if !ledgers.is_empty() {
+                summary = unresolved_ledger_groups(
+                    &ledgers,
+                    repo_filter.as_deref(),
+                    service_filter.as_ref().map(|svc| {
+                        view.services
+                            .get(svc)
+                            .map(|s| s.repo.as_str())
+                            .unwrap_or("<unknown-service>")
+                    }),
+                );
+            }
+        }
+    } else {
+        if let Some(manager) = ctx.snapshots {
+            if let Ok(snapshot) = manager.get(&snap_label, 5_000).await {
+                let (_, ledgers) = super::analysis::build_repo_coverage_with_ledgers(
+                    manager.data_dir(),
+                    &snapshot.record,
+                );
+                if !ledgers.is_empty() {
+                    summary = unresolved_ledger_groups(
+                        &ledgers,
+                        repo_filter.as_deref(),
+                        service_filter.as_ref().map(|svc| {
+                            view.services
+                                .get(svc)
+                                .map(|s| s.repo.as_str())
+                                .unwrap_or("<unknown-service>")
+                        }),
+                    );
+                }
+            }
+        }
+    }
     let key = |it: &Value| it["consumer"]["id"].as_str().unwrap_or("").to_string();
     if let Some(after) = cursor.as_ref().map(|c| c.after.clone()) {
         items.retain(|it| key(it) > after);
@@ -561,6 +657,7 @@ async fn run_list_unresolved(
     let mut data = json!({
         "items": page,
         "ambiguous": ambiguous,
+        "summary": summary,
     });
     if let Some(tok) = next_cursor {
         data["cursor"] = json!(tok);
@@ -575,6 +672,118 @@ async fn run_list_unresolved(
     );
     let text = render_list_unresolved(&data);
     Ok(outcome(envelope, &data, text))
+}
+
+/// Service scoping includes owner, inferred target, and every candidate.
+fn unresolved_service_matches(
+    filter: &ServiceName,
+    owner: &ServiceName,
+    target: Option<&ServiceName>,
+    candidates: &[Value],
+) -> bool {
+    owner == filter
+        || target == Some(filter)
+        || candidates.iter().any(|c| {
+            c["endpoint"]["service"]
+                .as_str()
+                .or_else(|| c["service"].as_str())
+                == Some(filter.0.as_str())
+        })
+}
+
+/// Complete, pre-pagination counts; retain individual sites for inspection.
+pub(super) fn unresolved_groups(items: &[Value]) -> Value {
+    use std::collections::BTreeMap;
+    let mut repos = BTreeMap::<String, usize>::new();
+    let mut dirs = BTreeMap::<(String, String), usize>::new();
+    let mut files = BTreeMap::<(String, String), usize>::new();
+    let mut total = 0;
+    for item in items.iter().filter(|i| i["reason"] == "orm_dynamic_query") {
+        let repo = item["consumer"]["repo"].as_str().unwrap_or("");
+        let path = item["consumer"]["path"].as_str().unwrap_or("");
+        let dir = std::path::Path::new(path)
+            .parent()
+            .and_then(|p| p.to_str())
+            .unwrap_or("");
+        *repos.entry(repo.into()).or_default() += 1;
+        *dirs.entry((repo.into(), dir.into())).or_default() += 1;
+        *files.entry((repo.into(), path.into())).or_default() += 1;
+        total += 1;
+    }
+    json!({"orm_dynamic_query": {
+        "total": total,
+        "source": "consumer_index",
+        "groups_are_samples": false,
+        "repos": repos.into_iter().map(|(repo, count)| json!({"repo":repo,"count":count})).collect::<Vec<_>>(),
+        "directories": dirs.into_iter().map(|((repo, directory), count)| json!({"repo":repo,"directory":directory,"count":count})).collect::<Vec<_>>(),
+        "files": files.into_iter().map(|((repo, path), count)| json!({"repo":repo,"path":path,"count":count})).collect::<Vec<_>>()
+    }})
+}
+
+/// Sensor counts are authoritative; exact location buckets are independent of
+/// retained examples. Old ledgers without buckets remain explicitly sampled.
+pub(super) fn unresolved_ledger_groups(
+    ledgers: &std::collections::BTreeMap<
+        String,
+        crate::federation::contracts::coverage::RepoCoverage,
+    >,
+    repo_filter: Option<&str>,
+    service_repo: Option<&str>,
+) -> Value {
+    use std::collections::BTreeMap;
+    let mut files = BTreeMap::<(String, String), usize>::new();
+    let mut dirs = BTreeMap::<(String, String), usize>::new();
+    let mut repos = Vec::new();
+    let mut total = 0;
+    let mut sampled = false;
+    for (repo, coverage) in ledgers {
+        if repo_filter.is_some_and(|r| r != repo) || service_repo.is_some_and(|r| r != repo) {
+            continue;
+        }
+        let mut count = 0;
+        for record in coverage
+            .ledger
+            .values()
+            .flat_map(|langs| langs.values())
+            .flat_map(|l| &l.unresolved)
+        {
+            if record.reason != UnresolvedReason::OrmDynamicQuery {
+                continue;
+            }
+            count += record.count;
+            if let Some(locations) = &record.locations {
+                for (path, n) in &locations.files {
+                    *files.entry((repo.clone(), path.clone())).or_default() += n;
+                }
+                for (path, n) in &locations.directories {
+                    *dirs.entry((repo.clone(), path.clone())).or_default() += n;
+                }
+            } else {
+                sampled |= record.count > 0;
+                for id in &record.sample_ids {
+                    let path = id
+                        .rsplit_once(':')
+                        .filter(|(_, line)| line.parse::<u32>().is_ok())
+                        .map_or(id.as_str(), |(p, _)| p);
+                    let dir = std::path::Path::new(path)
+                        .parent()
+                        .and_then(|p| p.to_str())
+                        .unwrap_or("");
+                    *files.entry((repo.clone(), path.into())).or_default() += 1;
+                    *dirs.entry((repo.clone(), dir.into())).or_default() += 1;
+                }
+            }
+        }
+        total += count;
+        if count > 0 {
+            repos.push(json!({"repo":repo,"count":count}));
+        }
+    }
+    json!({"orm_dynamic_query": {
+        "total":total,"repos":repos,"source":"sensor_ledger","groups_are_samples":sampled,
+        "files":files.into_iter().map(|((repo,path),count)|json!({"repo":repo,"path":path,"count":count})).collect::<Vec<_>>(),
+        "directories":dirs.into_iter().map(|((repo,directory),count)|json!({"repo":repo,"directory":directory,"count":count})).collect::<Vec<_>>()
+    }})
 }
 
 // ─── check_binding implementation ─────────────────────────────────────
@@ -668,6 +877,24 @@ async fn run_check_binding(
 
     let resolution = view.consumer(&consumer_id).cloned();
     let mut reasons: Vec<&'static str> = Vec::new();
+    let consumer_node = resolved
+        .backend()
+        .get_node(consumer_id.as_str())
+        .ok()
+        .flatten();
+    let http_consumer = consumer_node.as_ref().and_then(|node| {
+        node.contract.iter().find_map(|fact| match fact {
+            crate::federation::contracts::model::ContractFact::Consumer(c) => Some(c),
+            _ => None,
+        })
+    });
+    let external = resolution
+        .as_ref()
+        .is_some_and(|r| matches!(r.target, Some(ConsumerTarget::External { .. })));
+    if crate::federation::contracts::key_compat::is_catch_all_binding(&key, http_consumer, external)
+    {
+        reasons.push("catch_all_route");
+    }
 
     if resolution.is_none() {
         reasons.push("not_a_consumer");
@@ -1163,6 +1390,7 @@ pub(crate) fn unresolved_reason_label(r: UnresolvedReason) -> &'static str {
         OrmDynamicQuery => "orm_dynamic_query",
         ExternalSchemaRef => "external_schema_ref",
         FrontendValueUnclassified => "frontend_value_unclassified",
+        NotACall => "not_a_call",
     }
 }
 
@@ -1212,6 +1440,7 @@ fn provenance_to_json(p: &EdgeProvenance) -> Value {
             Some(last_seen_unix.to_string()),
         ),
         EdgeProvenance::Confirmed { source } => ("confirmed", 1.0_f32, None, Some(source.clone())),
+        EdgeProvenance::Ref { .. } => ("ref", 1.0_f32, None, None),
     };
     let mut out = json!({"kind": kind, "confidence": confidence});
     if let Some(d) = detector {
@@ -1666,6 +1895,7 @@ mod tests {
         node.id = consumer.as_str().into();
         node.container = Some("fetch: order #1".into());
         node.contract.push(ContractFact::Consumer(ConsumerFact {
+            url_defaults: None,
             method: MethodSpec::Known(HttpMethod::Get),
             url: NormalizedUrl {
                 host: HostPart::None,
@@ -2301,4 +2531,133 @@ fn rust_rpc_candidates(
     detail: &crate::federation::contracts::rust_rpc::RustRpcDetail,
 ) -> Vec<Value> {
     view.endpoints.keys().filter(|ep| detail.compatible_keys.contains(&ep.1.to_string())).map(|ep| json!({"endpoint": {"service": ep.0.0, "key": ep.1.to_string()}, "reason": "same_key"})).collect()
+}
+
+#[cfg(test)]
+mod unresolved_summary_tests {
+    use super::*;
+    #[test]
+    fn service_filter_accepts_target_and_candidate_services() {
+        let candidates = vec![json!({"endpoint": {"service": "api", "key": "http:GET /"}})];
+        assert!(unresolved_service_matches(
+            &ServiceName("api".into()),
+            &ServiceName("web".into()),
+            None,
+            &candidates
+        ));
+        assert!(unresolved_service_matches(
+            &ServiceName("api".into()),
+            &ServiceName("web".into()),
+            Some(&ServiceName("api".into())),
+            &[]
+        ));
+        assert!(unresolved_service_matches(
+            &ServiceName("api".into()),
+            &ServiceName("web".into()),
+            None,
+            &[json!({"service":"api","key":"http:GET /"})]
+        ));
+        assert!(!unresolved_service_matches(
+            &ServiceName("other".into()),
+            &ServiceName("web".into()),
+            None,
+            &candidates
+        ));
+    }
+    #[test]
+    fn orm_5000_sites_have_exact_file_and_directory_groups() {
+        use crate::federation::contracts::{coverage::*, index_cache::CacheKey};
+        use crate::schema::RepoNamespace;
+        let tmp = tempfile::tempdir().unwrap();
+        for file in 0..40 {
+            let dir = tmp.path().join(format!("group{}", file / 10));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join(format!("queries{file}.py")),
+                "dynamic_receiver.objects.filter(id=1)\n".repeat(125),
+            )
+            .unwrap();
+        }
+        let db = crate::graph::GraphDatabase::new(&tmp.path().join("graph.bin")).unwrap();
+        let report = crate::sensors::django_orm_sensor::scan_workspace_django_orm_with_report(
+            &db,
+            tmp.path(),
+            &RepoNamespace::for_test(),
+        )
+        .unwrap();
+        assert_eq!(
+            report.unresolved.iter().map(|r| r.count).sum::<usize>(),
+            5000
+        );
+        let coverage = coverage_from_reports(
+            tmp.path(),
+            &CacheKey::new("repo", "sha", "test"),
+            &crate::sensors::SensorCounts::default(),
+            &[("django_orm", report)],
+        );
+        let mut ledger = CoverageLedger::default();
+        ledger.insert("repo".into(), coverage);
+        let path = tmp.path().join("ledger.json");
+        write_ledger(&path, &ledger).unwrap();
+        let restored = read_ledger(&path).unwrap().unwrap();
+        let summary = unresolved_ledger_groups(&restored.by_repo, None, None);
+        let groups = &summary["orm_dynamic_query"];
+        assert_eq!(groups["total"], 5000);
+        assert_eq!(groups["groups_are_samples"], false);
+        assert_eq!(groups["files"].as_array().unwrap().len(), 40);
+        assert!(groups["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|f| f["count"] == 125));
+        assert_eq!(groups["directories"].as_array().unwrap().len(), 4);
+        assert!(groups["directories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|d| d["count"] == 1250));
+    }
+
+    #[test]
+    fn ledger_summary_keeps_full_orm_total_and_marks_sample_groups() {
+        use crate::federation::contracts::coverage::{
+            RepoCoverage, SensorLedger, UnresolvedRecord,
+        };
+        let mut cover = RepoCoverage::default();
+        cover.ledger.entry("django".into()).or_default().insert(
+            "python".into(),
+            SensorLedger {
+                unresolved: vec![UnresolvedRecord {
+                    locations: None,
+                    reason: UnresolvedReason::OrmDynamicQuery,
+                    count: 5000,
+                    sample_ids: vec!["app/models.py:3".into()],
+                }],
+                ..Default::default()
+            },
+        );
+        let summary = unresolved_ledger_groups(
+            &std::collections::BTreeMap::from([("repo".into(), cover)]),
+            None,
+            None,
+        );
+        assert_eq!(summary["orm_dynamic_query"]["total"], 5000);
+        assert_eq!(summary["orm_dynamic_query"]["files"][0]["count"], 1);
+        assert_eq!(summary["orm_dynamic_query"]["groups_are_samples"], true);
+    }
+    #[test]
+    fn orm_summary_groups_by_repo_directory_and_file_before_paging() {
+        let items = vec![
+            json!({"reason":"orm_dynamic_query", "consumer":{"repo":"app", "path":"src/db/models.py"}}),
+            json!({"reason":"orm_dynamic_query", "consumer":{"repo":"app", "path":"src/db/models.py"}}),
+            json!({"reason":"no_match", "consumer":{"repo":"app", "path":"src/db/models.py"}}),
+        ];
+        let groups = unresolved_groups(&items);
+        assert_eq!(groups["orm_dynamic_query"]["total"], 2);
+        assert_eq!(groups["orm_dynamic_query"]["files"][0]["count"], 2);
+        assert_eq!(
+            groups["orm_dynamic_query"]["directories"][0]["directory"],
+            "src/db"
+        );
+    }
 }

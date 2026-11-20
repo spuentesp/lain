@@ -3,10 +3,20 @@
 generated_type_pattern: '(^|::)[a-zA-Z_][a-zA-Z_0-9]*_client::[A-Z][a-zA-Z_0-9]*Client$'
 constructors: [new, with_interceptor, with_origin]
 async_constructors: [connect]
-deny_methods: [clone, ready, send_compressed, accept_compressed, max_decoding_message_size, max_encoding_message_size]
+deny_methods: [clone, ready, send_compressed, accept_compressed, max_decoding_message_size, max_encoding_message_size, unwrap, expect, unwrap_or, unwrap_or_else, unwrap_or_default, unwrap_err, expect_err, map_err]
 # Cross-file accessors are opt-in, keyed by the receiver's qualified type.
 # Each entry needs receiver_type, method, return_type, provenance.
 accessors: []
+# Optional wrappers map an exact receiver_type + method to generated_type +
+# rpc_method. Each entry requires provenance documenting the delegation.
+# Configure these in the repository override, alongside the bundled settings.
+# wrappers:
+#   - receiver_type: openshell_core::grpc_client::CachedOpenShellClient
+#     method: get_draft_policy
+#     generated_type: openshell_core::proto::open_shell_client::OpenShellClient
+#     rpc_method: get_draft_policy
+#     provenance: grpc_client.rs delegates to generated OpenShellClient
+
 
 # Catalog comparison uses both generated module and type, plus an RPC name.
 client_module_template: "{service_snake}_client"

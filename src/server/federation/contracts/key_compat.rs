@@ -82,6 +82,27 @@ pub fn keys_compatible(consumer: &ContractKey, provider: &ContractKey) -> bool {
     }
 }
 
+/// Whether a provider is too broad to confirm this HTTP consumer.
+pub fn is_catch_all_binding(
+    provider: &ContractKey,
+    consumer: Option<&crate::federation::contracts::model::ConsumerFact>,
+    external: bool,
+) -> bool {
+    use crate::federation::contracts::model::HostPart;
+    let ContractKey::Http { method, template } = provider else {
+        return false;
+    };
+    if template.contains('*') {
+        return true;
+    }
+    if template != "/" {
+        return false;
+    }
+    !matches!(method, MethodSpec::Known(m) if *m != HttpMethod::Any)
+        || external
+        || consumer.is_none_or(|c| matches!(c.url.host, HostPart::None))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -211,5 +232,46 @@ mod tests {
         };
         assert!(keys_compatible(&t1, &t1));
         assert!(!keys_compatible(&t1, &t2));
+    }
+}
+
+#[cfg(test)]
+mod review_regressions {
+    use super::*;
+    use crate::federation::contracts::model::*;
+    #[test]
+    fn exact_root_endpoint_is_not_a_catch_all() {
+        let consumer = ConsumerFact {
+            url_defaults: None,
+            method: MethodSpec::Known(HttpMethod::Get),
+            url: NormalizedUrl {
+                host: HostPart::Literal("api".into()),
+                template: Some("/".into()),
+            },
+            via: CallVia::Library {
+                name: "fetch".into(),
+            },
+            url_expr: "http://api/".into(),
+            reads_complete: true,
+        };
+        let exact = ContractKey::Http {
+            method: MethodSpec::Known(HttpMethod::Get),
+            template: "/".into(),
+        };
+        assert!(!is_catch_all_binding(&exact, Some(&consumer), false));
+        assert!(is_catch_all_binding(&exact, Some(&consumer), true));
+        let mut hostless = consumer.clone();
+        hostless.url.host = HostPart::None;
+        assert!(is_catch_all_binding(&exact, Some(&hostless), false));
+        let wildcard = ContractKey::Http {
+            method: MethodSpec::Known(HttpMethod::Get),
+            template: "/{**}".into(),
+        };
+        assert!(is_catch_all_binding(&wildcard, Some(&consumer), false));
+        let any = ContractKey::Http {
+            method: MethodSpec::Known(HttpMethod::Any),
+            template: "/".into(),
+        };
+        assert!(is_catch_all_binding(&any, Some(&consumer), false));
     }
 }

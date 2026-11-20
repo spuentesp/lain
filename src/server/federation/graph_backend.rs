@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 /// layout change. Old v2 files are refused at load — recovery is
 /// `lain reindex`.
 pub const FEDERATION_GRAPH_MAGIC: &[u8] = b"LNF2";
-pub const FEDERATION_GRAPH_VERSION: u32 = 5;
+pub const FEDERATION_GRAPH_VERSION: u32 = 7;
 pub const FEDERATION_GRAPH_HEADER_LEN: usize = FEDERATION_GRAPH_MAGIC.len() + 4;
 
 /// Sibling file holding the validated payload (everything after the
@@ -35,6 +35,26 @@ fn payload_path_for(bin_path: &Path) -> std::path::PathBuf {
 }
 
 pub trait GraphBackend: Send + Sync {
+    /// Query view of the materialised federation, including binding provenance.
+    /// HTTP bindings also expose direct dependency legs for the query screen;
+    /// these derived legs live only in memory and never change the disk format.
+    fn query_graph_view(&self) -> Result<GraphDatabase, LainError> {
+        self.query_graph_view_at(0)
+    }
+
+    /// A snapshot generation distinguishes query views even when its join is empty.
+    fn query_graph_view_at(&self, _generation: usize) -> Result<GraphDatabase, LainError> {
+        let mut nodes = Vec::new();
+        self.visit_nodes(&mut |node| nodes.push(query_node(node)))?;
+        let edges = self.all_edges()?;
+        build_query_view(nodes.iter(), edges.iter())
+    }
+
+    /// Last successfully built view, retained if a contract rejoin fails.
+    fn last_query_graph_view(&self) -> Option<GraphDatabase> {
+        None
+    }
+
     /// Open a bulk write section. Until the matching [`Self::end_bulk`],
     /// writes do not each rewrite the backing file; `end_bulk` writes it
     /// once. Only a full reindex should use this: a crash inside the section
@@ -208,6 +228,8 @@ pub struct PetgraphBackend {
     bulk_depth: AtomicUsize,
     /// A write happened inside a bulk section; `end_bulk` saves once.
     bulk_dirty: AtomicBool,
+    query_revision: AtomicUsize,
+    query_view: parking_lot::Mutex<Option<(usize, usize, GraphDatabase)>>,
 }
 
 impl PetgraphBackend {
@@ -282,6 +304,8 @@ impl PetgraphBackend {
             ephemeral: false,
             bulk_depth: AtomicUsize::new(0),
             bulk_dirty: AtomicBool::new(false),
+            query_revision: AtomicUsize::new(0),
+            query_view: parking_lot::Mutex::new(None),
         })
     }
 
@@ -301,6 +325,8 @@ impl PetgraphBackend {
             ephemeral: true,
             bulk_depth: AtomicUsize::new(0),
             bulk_dirty: AtomicBool::new(false),
+            query_revision: AtomicUsize::new(0),
+            query_view: parking_lot::Mutex::new(None),
         }
     }
 
@@ -315,6 +341,7 @@ impl PetgraphBackend {
     /// file is always self-describing on the next load. No-op for
     /// ephemeral backends (`§8.5` snapshot federations).
     fn save(&self) -> Result<(), LainError> {
+        self.query_revision.fetch_add(1, Ordering::AcqRel);
         if self.ephemeral {
             return Ok(());
         }
@@ -323,6 +350,11 @@ impl PetgraphBackend {
             return Ok(());
         }
         self.write_file()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn save_count(&self) -> usize {
+        self.query_revision.load(Ordering::Acquire)
     }
 
     /// Unconditional checkpoint of the whole federated graph to `bin_path`.
@@ -366,6 +398,29 @@ impl PetgraphBackend {
 }
 
 impl GraphBackend for PetgraphBackend {
+    fn query_graph_view_at(&self, generation: usize) -> Result<GraphDatabase, LainError> {
+        let mut cache = self.query_view.lock();
+        let revision = self.query_revision.load(Ordering::Acquire);
+        if let Some((cached_revision, cached_generation, view)) = cache.as_ref() {
+            if (*cached_revision, *cached_generation) == (revision, generation) {
+                return Ok(view.clone());
+            }
+        }
+        // One read guard gives a coherent node/edge snapshot. Building the
+        // node-kind index once avoids two graph lookups per binding edge.
+        let stored = self.db.graph_ref_for_read();
+        let view = build_query_view(stored.node_weights(), stored.edge_weights())?;
+        *cache = Some((revision, generation, view.clone()));
+        Ok(view)
+    }
+
+    fn last_query_graph_view(&self) -> Option<GraphDatabase> {
+        self.query_view
+            .lock()
+            .as_ref()
+            .map(|(_, _, view)| view.clone())
+    }
+
     fn begin_bulk(&self) {
         self.bulk_depth.fetch_add(1, Ordering::AcqRel);
     }
@@ -572,6 +627,7 @@ impl GraphBackend for PetgraphBackend {
                 | Some(crate::schema::EdgeProvenance::Confirmed { .. }) => 1.0,
                 Some(crate::schema::EdgeProvenance::Heuristic { confidence, .. }) => *confidence,
                 Some(crate::schema::EdgeProvenance::Runtime { .. }) => 0.9,
+                Some(crate::schema::EdgeProvenance::Ref { .. }) => 1.0,
                 None => 0.0,
             });
             if conf < min_confidence {
@@ -846,4 +902,65 @@ pub struct ImpactPath {
 pub struct ImpactResult {
     pub paths: Vec<ImpactPath>,
     pub truncated: bool,
+}
+
+/// Lightweight query projection: embedding payloads stay in the source graph.
+pub(crate) fn query_node(node: &GraphNode) -> GraphNode {
+    GraphNode {
+        embedding: None,
+        id: node.id.clone(),
+        node_type: node.node_type.clone(),
+        name: node.name.clone(),
+        path: node.path.clone(),
+        line_start: node.line_start,
+        line_end: node.line_end,
+        signature: node.signature.clone(),
+        docstring: node.docstring.clone(),
+        fan_in: node.fan_in,
+        fan_out: node.fan_out,
+        calls_in: node.calls_in,
+        calls_out: node.calls_out,
+        anchor_score: node.anchor_score,
+        depth_from_main: node.depth_from_main,
+        co_change_count: node.co_change_count,
+        is_deprecated: node.is_deprecated,
+        label: node.label.clone(),
+        container: node.container.clone(),
+        last_lsp_sync: node.last_lsp_sync,
+        last_git_sync: node.last_git_sync,
+        commit_hash: node.commit_hash.clone(),
+        is_hydrated: node.is_hydrated,
+        repo_id: node.repo_id.clone(),
+        contract: node.contract.clone(),
+        entry: node.entry.clone(),
+    }
+}
+
+fn build_query_view<'a>(
+    nodes: impl Iterator<Item = &'a GraphNode>,
+    edges: impl Iterator<Item = &'a GraphEdge>,
+) -> Result<GraphDatabase, LainError> {
+    let graph = GraphDatabase::empty_writable();
+    let nodes: Vec<_> = nodes.map(query_node).collect();
+    let kinds: std::collections::HashMap<_, _> = nodes
+        .iter()
+        .map(|n| (n.id.clone(), n.node_type.clone()))
+        .collect();
+    graph.upsert_nodes_batch(nodes)?;
+    let mut projected = Vec::new();
+    for edge in edges {
+        projected.push(edge.clone());
+        if edge.edge_type == EdgeType::Binds
+            && kinds.get(&edge.source_id) == Some(&NodeType::HttpClientCall)
+            && kinds.get(&edge.target_id) == Some(&NodeType::HttpRoute)
+        {
+            for kind in [EdgeType::SendsHttp, EdgeType::Consumes] {
+                let mut dependency = edge.clone();
+                dependency.edge_type = kind;
+                projected.push(dependency);
+            }
+        }
+    }
+    graph.insert_edges_batch(&projected)?;
+    Ok(graph)
 }

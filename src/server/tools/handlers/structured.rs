@@ -462,17 +462,7 @@ pub async fn query_graph_output(
     ctx: &ToolContext,
     args: &Map<String, Value>,
 ) -> Result<ToolOutput, LainError> {
-    let text = super::query::query_graph_scoped(
-        &ctx.workspace,
-        &ctx.graph,
-        &ctx.embedder,
-        &ctx.embedding_cache,
-        &ctx.presence,
-        &ctx.occupancy,
-        Some(args),
-        ctx.tuning.ingestion.default_query_limit,
-        ctx.snapshot.is_some(),
-    )?;
+    let text = super::query::query_graph_context(ctx, args)?;
     let structured = serde_json::from_str(&text).map_err(LainError::Json)?;
     Ok(ToolOutput {
         text,

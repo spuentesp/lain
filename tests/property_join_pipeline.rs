@@ -88,6 +88,7 @@ fn arb_call() -> BoxedStrategy<(String, ConsumerFact)> {
                     base: None,
                 };
                 let consumer = ConsumerFact {
+                    url_defaults: None,
                     method: method.clone(),
                     url,
                     via,

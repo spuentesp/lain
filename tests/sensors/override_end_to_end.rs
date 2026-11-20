@@ -212,7 +212,11 @@ languages:
     eprintln!("DEBUG SendsHttp edges: {:?}", sends_edges);
 
     let ConsumerFact {
-        method, url, via, ..
+        url_defaults,
+        method,
+        url,
+        via,
+        ..
     } = match http_client_call
         .contract
         .first()
@@ -221,6 +225,10 @@ languages:
         ContractFact::Consumer(c) => c.clone(),
         other => panic!("expected ConsumerFact, got {other:?}"),
     };
+    assert!(
+        url_defaults.is_none(),
+        "a literal URL carries no source-default evidence"
+    );
     assert_eq!(
         method,
         lain::server::federation::contracts::model::MethodSpec::Known(HttpMethod::Get),

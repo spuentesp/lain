@@ -111,7 +111,10 @@ jobs:
   build-linux:
     needs: version-check
     if: github.event_name == 'push'
-    runs-on: ubuntu-latest
+    # Pinned, not `ubuntu-latest`: the binary links the build host's glibc,
+    # so a moving base (glibc 2.43) produced a release that would not start
+    # on Ubuntu 22.04 or 24.04. 22.04 (glibc 2.35) runs on both.
+    runs-on: ubuntu-22.04
     permissions:
       contents: write
       id-token: write
@@ -151,6 +154,18 @@ jobs:
       - name: Verify built version before publishing
         shell: bash
         run: python scripts/check-release-version.py --tag "$GITHUB_REF_NAME" --binary target/x86_64-unknown-linux-gnu/release/lain
+      - name: Verify glibc floor (must run on Ubuntu 22.04, glibc 2.35)
+        shell: bash
+        run: |
+          for bin in lain lain-git-sidecar; do
+            max=$(objdump -T "target/x86_64-unknown-linux-gnu/release/$bin" \
+              | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -V | tail -1)
+            echo "$bin needs glibc >= $max"
+            if [ "$(printf '%s\n2.35\n' "$max" | sort -V | tail -1)" != "2.35" ]; then
+              echo "::error::$bin requires glibc $max; the floor is 2.35"
+              exit 1
+            fi
+          done
       - name: Package tarball
         run: |
           mkdir -p release
@@ -193,13 +208,13 @@ jobs:
       # upstream); named `.cosign.bundle.json` to stay distinct from
       # the `.sigstore.json` provenance bundle above.
       - name: Install cosign
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
       - name: Sign release artifact (cosign keyless)
         run: |
           cosign sign-blob --yes \
             --bundle release/lain-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz.cosign.bundle.json \
             release/lain-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz
-      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+      - uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
           files: |
             release/lain-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz
@@ -283,14 +298,14 @@ jobs:
             --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
             --source-ref "$GITHUB_REF"
       - name: Install cosign
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
       - name: Sign release artifact (cosign keyless)
         shell: bash
         run: |
           cosign sign-blob --yes \
             --bundle release/lain-${{ steps.version.outputs.VERSION }}-x86_64-pc-windows-msvc.tar.gz.cosign.bundle.json \
             release/lain-${{ steps.version.outputs.VERSION }}-x86_64-pc-windows-msvc.tar.gz
-      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+      - uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
           files: |
             release/lain-${{ steps.version.outputs.VERSION }}-x86_64-pc-windows-msvc.tar.gz
@@ -339,7 +354,7 @@ jobs:
           # file. The output above contains all tarball hashes.
           rm -f lain-*-*.tar.gz.sha256
           cat SHA256SUMS
-      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+      - uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
           files: artifacts/SHA256SUMS
           fail_on_unmatched_files: true
@@ -368,7 +383,7 @@ jobs:
       # docs/METADATA.toml.
       - name: Sync server.json from METADATA.toml
         run: python scripts/sync-server-json.py --version "${{ steps.version.outputs.VERSION }}"
-      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+      - uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
           files: server.json
           fail_on_unmatched_files: true

@@ -574,6 +574,7 @@ impl QueryPlan {
                     type_filter: type_sel.as_ref().map(TypePlan::materialize),
                     label_filter: label.as_ref().map(LabelPlan::materialize),
                     name: name.as_ref().map(NamePlan::materialize),
+                    ..Default::default()
                 }),
                 OpPlan::Connect {
                     edge,

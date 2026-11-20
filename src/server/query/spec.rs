@@ -28,6 +28,9 @@ pub enum QueryMode {
 /// Main query specification
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuerySpec {
+    /// Include cardinalities after each operation.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub explain: bool,
     #[serde(default)]
     pub ops: Vec<GraphOp>,
 
@@ -48,6 +51,7 @@ impl QuerySpec {
     pub fn new(ops: Vec<GraphOp>) -> Self {
         Self {
             ops,
+            explain: false,
             mode: QueryMode::Auto,
             named: None,
             cursor: None,
@@ -690,7 +694,20 @@ impl Default for ConnectOp {
 // =============================================================================
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct FilterOp {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<PropertyPredicate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<PropertyPredicate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<PropertyPredicate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<PropertyPredicate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<PropertyPredicate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PropertyPredicate>,
     #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
     pub type_filter: Option<TypeSelector>,
 
@@ -705,12 +722,94 @@ pub struct FilterOp {
 // Group Operation
 // =============================================================================
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+/// Property comparison. Unknown operators are rejected at parse time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PropertyPredicate {
+    Equal(String),
+    Compare(PropertyComparison),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct PropertyComparison {
+    pub eq: Option<serde_json::Value>,
+    #[serde(alias = "neq")]
+    pub ne: Option<serde_json::Value>,
+    pub prefix: Option<String>,
+    pub gt: Option<f64>,
+    pub gte: Option<f64>,
+    pub lt: Option<f64>,
+    pub lte: Option<f64>,
+}
+
+impl PropertyPredicate {
+    pub fn matches(&self, value: &serde_json::Value) -> bool {
+        match self {
+            Self::Equal(want) => value.as_str() == Some(want),
+            Self::Compare(c) => {
+                c.eq.as_ref().is_none_or(|v| v == value)
+                    && c.ne.as_ref().is_none_or(|v| v != value)
+                    && c.prefix
+                        .as_ref()
+                        .is_none_or(|p| value.as_str().is_some_and(|v| v.starts_with(p)))
+                    && c.gt.is_none_or(|n| value.as_f64().is_some_and(|v| v > n))
+                    && c.gte.is_none_or(|n| value.as_f64().is_some_and(|v| v >= n))
+                    && c.lt.is_none_or(|n| value.as_f64().is_some_and(|v| v < n))
+                    && c.lte.is_none_or(|n| value.as_f64().is_some_and(|v| v <= n))
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GroupBy {
     Type,
     Label,
     Name,
+    Property(String),
+    Properties(Vec<String>),
+    PathPrefix(String),
+}
+
+impl Serialize for GroupBy {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Type => serializer.serialize_str("type"),
+            Self::Label => serializer.serialize_str("label"),
+            Self::Name => serializer.serialize_str("name"),
+            Self::Property(p) => serializer.serialize_str(p),
+            Self::Properties(p) => p.serialize(serializer),
+            Self::PathPrefix(prefix) => {
+                serde_json::json!({"path_prefix":prefix}).serialize(serializer)
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for GroupBy {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        match serde_json::Value::deserialize(deserializer)? {
+            serde_json::Value::String(p) => Ok(match p.as_str() {
+                "type" => Self::Type,
+                "label" => Self::Label,
+                "name" => Self::Name,
+                _ => Self::Property(p),
+            }),
+            serde_json::Value::Array(values) if values.len() == 2 => {
+                selector_string_list(values).map(Self::Properties)
+            }
+            serde_json::Value::Object(mut values) if values.len() == 1 => {
+                match values.remove("path_prefix") {
+                    Some(serde_json::Value::String(prefix)) => Ok(Self::PathPrefix(prefix)),
+                    _ => Err(D::Error::custom("group object expects path_prefix")),
+                }
+            }
+            _ => Err(D::Error::custom(
+                "group by expects a property, a pair of properties, or {path_prefix: string}",
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -734,6 +833,8 @@ pub enum SortField {
     Name,
     Type,
     Label,
+    #[serde(alias = "call_sites", alias = "call_sites/count")]
+    Count,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -831,6 +932,8 @@ pub enum GraphOp {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub explain: Option<Vec<QueryStep>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub nodes: Vec<GraphNodeRef>,
 
@@ -900,6 +1003,13 @@ impl From<&crate::schema::GraphNode> for GraphNodeRef {
 /// same id wherever it appears.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphEdgeRef {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<crate::schema::ReferenceUsage>,
+    /// Normalised provenance discriminator and source for graph consumers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
     pub id: String,
     #[serde(rename = "type")]
     pub edge_type: String,
@@ -921,7 +1031,29 @@ impl From<&crate::schema::GraphEdge> for GraphEdgeRef {
             Some(crate::schema::EdgeProvenance::Heuristic { confidence, .. }) => Some(*confidence),
             _ => edge.weight,
         };
+        let (kind, source) = match &edge.provenance {
+            Some(crate::schema::EdgeProvenance::Static { source }) => {
+                (Some("static".into()), Some(format!("{source:?}")))
+            }
+            Some(crate::schema::EdgeProvenance::Heuristic { detector, .. }) => {
+                (Some("heuristic".into()), Some(detector.clone()))
+            }
+            Some(crate::schema::EdgeProvenance::Runtime { trace_id, .. }) => {
+                (Some("runtime".into()), Some(trace_id.clone()))
+            }
+            Some(crate::schema::EdgeProvenance::Confirmed { source }) => {
+                (Some("confirmed".into()), Some(source.clone()))
+            }
+            Some(crate::schema::EdgeProvenance::Ref { .. }) => (Some("ref".into()), None),
+            None => (None, None),
+        };
         Self {
+            usage: match edge.provenance {
+                Some(crate::schema::EdgeProvenance::Ref { usage }) => Some(usage),
+                _ => None,
+            },
+            kind,
+            source,
             id: format!("{}->{}:{}", edge.source_id, edge.target_id, edge.edge_type),
             edge_type: edge.edge_type.to_string(),
             from: edge.source_id.clone(),
@@ -957,12 +1089,19 @@ pub struct QueryMeta {
     /// the same failure as an edge type nothing produces.
     #[serde(skip_serializing_if = "std::ops::Not::not", default)]
     pub truncated: bool,
-    /// How many nodes matched before the default cap was applied. Only
-    /// present when `truncated` is set.
+    /// Matches before an explicit limit or a truncating default cap.
+    /// For a limit after grouping, this counts groups.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub matched_before_limit: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryStep {
+    pub op: String,
+    pub nodes: usize,
+    pub edges: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

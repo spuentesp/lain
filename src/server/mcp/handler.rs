@@ -2292,6 +2292,12 @@ fn federation_blob(fed: &FederatedIndex) -> serde_json::Value {
                 "health": health.to_string(),
             });
             if let Some(repo) = fed.get_repo(&id) {
+                if let Some(error) = repo.last_index_error() {
+                    repo_json
+                        .as_object_mut()
+                        .unwrap()
+                        .insert("last_error".into(), serde_json::Value::String(error));
+                }
                 let git = repo.git();
                 let gs_json = git.health_json();
                 if !git.is_alive() {

@@ -7,8 +7,8 @@ use crate::federation::graph_backend::GraphBackend;
 use crate::federation::repo_id::GlobalId;
 use crate::schema::GraphNode;
 use crate::server::sensors::grpc_consumer_sensor::{
-    detect_rust_grpc_candidates, rust_candidate_name, RustGrpcCandidate, RustGrpcConfig,
-    RUST_RPC_PREFIX,
+    detect_rust_grpc_candidates, follow_rust_grpc_wrappers, rust_candidate_name, RustGrpcCandidate,
+    RustGrpcConfig, RUST_RPC_PREFIX,
 };
 use crate::server::sensors::util::rust_proto_snake_case;
 use serde::Serialize;
@@ -28,7 +28,7 @@ pub struct RustRpcDetail {
         Option<crate::server::sensors::grpc_consumer_sensor::semantic::SemanticRpcEvidence>,
 }
 
-/// Re-read only files that indexing marked as Rust candidate sites. The reader
+/// Re-read marked call files and indexed repository Rust definitions. The reader
 /// supplies live files or exact snapshot blobs (including pattern overrides).
 /// A missing source/config is an explicit gap, never an old identity reused.
 pub fn resolve(
@@ -50,8 +50,16 @@ pub fn resolve_with_semantics(
 ) -> Result<(Vec<GraphNode>, BTreeMap<GlobalId, RustRpcDetail>), LainError> {
     let mut markers = Vec::new();
     let mut catalog = BTreeSet::new();
+    let mut rust_paths = BTreeMap::<String, BTreeSet<String>>::new();
     let mut provider_ids = BTreeMap::<(String, String), Vec<String>>::new();
     backend.visit_nodes(&mut |node| {
+        if node.path.ends_with(".rs") {
+            let id = GlobalId::from_canonical(&node.id);
+            rust_paths
+                .entry(id.repo_id().to_string())
+                .or_default()
+                .insert(node.path.clone());
+        }
         if node.name.starts_with(RUST_RPC_PREFIX) {
             markers.push(node.clone());
         }
@@ -67,6 +75,32 @@ pub fn resolve_with_semantics(
             }
         }
     })?;
+    let mut configs = BTreeMap::new();
+    for repo in markers
+        .iter()
+        .map(|n| GlobalId::from_canonical(&n.id).repo_id().to_string())
+        .collect::<BTreeSet<_>>()
+    {
+        let result = (|| {
+            let yaml = read(&repo, ".lain/patterns/rust-grpc.yaml")?;
+            let query = read(&repo, ".lain/patterns/rust/grpc-candidate.scm")?;
+            let mut config = RustGrpcConfig::from_sources(yaml.as_deref(), query.as_deref())?;
+            let mut sources = Vec::new();
+            for path in rust_paths.get(&repo).into_iter().flatten() {
+                if let Some(source) = read(&repo, path)? {
+                    sources.push((path.clone(), source));
+                }
+            }
+            follow_rust_grpc_wrappers(&mut config, &sources)?;
+            let fingerprint = crate::server::sensors::grpc_consumer_sensor::semantic::config_hash(
+                yaml.as_deref(),
+                query.as_deref(),
+            );
+            Ok::<_, LainError>((config, fingerprint))
+        })()
+        .map_err(|e| e.to_string());
+        configs.insert(repo, result);
+    }
     let mut files = BTreeMap::new();
     for marker in &markers {
         let id = GlobalId::from_canonical(&marker.id);
@@ -75,20 +109,21 @@ pub fn resolve_with_semantics(
             continue;
         }
         let result = (|| {
-            let yaml = read(&key.0, ".lain/patterns/rust-grpc.yaml")?;
-            let query = read(&key.0, ".lain/patterns/rust/grpc-candidate.scm")?;
-            let config = RustGrpcConfig::from_sources(yaml.as_deref(), query.as_deref())?;
+            let (config, fingerprint) = configs[&key.0]
+                .as_ref()
+                .map_err(|e| LainError::Other(e.clone()))?;
             let source = read(&key.0, &key.1)?.ok_or_else(|| {
                 LainError::NotFound(format!("Rust RPC source {}:{}", key.0, key.1))
             })?;
             let mut candidates = detect_rust_grpc_candidates(&source, &key.1, &config)?;
-            let fingerprint = crate::server::sensors::grpc_consumer_sensor::semantic::config_hash(
-                yaml.as_deref(),
-                query.as_deref(),
-            );
             let semantics: Vec<_> = semantics(&key.0, &key.1)
                 .into_iter()
                 .filter(|e| e.current(&source, &fingerprint))
+                .filter(|e| {
+                    !candidates
+                        .iter()
+                        .any(|c| rust_candidate_name(c) == e.site_name && c.provenance.is_wrapper())
+                })
                 .collect();
             for evidence in &semantics {
                 candidates.retain(|c| rust_candidate_name(c) != evidence.site_name);
@@ -273,4 +308,134 @@ pub fn attach(index: &mut ContractIndex, details: BTreeMap<GlobalId, RustRpcDeta
     }
     index.unnormalized.sort();
     index.rust_rpcs = details;
+}
+
+/// Delegation evidence uses the existing provenance representation on both the
+/// graph edges and index verdicts. Operator-confirmed bindings retain priority.
+pub fn apply_wrapper_provenance(
+    out: &mut super::joiner::JoinOutput,
+    details: &BTreeMap<GlobalId, RustRpcDetail>,
+) {
+    for (id, detail) in details {
+        let Some(candidate) = &detail.candidate else {
+            continue;
+        };
+        use crate::server::sensors::grpc_consumer_sensor::RustGrpcProvenance;
+        let confidence = match candidate.provenance {
+            RustGrpcProvenance::FollowedWrapper => 1.0,
+            RustGrpcProvenance::InferredWrapper => 0.6,
+            _ => continue,
+        };
+        let provenance_for = |confidence| crate::schema::EdgeProvenance::Heuristic {
+            detector: "wrapper_followed".into(),
+            confidence,
+        };
+        for bind in out.binds.iter_mut().filter(|b| &b.consumer == id) {
+            if !matches!(
+                bind.provenance,
+                crate::schema::EdgeProvenance::Confirmed { .. }
+            ) {
+                bind.confidence = bind.confidence.min(confidence);
+                bind.provenance = provenance_for(bind.confidence);
+            }
+        }
+        for resolution in out.index.consumers.get_mut(id).into_iter().flatten() {
+            if let Some(super::index::ConsumerTarget::Binds {
+                provenance: p,
+                confidence: c,
+                ..
+            }) = &mut resolution.target
+            {
+                if !matches!(p, crate::schema::EdgeProvenance::Confirmed { .. }) {
+                    *c = c.min(confidence);
+                    *p = provenance_for(*c);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod provenance_regressions {
+    use super::*;
+    #[test]
+    fn wrapper_provenance_does_not_depend_on_display_descriptions() {
+        let source = "struct Cached { inner: api::orders_client::OrdersClient<Channel> } impl Cached { fn draft(&mut self) { self.inner.get(req); } } fn send(c: Cached) { c.draft(); }";
+        let config = RustGrpcConfig::from_sources(None, None).unwrap();
+        let mut candidate = detect_rust_grpc_candidates(source, "src/client.rs", &config)
+            .unwrap()
+            .into_iter()
+            .find(|c| c.enclosing_name.as_deref() == Some("send"))
+            .unwrap();
+        for evidence in &mut candidate.evidence {
+            evidence.description = "display text changed".into();
+        }
+        let id = GlobalId::from_canonical("client:Function:src/client.rs:send:1");
+        let key = ContractKey::Rpc {
+            system: RpcSystem::Grpc,
+            service: "Orders".into(),
+            method: "Get".into(),
+        };
+        let mut out = super::super::joiner::JoinOutput::default();
+        out.binds.push(super::super::joiner::BindsEdge {
+            consumer: id.clone(),
+            provider: GlobalId::from_canonical("api:Function:src/server.rs:get:1"),
+            consumer_service: super::super::model::ServiceName("client".into()),
+            provider_service: super::super::model::ServiceName("api".into()),
+            target_endpoint: (super::super::model::ServiceName("api".into()), key),
+            provenance: crate::schema::EdgeProvenance::Static {
+                source: crate::schema::StaticSource::TreeSitter,
+            },
+            confidence: 1.0,
+            route_match: crate::schema::RouteMatch::Exact,
+            stripped_prefix: None,
+        });
+        out.index.consumers.insert(
+            id.clone(),
+            vec![super::super::index::ConsumerResolution {
+                call_id: id.clone(),
+                service: super::super::model::ServiceName("client".into()),
+                target: Some(super::super::index::ConsumerTarget::Binds {
+                    provenance: crate::schema::EdgeProvenance::Static {
+                        source: crate::schema::StaticSource::TreeSitter,
+                    },
+                    confidence: 0.3,
+                    route_match: crate::schema::RouteMatch::Exact,
+                    stripped_prefix: None,
+                }),
+                bound_endpoints: vec![],
+                reads_complete: true,
+            }],
+        );
+        let details = BTreeMap::from([(
+            id.clone(),
+            RustRpcDetail {
+                status: "resolved".into(),
+                candidate: Some(candidate),
+                contract_key: None,
+                compatible_keys: vec![],
+                enclosing_symbol: None,
+                error: None,
+                provider_ids: vec![],
+                identity_rule: None,
+                semantic: None,
+            },
+        )]);
+        apply_wrapper_provenance(&mut out, &details);
+        assert!(
+            matches!(&out.binds[0].provenance, crate::schema::EdgeProvenance::Heuristic { detector, confidence } if detector == "wrapper_followed" && *confidence == 1.0)
+        );
+        assert!(matches!(&out.index.consumer(&id).unwrap().target,
+            Some(super::super::index::ConsumerTarget::Binds {
+                confidence: retained,
+                provenance: crate::schema::EdgeProvenance::Heuristic { confidence: recorded, .. }, ..
+            }) if *retained == 0.3 && retained == recorded));
+        out.binds[0].confidence = 0.3;
+        apply_wrapper_provenance(&mut out, &details);
+        assert!(
+            matches!(&out.binds[0].provenance,
+            crate::schema::EdgeProvenance::Heuristic { confidence, .. } if *confidence == out.binds[0].confidence),
+            "wrapper evidence must record the retained lower confidence"
+        );
+    }
 }

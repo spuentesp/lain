@@ -120,6 +120,7 @@ fn federation_config(root: &Path) -> FederationConfig {
     for id in FIXTURE_REPOS {
         repos.push(RepoConfig {
             packages: Vec::new(),
+            index_timeout_secs: None,
             id: id.to_string(),
             source: SourceConfig::WorkspaceDir {
                 path: root.join(id),

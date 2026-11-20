@@ -331,7 +331,7 @@ Two fields exist so an agent can tell whether to trust the answer:
 | `LAIN_PARENT_AGENT_ID` | (none) | Subagent inheritance |
 | `LAIN_AGENT_NAME` | (none) | Override agent name |
 | `LAIN_REQUIRE_STARTUP_CACHE` | (unset) | Prepared-cache-only launch: refuse to start without a validated startup cache |
-| `LAIN_INDEX_TIMEOUT` | (built-in) | Cap on one workspace's index pass |
+| `LAIN_INDEX_TIMEOUT` | (scaled) | Seconds one repo's index pass may take. Unset, the budget is 60 s plus 1 s per ten files, capped at 30 min. `repos[].index_timeout_secs` overrides it per repo and wins over this variable |
 | `LAIN_MCP_NO_SHARE` | (unset) | `lain mcp`: never attach to a shared daemon; serve privately |
 | `LAIN_ONESHOT_NO_SHARE` | (unset) | `lain oneshot`: same, for the one-shot path |
 | `LAIN_MODEL_DIR` | (platform default) | Where the embedding model is installed/looked up |

@@ -751,6 +751,12 @@ mod start_race_tests {
                             Ok((stream, _)) => {
                                 let methods = Arc::clone(&methods);
                                 let identity = Arc::clone(&identity);
+                                // The listener is non-blocking so the accept loop
+                                // can see `stop`; macOS/BSD hand that mode to every
+                                // accepted socket (Linux does not), so `read_line`
+                                // would return `WouldBlock` before the client's
+                                // request arrived and the connection was dropped.
+                                stream.set_nonblocking(false).unwrap();
                                 std::thread::spawn(move || {
                                     let mut writer = stream.try_clone().unwrap();
                                     let mut reader = BufReader::new(stream);

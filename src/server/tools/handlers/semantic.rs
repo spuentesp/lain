@@ -823,6 +823,7 @@ fn node_type_label(nt: &NodeType) -> &'static str {
         // shape as the existing contract-federation labels.
         NodeType::Table => "table",
         NodeType::Column => "column",
+        NodeType::ServiceRef => "service-ref",
     }
 }
 
