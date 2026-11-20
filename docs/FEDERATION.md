@@ -387,9 +387,11 @@ The format is versioned precisely because it changes: additive node and
 edge types fold into the current version so old graphs keep loading, but
 a version bump means the on-disk shape changed and an existing graph is
 refused with `FederationSchemaMismatch` until `lain reindex` rebuilds it.
-`FEDERATION_GRAPH_VERSION` is **5** as of v0.15.0 — the ORM
-model/table/column relations advanced it from 4 — so a federation graph
-written by v0.14.0 or earlier needs one `lain reindex` on upgrade. The
+`FEDERATION_GRAPH_VERSION` is **7** as of v0.16.0. Version 5 (v0.15.0)
+added the ORM model/table/column relations; versions 6 and 7 added
+persisted service-reference (`ref`) edges and the new edge provenance, so
+a federation graph written by v0.15.0 or earlier needs one
+`lain reindex` on upgrade. The
 previous bump (3 → 4) shipped in v0.11.0; see `CHANGELOG.md` for the
 full history.
 
@@ -435,7 +437,10 @@ entries have different ids and `diff_contracts` distinguishes them.
 Every analysis result carries a `Scope` (§9.6) listing the
 `reviewed` and `unreviewed` repos. A `NoKnownImpact` verdict
 without an `unreviewed` list claiming the change is safe is the
-default; reports name every repo that could not be reviewed.
+default; reports name every repo that could not be reviewed. A repo that
+failed to index appears with `reason: "failed"`, its `error`, and a
+`cause` (`index_timeout` or `index_error`) so the caller can tell a budget
+that needs raising (`repos[].index_timeout_secs`) from a real failure.
 An unresolved consumer in a reviewed repo is a concrete lead, so
 it makes the change `NeedsInvestigation` instead of being listed
 in the scope.
@@ -463,6 +468,25 @@ The 13 tools (`list_services`, `get_service`, `prepare_snapshot`,
 and HTTP for the same view), §10.5 paging/limits, and the §13 error
 codes. See
 [`docs/quickstart-tools.md`](quickstart-tools.md) for a walkthrough.
+
+What the contract tools report, as of v0.16.0:
+
+- `list_services` / `get_service` — each service carries `repo_path`, the
+  absolute checkout path of its repo.
+- `list_contracts` / `get_contract` — a GraphQL contract carries `has_schema`
+  and its SDL schema; HTTP, topic and table contracts have none.
+- `get_coverage` on `live` — a per-repo ledger (sensors, languages, skips,
+  unresolved records) for every repo, taken from the last indexing pass and
+  kept across warm restarts. It no longer answers "ledger unavailable for
+  live view". Records of one reason are merged into one row. Dynamic SQL, ORM
+  queries and unclassified frontend values in test or fixture files are not
+  counted.
+- `list_unresolved` — reasons include `not_a_call` (an unmatched site in a
+  test or fixture file, or a fake host such as `ws.example.com`; not a
+  blind spot), `env_unmapped` (an env var no service declares),
+  `dynamic_target` and `rpc_stub_unknown`.
+- Same-service calls resolve `Internal`. They are not unresolved and are not
+  counted as bound consumers, which are cross-service.
 
 ---
 

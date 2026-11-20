@@ -37,6 +37,20 @@ pinned NVIDIA example and reproducible exact-SHA retrieval. No NVIDIA-specific
 names are built into the detector. The mapping is user-supplied evidence and
 must be maintained when dependency revisions change.
 
+## Wrappers
+
+A wrapper type defined in the repository (`CachedOpenShellClient` around the
+generated `OpenShellClient`) is followed automatically: a method whose body
+makes exactly one generated call maps to that RPC (`poll_settings` ->
+`get_sandbox_config`), and callers of the wrapper resolve to it. Calls on
+the wrapper type itself inside such a body (`self.workspace()`) do not count
+as a second RPC, `x.clone().rpc()` keeps `x`'s type, and an unmapped call on
+a locally defined wrapper type is ordinary code, not an RPC stub. A file the
+bundled grammar cannot parse (for example `#[cfg(..)]` on a field of a
+destructuring pattern) is retried with attributes blanked at the same byte
+offsets and used only if that parses cleanly. Explicit `wrappers` entries
+still win.
+
 This is syntactic candidate discovery, not semantic binding or complete RPC
 coverage. It does not traverse external crates, resolve glob imports, trace
 closures/general wrappers, infer destination dataflow, normalize protobuf

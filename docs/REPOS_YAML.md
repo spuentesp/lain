@@ -94,6 +94,22 @@ repos:
       url: https://github.com/NVIDIA/OpenShell.git
 ```
 
+**`index_timeout_secs`** (optional integer) — the wall-clock budget, in
+seconds, for one indexing pass of this repo. Without it the budget is
+`LAIN_INDEX_TIMEOUT` when set, otherwise 60 s plus one second per ten
+files (capped at 30 minutes), so large repositories are not failed on a
+clean scan. A repo that exceeds its budget goes `degraded` and says why:
+`/health` carries `last_error`, `get_coverage` carries `error`, and the
+scope's `unreviewed` entry carries `cause: "index_timeout"` and the
+message, which names this key.
+
+```yaml
+repos:
+  - id: nemoclaw
+    index_timeout_secs: 900
+    source: { type: workspace_dir, path: ./NemoClaw }
+```
+
 The package name is what a consumer's manifest mentions. Declaring it
 makes a cross-repo link intentional instead of accidental: the hyphen
 in `openshell-sdk` defeats a bare `openshell` match, and a directory

@@ -167,6 +167,11 @@ Without a `limit` op, the executor preserves an explicit `sort` order
 caps the answer at `tuning.ingestion.default_query_limit` (default 100),
 and reports the trim in `meta.truncated` / `meta.matched_before_limit`.
 
+Federated views see the contract join: `Binds` edges connect a consumer to
+its bound provider, so a query can cross services. An unknown filter key is
+an error that names the accepted keys, not a silent no-op. `"explain": true`
+on the query adds `query.explain`, the node and edge counts after each op.
+
 ---
 
 ## Named Queries
