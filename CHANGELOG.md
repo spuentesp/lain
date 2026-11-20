@@ -5,6 +5,14 @@ All notable changes to LAIN are documented here. Versions follow
 
 ## Unreleased
 
+- **Startup no longer warns about, or degrades a repo for, a projection that raced a re-index.**
+  A `Not found: Source/Target node ... not found` while projecting edges means
+  the graph changed between projecting nodes and edges. It was logged at `WARN`
+  and, at startup, marked the repo `degraded` until the next tick repaired it.
+  The repo is now queued for another projection and nothing is reported; any
+  other projection error still warns and degrades as before. The per-edge
+  `cross-repo target ... not yet projected; upserting placeholder` line, an
+  expected step, is now `debug`.
 - **Blind-spot counts stop counting things that are not blind spots.**
   - The Rust gRPC sensor recorded one `RpcStubUnknown` for the whole repository
     whose count was the number of `.rs` files (774 for OpenShell). It now counts

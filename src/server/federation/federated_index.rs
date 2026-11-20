@@ -938,6 +938,24 @@ impl FederatedIndex {
     ///    projection from the current node set, so a node
     ///    disappearing (or losing a match) must retract the edge the
     ///    next time that repo's `project_edges` runs. Reconciled.
+    /// Whether `error` is a projection racing a concurrent re-index: an edge
+    /// names a node the projected node set no longer (or does not yet) holds.
+    /// That repairs itself on the next projection, so the repo is queued for
+    /// one and the caller must not report a failure or mark it degraded.
+    pub fn defer_projection_race(&self, id: &RepoId, error: &LainError) -> bool {
+        let LainError::NotFound(message) = error else {
+            return false;
+        };
+        if !(message.contains("node") && message.contains("not found")) {
+            return false;
+        }
+        tracing::debug!("[federation] projection of {id} raced a re-index ({message}); will project again");
+        if let Some(repo) = self.get_repo(id) {
+            repo.mark_projection_stale();
+        }
+        true
+    }
+
     pub async fn project_edges(&self, id: &RepoId) -> Result<(), LainError> {
         let repo = self
             .get_repo(id)
@@ -1004,7 +1022,9 @@ impl FederatedIndex {
                             continue;
                         };
                         let kind = parse_node_type(kind_str);
-                        tracing::warn!(
+                        // Expected whenever the owning repo has not projected yet;
+                        // its own projection overwrites the placeholder.
+                        tracing::debug!(
                             "[federation] {:?}: cross-repo target {} not yet projected; upserting placeholder (owning repo's projection will overwrite when it runs)",
                             id.as_str(),
                             gid.as_str(),
@@ -1480,17 +1500,24 @@ impl FederatedIndex {
         // Never let task completion order choose which cross-repo edges exist.
         for (id, _) in self.list_repos() {
             if let Err(error) = self.project_nodes(&id).await {
-                tracing::warn!("node projection failed for {id}: {error}");
-                if let Some(repo) = self.get_repo(&id) {
-                    repo.set_health(RepoHealth::Degraded);
+                if !self.defer_projection_race(&id, &error) {
+                    tracing::warn!("node projection failed for {id}: {error}");
+                    if let Some(repo) = self.get_repo(&id) {
+                        repo.set_health(RepoHealth::Degraded);
+                    }
                 }
             }
         }
         for (id, _) in self.list_repos() {
             if let Err(error) = self.project_edges(&id).await {
-                tracing::warn!("edge projection failed for {id}: {error}");
-                if let Some(repo) = self.get_repo(&id) {
-                    repo.set_health(RepoHealth::Degraded);
+                if self.defer_projection_race(&id, &error) {
+                    // The graph moved between projecting nodes and edges: not a
+                    // failure. The repo is queued for another projection.
+                } else {
+                    tracing::warn!("edge projection failed for {id}: {error}");
+                    if let Some(repo) = self.get_repo(&id) {
+                        repo.set_health(RepoHealth::Degraded);
+                    }
                 }
             }
             self.refresh_service_refs(&id);

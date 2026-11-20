@@ -1051,6 +1051,12 @@ impl RepoIndex {
             .set_hold(hold, || self.last_indexed() != SystemTime::UNIX_EPOCH);
     }
 
+    /// Ask the federation to project this repo again on its next tick.
+    pub fn mark_projection_stale(&self) {
+        self.projection_stale
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// Whether the graph changed since the federation last projected it;
     /// clears the flag.
     pub fn take_projection_stale(&self) -> bool {
