@@ -482,6 +482,10 @@ fn spawn_fake_daemon(
         while !stop.load(Ordering::SeqCst) {
             match listener.accept() {
                 Ok((stream, _)) => {
+                    // The listener is non-blocking; macOS/BSD pass that mode to
+                    // the accepted socket (Linux does not), which would make the
+                    // read time out as `WouldBlock` before the request arrives.
+                    stream.set_nonblocking(false).unwrap();
                     let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
                     let mut writer = stream.try_clone().unwrap();
                     let mut reader = BufReader::new(stream);
