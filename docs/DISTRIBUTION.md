@@ -5,14 +5,25 @@ package. Run this in order when cutting a release tag. The checks preserve
 lessons from the 2026-09-16 incident, when npm `latest` contained the old
 launcher and the matching GitHub release had no `SHA256SUMS` asset.
 
-## Linux glibc floor
+## Linux floor: Ubuntu 24.04
 
-The Linux binaries link the glibc of the machine that builds them, so
-`release.yml::build-linux` runs on `ubuntu-22.04` (glibc 2.35), not
-`ubuntu-latest`. A release built on a newer image would not start on
-Ubuntu 22.04 or 24.04. The job also fails the release if `lain` or
-`lain-git-sidecar` needs a glibc newer than 2.35 (`objdump -T`), so a
-runner change cannot ship that silently.
+The Linux binaries link the glibc and libstdc++ of the machine that builds
+them, so `release.yml::build-linux` runs on `ubuntu-24.04` (glibc 2.39), not
+`ubuntu-latest`. A release built on a moving newest image needs a glibc that
+no supported Ubuntu ships (the v0.15.0 binary needed 2.43).
+
+**The released Linux binary needs Ubuntu 24.04 or newer** (glibc 2.39,
+libstdc++ `GLIBCXX_3.4.31`; measured on the v0.16.0 build). It does not start
+on Ubuntu 22.04: `GLIBCXX_3.4.31 not found`. 22.04 cannot be the build host
+either: the bundled ONNX Runtime (`ort`) is a prebuilt static library that
+references glibc 2.38 symbols and gcc 13's libstdc++, so the link fails
+(`undefined symbol: __isoc23_strtol`). There is no tested route for 22.04
+yet; the candidate is building `ort` with its `load-dynamic` feature (the
+runtime library loaded at run time instead of linked in), which is not done.
+
+The job fails the release if `lain` or `lain-git-sidecar` needs glibc newer
+than 2.39 or `GLIBCXX` newer than 3.4.33 (`objdump -T`), so a runner or
+toolchain change cannot ship an unrunnable binary silently.
 
 ## Windows clean-room install
 

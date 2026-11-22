@@ -114,7 +114,7 @@ OpenShell cluster and the NVIDIA NeMo Agent Toolkit cluster) and by tests.
 | 1 | `query_graph` sees federation bindings, counts, strict filters | Done: `Binds` edges, `group`, `explain`, unknown keys rejected |
 | 2 | GraphQL contract schemas | Done: 449 of 449 Saleor GraphQL contracts have one. HTTP, topic and table contracts have none |
 | 3 | Per-repo ledger on the live view | Done |
-| 4 | Linux binary needs glibc 2.43 | Done in `release.yml` (builds on 22.04, floor check); proven only by a release run |
+| 4 | Linux binary needs glibc 2.43 | Partly: builds on `ubuntu-24.04` with a glibc/libstdc++ ceiling check (proven by a probe build that ran on 24.04 and failed on 22.04). **22.04 is not supported**: the prebuilt ONNX Runtime needs glibc 2.38 symbols; the route is `ort` `load-dynamic` (not done) |
 | 5 | A timed-out repo reports `error: null` | Done: the reason is in `/health`, `get_coverage` and the scope |
 | 6 | 60 s index budget too tight | Done: scales with repo size; `repos[].index_timeout_secs` overrides |
 | 7 | Rust wrapper gRPC not followed | Done on real OpenShell code (three causes fixed). Same-service calls resolve `Internal`, so OpenShell's own `bound_consumers` stays 0 |
