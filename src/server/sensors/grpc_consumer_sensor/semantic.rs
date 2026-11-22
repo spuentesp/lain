@@ -7,7 +7,7 @@ use crate::error::LainError;
 use crate::graph::GraphDatabase;
 use crate::lsp::{LspPool, ReferenceLocation};
 use crate::schema::RepoNamespace;
-use crate::server::sensors::util::{language_for, parse_for_lang, Lang};
+use crate::server::sensors::util::{parse_for_lang, Lang};
 use regex::Regex;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -89,17 +89,37 @@ fn ancestor<'a>(mut n: Node<'a>, kind: &str) -> Option<Node<'a>> {
 /// All syntactic method sites are probes, including closure receivers that the
 /// conservative syntax detector cannot type. LSP must supply concrete identity.
 pub fn probes(source: &str, path: &str, config: &RustGrpcConfig) -> Vec<RustGrpcCandidate> {
+    if let Some(cached) = config.cached_probes(source, path) {
+        return cached;
+    }
     let Some(tree) = parse_for_lang(Lang::Rust, source) else {
         return vec![];
     };
+    let mapped_sites = super::detect_rust_grpc_candidates(source, path, config)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|c| c.provenance.is_wrapper())
+        .map(|c| c.site.start_byte)
+        .collect();
+    let Ok(query) = super::rust::candidate_query(&config.query) else {
+        return vec![];
+    };
+    probes_with_tree(source, path, config, &tree, &query, &mapped_sites)
+}
+
+pub(super) fn probes_with_tree(
+    source: &str,
+    path: &str,
+    config: &RustGrpcConfig,
+    tree: &tree_sitter::Tree,
+    query: &Query,
+    mapped_sites: &std::collections::HashSet<usize>,
+) -> Vec<RustGrpcCandidate> {
     if tree.root_node().has_error() {
         return vec![];
     }
-    let Ok(query) = Query::new(&language_for(Lang::Rust), &config.query) else {
-        return vec![];
-    };
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
+    let mut matches = cursor.matches(query, tree.root_node(), source.as_bytes());
     let mut out = Vec::new();
     while let Some(m) = matches.next() {
         let capture = |name| {
@@ -114,11 +134,14 @@ pub fn probes(source: &str, path: &str, config: &RustGrpcConfig) -> Vec<RustGrpc
             continue;
         };
         let text = &source[method.byte_range()];
-        if config.deny_methods.iter().any(|s| s == text) {
+        if config.deny_methods.iter().any(|s| s == text)
+            || mapped_sites.contains(&method.start_byte())
+        {
             continue;
         }
         let function = ancestor(call, "function_item");
         out.push(RustGrpcCandidate {
+            provenance: super::RustGrpcProvenance::Generated,
             method: text.into(),
             receiver: source[receiver.byte_range()].into(),
             generated_type: String::new(),
@@ -227,19 +250,23 @@ pub async fn enrich(
     // Replace, never append. A cancelled/unavailable pass cannot reuse an old
     // type answer. The bounded cache is never written to graph persistence.
     graph.clear_rust_rpc_semantics();
-    let config = RustGrpcConfig::load(root)?;
+    let mut config = RustGrpcConfig::load(root)?;
     let yaml = std::fs::read_to_string(root.join(".lain/patterns/rust-grpc.yaml")).ok();
     let query = std::fs::read_to_string(root.join(".lain/patterns/rust/grpc-candidate.scm")).ok();
     let config_hash = config_hash(yaml.as_deref(), query.as_deref());
+    let sources: Vec<_> = crate::server::sensors::util::scan_files(root, |p| {
+        (p.extension()?.to_str()? == "rs").then(|| "rs".to_string())
+    })
+    .map(|(path, source, _)| (crate::graph::graph_path(root, &path), source))
+    .collect();
+    super::follow_rust_grpc_wrappers(&mut config, &sources)?;
     let start = Instant::now();
     let mut remaining = MAX_PROBES;
-    for (path, source, _) in crate::server::sensors::util::scan_files(root, |p| {
-        (p.extension()?.to_str()? == "rs").then(|| "rs".to_string())
-    }) {
+    for (relative, source) in sources {
         if remaining == 0 || start.elapsed() >= PASS_BUDGET || cancel.is_cancelled() {
             break;
         }
-        let relative = crate::graph::graph_path(root, &path);
+        let path = root.join(&relative);
         let mux = pool.next();
         let mut evidence = Vec::new();
         for probe in probes(&source, &relative, &config) {

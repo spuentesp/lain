@@ -3,7 +3,7 @@ members = ["."]
 
 [package]
 name = "lain"
-version = "0.15.0"
+version = "0.16.0"
 edition = "2021"
 description = "Lain - Structural code intelligence for AI agents"
 authors = ["spuentesp"]
@@ -37,7 +37,7 @@ async-trait = "0.1"
 git2 = "0.21"
 
 # File watching
-notify = "6"
+notify = "8"
 
 # In-memory graph for volatile overlay
 petgraph = { version = "0.6", features = ["serde-1"] }
@@ -112,7 +112,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 # Bounded LRU cache for the embedding hot path (B1). Pure data-structure
 # crate, no I/O or network transitive deps — same shape as `dashmap`
 # above, which is already vendored-class common in this repo.
-lru = "0.12"
+lru = "0.19"
 
 # Tree-sitter static analysis
 tree-sitter = "0.25"

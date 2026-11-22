@@ -521,12 +521,16 @@ async fn index_federation(fed: Arc<FederatedIndex>) {
         };
         for id in &stale {
             if let Err(error) = fed.project_nodes(id).await {
-                tracing::warn!("lain server: node projection for '{id}' failed: {error}");
+                if !fed.defer_projection_race(id, &error) {
+                    tracing::warn!("lain server: node projection for '{id}' failed: {error}");
+                }
             }
         }
         for id in &stale {
             if let Err(error) = fed.project_edges(id).await {
-                tracing::warn!("lain server: edge projection for '{id}' failed: {error}");
+                if !fed.defer_projection_race(id, &error) {
+                    tracing::warn!("lain server: edge projection for '{id}' failed: {error}");
+                }
             }
             fed.refresh_service_refs(id);
         }

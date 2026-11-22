@@ -882,6 +882,13 @@ pub fn git_sensor_busy_error() -> LainError {
     )
 }
 
+/// Whether `error` is [`git_sensor_busy_error`]: another thread holds the
+/// sensor right now. It says nothing about the repository, so a caller that
+/// can wait should retry instead of giving up.
+pub fn is_git_sensor_busy(error: &LainError) -> bool {
+    matches!(error, LainError::Other(m) if m.starts_with("GitSensor mutex held by another thread"))
+}
+
 #[cfg(test)]
 pub(crate) mod sidecar_binary_helpers {
     use std::path::{Path, PathBuf};

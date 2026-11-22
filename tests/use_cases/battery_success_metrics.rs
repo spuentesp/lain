@@ -527,16 +527,11 @@ fn graph_database_anchor_score_normalized_to_100() {
 
 #[test]
 fn lain_version_output_contains_lain_and_version() {
-    // Run the just-built lain binary directly. cargo test runs in
-    // target/debug/ so the binary is alongside the test binary.
-    let exe = std::env::current_exe().expect("current_exe");
-    // exe is target/debug/deps/<testname>-<hash>; lain is in target/debug/lain.
-    let lain = exe
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join(format!("lain{}", std::env::consts::EXE_SUFFIX));
+    // Run the binary cargo built for this test run. `CARGO_BIN_EXE_lain` is the
+    // exact path in every build-directory layout; deriving it from the test
+    // executable's location broke when cargo moved test executables under
+    // `target/debug/build/<pkg>/<hash>/out`.
+    let lain = std::path::PathBuf::from(env!("CARGO_BIN_EXE_lain"));
     if !lain.exists() {
         panic!(
             "lain binary not found at {:?}; build with `cargo build --bin lain` first",

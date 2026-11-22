@@ -7,6 +7,7 @@
 //! The `project_repo` / cross-repo matching path is exercised end-to-end via
 //! `add_repo` + `backend().upsert_node_global(...)` plus `resolve_symbol` —
 //! the matching path is its own concern in `matching_tests.rs`.
+use crate::error::LainError;
 use crate::federation::federated_index::FederatedIndex;
 use crate::federation::graph_backend::{GraphBackend, PetgraphBackend};
 use crate::federation::repo_id::RepoId;
@@ -1389,4 +1390,33 @@ async fn projecting_a_repo_records_its_service_references() {
         ))
     );
     assert!(refs[0].self_reference == false);
+}
+
+#[tokio::test]
+async fn projection_racing_a_reindex_is_deferred_not_failed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fed = FederatedIndex::new(petgraph_backend(&tmp));
+    let src_dir = tempfile::tempdir().unwrap();
+    git2::Repository::init(src_dir.path()).unwrap();
+    let id = RepoId::new("repo-a").unwrap();
+    let src: Box<dyn crate::federation::repo_source::RepoSource> =
+        Box::new(WorkspaceDirSource::new(id.clone(), src_dir.path().to_path_buf()).unwrap());
+    fed.add_repo(src, tmp.path()).await.unwrap();
+    let repo = fed.get_repo(&id).unwrap();
+    assert!(!repo.take_projection_stale());
+
+    // An edge naming a node the projection does not hold: queue another pass.
+    let race = LainError::NotFound("Source node repo-a:Schema:p.proto:Draft:3 not found".into());
+    assert!(fed.defer_projection_race(&id, &race));
+    assert!(
+        repo.take_projection_stale(),
+        "the repo must be queued again"
+    );
+
+    // Real failures are not swallowed and do not queue a retry.
+    let other = LainError::NotFound("repo missing".into());
+    assert!(!fed.defer_projection_race(&id, &other));
+    let io = LainError::Io("disk full".into());
+    assert!(!fed.defer_projection_race(&id, &io));
+    assert!(!repo.take_projection_stale());
 }

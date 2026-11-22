@@ -1,4 +1,4 @@
-//! Rust identity is proved against providers across repos; destinations stay unknown.
+//! Rust identity is proved against providers across repos and unique proto owners bind.
 use lain::federation::{
     config::{FederationConfig, RepoConfig, SourceConfig},
     contracts::{
@@ -12,7 +12,7 @@ use lain::federation::{
         },
     },
     federated_index::FederatedIndex,
-    graph_backend::PetgraphBackend,
+    graph_backend::{GraphBackend, PetgraphBackend},
     repo_id::RepoId,
     repo_source::{RepoSource, WorkspaceDirSource},
 };
@@ -197,6 +197,7 @@ impl Fixture {
                 .map(|name| RepoConfig {
                     id: name.into(),
                     packages: vec![],
+                    index_timeout_secs: None,
                     source: SourceConfig::WorkspaceDir {
                         path: self.root.join(name),
                     },
@@ -305,7 +306,7 @@ fn validate_unresolved(value: &Value) {
 }
 
 #[tokio::test]
-async fn pinned_cross_repo_identities_are_actionable_without_inventing_destination() {
+async fn pinned_cross_repo_identities_bind_unique_proto_owners() {
     let fixture = Fixture::new();
     let fed = fixture.live().await;
     let index = fed.contract_index().unwrap();
@@ -330,18 +331,18 @@ async fn pinned_cross_repo_identities_are_actionable_without_inventing_destinati
     )
     .await;
     validate_unresolved(&result);
-    let items = rust_items(&result);
-    assert_eq!(items.len(), 2);
-    for item in &items {
-        assert_eq!(item["reason"], "rpc_stub_unknown");
-        assert_eq!(item["target_service"], Value::Null);
-        assert_eq!(item["rpc"]["status"], "resolved");
-        assert_eq!(item["consumer"]["path"], RUST_PATH);
-        assert!(item["consumer"]["line"] == 46 || item["consumer"]["line"] == 69);
-        assert_eq!(item["candidates"].as_array().unwrap().len(), 1);
-        assert_eq!(item["candidates"][0]["endpoint"]["service"], "gateway");
-        let key = item["rpc"]["contract_key"].as_str().unwrap();
-        let consumer = item["consumer"]["id"].as_str().unwrap();
+    assert!(
+        rust_items(&result).is_empty(),
+        "hostless calls bind by proto"
+    );
+    for (consumer_id, detail) in &index.rust_rpcs {
+        assert_eq!(detail.status, "resolved");
+        assert_eq!(consumer_id.path().as_deref(), Some(RUST_PATH));
+        let key = detail.contract_key.as_deref().unwrap();
+        let consumer = consumer_id.as_str();
+        let resolution = index.consumer(consumer_id).unwrap();
+        assert_eq!(resolution.bound_endpoints.len(), 1);
+        assert_eq!(resolution.bound_endpoints[0].0 .0, "gateway");
         let valid = call(
             Some(&fed),
             None,
@@ -427,14 +428,15 @@ async fn snapshot_rebuilds_from_pinned_blobs_and_missing_evidence_is_incomplete(
     )
     .await;
     validate_unresolved(&result);
-    assert_eq!(rust_items(&result).len(), 2, "{result}");
+    assert!(rust_items(&result).is_empty(), "{result}");
     let record = mgr.get(&snapshot, 5000).await.unwrap().record;
     let (snap, _hold) = mgr.from_snapshot(&record).unwrap();
-    assert_identities(snap.contract_index.read().as_ref().unwrap());
-    let item = rust_items(&result).remove(0);
-    let valid = call(None, Some(&mgr), "check_binding", json!({"snapshot": snapshot,"consumer":item["consumer"]["id"],"endpoint":item["candidates"][0]["endpoint"]})).await;
+    let snapshot_index = snap.contract_index.read().as_ref().unwrap().clone();
+    assert_identities(&snapshot_index);
+    let (consumer_id, detail) = snapshot_index.rust_rpcs.iter().next().unwrap();
+    let valid = call(None, Some(&mgr), "check_binding", json!({"snapshot": snapshot,"consumer":consumer_id.as_str(),"endpoint":{"service":"gateway","key":detail.contract_key}})).await;
     assert_eq!(valid["data"]["valid"], true);
-    let line = item["consumer"]["line"].as_u64().unwrap();
+    let line = detail.candidate.as_ref().unwrap().site.line as u64;
     let source = call(
         None,
         Some(&mgr),
@@ -691,19 +693,16 @@ async fn inferred_rpc_confirmation_persists_and_rebuilds_without_lsp() {
     let initial_hash = fixture.config.config_hash();
     let manager = fixture.manager();
     let old_snapshot = fixture.snapshot(&manager).await;
-    let unresolved = call(
-        Some(&fed),
-        None,
-        "list_unresolved",
-        json!({"snapshot": "live"}),
-    )
-    .await;
-    let item = rust_items(&unresolved)
-        .into_iter()
-        .find(|i| i["rpc"]["contract_key"] == KEY_CREATE)
-        .unwrap();
-    assert_eq!(item["reason"], "rpc_stub_unknown");
-    let consumer = item["consumer"]["id"].as_str().unwrap().to_string();
+    let consumer = fed
+        .contract_index()
+        .unwrap()
+        .rust_rpcs
+        .iter()
+        .find(|(_, detail)| detail.contract_key.as_deref() == Some(KEY_CREATE))
+        .unwrap()
+        .0
+        .as_str()
+        .to_string();
     let enclosing = fed
         .contract_index()
         .unwrap()
@@ -800,14 +799,16 @@ async fn inferred_rpc_confirmation_persists_and_rebuilds_without_lsp() {
         }),
     )
     .await;
-    assert!(
-        old_contract["data"]["items"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .flat_map(|i| i["consumers"].as_array().unwrap())
-            .all(|c| c["site"]["id"] != consumer),
-        "old snapshot acquired a live binding: {old_contract}"
+    let old_bound = old_contract["data"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|i| i["consumers"].as_array().unwrap())
+        .find(|c| c["site"]["id"] == consumer)
+        .unwrap();
+    assert_eq!(
+        old_bound["binding"]["kind"], "static",
+        "old snapshot acquired a live confirmation: {old_contract}"
     );
     fixture.config = persisted;
     let snapshot = fixture.snapshot(&manager).await;
@@ -868,4 +869,289 @@ async fn assert_rpc_confirmation(
             .any(|h| h["node"] == enclosing && h["edge"] == "Calls"),
         "{impact}"
     );
+}
+
+#[tokio::test]
+async fn root_routes_never_validate_an_external_http_call() {
+    let mut fixture = Fixture::new();
+    fixture
+        .config
+        .provides
+        .push(lain::federation::contracts::config::ProviderDecl {
+            service: "gateway".into(),
+            key: "http:ANY /".into(),
+            source: None,
+        });
+    write(
+        &fixture.root.join("openshell"),
+        "crates/openshell-sdk/http.py",
+        "import requests\ndef send():\n    requests.post(\"https://external.example/\")\n",
+    );
+    write(&fixture.root.join("openshell"), "crates/openshell-server/routes.py", "from fastapi import FastAPI\napp = FastAPI()\n@app.post(\"/\")\ndef root():\n    return {}\n");
+    commit_changes(
+        &fixture.root.join("openshell"),
+        "root route and external consumer",
+    );
+    let fed = fixture.live().await;
+    fed.set_config_path(fixture.root.join("repos.yaml"));
+    let nodes = fed.backend().list_nodes().unwrap();
+    let consumer = nodes
+        .iter()
+        .find(|n| {
+            n.path.ends_with("http.py")
+                && n.contract
+                    .iter()
+                    .any(|f| matches!(f, ContractFact::Consumer(_)))
+        })
+        .unwrap();
+    for key in ["http:POST /", "http:ANY /"] {
+        let result = call(
+            Some(&fed),
+            None,
+            "check_binding",
+            json!({"consumer":consumer.id,"endpoint":{"service":"gateway","key":key}}),
+        )
+        .await;
+        assert_eq!(result["data"]["valid"], false, "{result}");
+        assert!(
+            result["data"]["reasons"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("catch_all_route")),
+            "{result}"
+        );
+        let schema: Value = serde_json::from_str(include_str!(
+            "../src/server/mcp/contract_tools/schemas/check_binding.out.json"
+        ))
+        .unwrap();
+        assert!(jsonschema::validator_for(&schema)
+            .unwrap()
+            .is_valid(&result["data"]));
+        let status = HandlerStatus::for_test();
+        let ctx = McpContext {
+            server: None,
+            federation: Some(&fed),
+            workspaces: None,
+            status: &status,
+            reload_bus: None,
+            snapshots: None,
+        };
+        let applied = apply_contract_context_handle(&ctx, json!({"snapshot": "live", "bindings": [{"consumer": {"repo": "openshell", "path": "crates/openshell-sdk/http.py", "symbol": consumer.container.as_ref().unwrap_or(&consumer.name), "key": "http:POST /"}, "provider": {"service": "gateway", "key": key}}], "dry_run": true})).await.unwrap().structured;
+        assert_eq!(
+            applied["error"]["details"]["reason"], "catch_all_route",
+            "{applied}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn configured_cached_wrapper_binds_five_sites_to_four_proto_rpcs() {
+    let fixture = Fixture::new();
+    let methods = [
+        "get_draft_policy",
+        "submit_policy_analysis",
+        "report_policy_status",
+        "report_endpoint_status",
+    ];
+    let mut yaml = include_str!("../src/server/sensors/patterns/rust-grpc.yaml").to_string();
+    yaml.push_str("\nwrappers:\n");
+    for method in methods {
+        yaml.push_str(&format!("  - receiver_type: openshell_core::grpc_client::CachedOpenShellClient\n    method: {method}\n    generated_type: openshell_core::proto::open_shell_client::OpenShellClient\n    rpc_method: {method}\n    provenance: hand-written wrapper delegates to generated OpenShell RPC\n"));
+    }
+    write(
+        &fixture.root.join("openshell"),
+        ".lain/patterns/rust-grpc.yaml",
+        &yaml,
+    );
+    write(&fixture.root.join("openshell"), "proto/policy.proto", "syntax = \"proto3\"; package openshell.v1; service OpenShell { rpc GetDraftPolicy(Req) returns (Res); rpc SubmitPolicyAnalysis(Req) returns (Res); rpc ReportPolicyStatus(Req) returns (Res); rpc ReportEndpointStatus(Req) returns (Res); }");
+    let mut wrapper = String::from("pub struct CachedOpenShellClient { inner: openshell_core::proto::open_shell_client::OpenShellClient<Channel> }\nimpl CachedOpenShellClient {\n");
+    for method in methods {
+        wrapper.push_str(&format!(
+            "pub async fn {method}(&mut self, req: Req) {{ self.inner.{method}(req).await; }}\n"
+        ));
+    }
+    wrapper.push_str("}\n");
+    write(
+        &fixture.root.join("openshell"),
+        "crates/openshell-core/src/grpc_client.rs",
+        &wrapper,
+    );
+    let path = "crates/openshell-sdk/src/wrapper.rs";
+    write(&fixture.root.join("openshell"), path, "use openshell_core::grpc_client::CachedOpenShellClient;\nasync fn send(c: CachedOpenShellClient) {\n c.get_draft_policy(req).await;\n c.get_draft_policy(req).await;\n c.submit_policy_analysis(req).await;\n c.report_policy_status(req).await;\n c.report_endpoint_status(req).await;\n}\n");
+    commit_changes(
+        &fixture.root.join("openshell"),
+        "configured wrapper fixture",
+    );
+    let fed = fixture.live().await;
+    let nodes = fed.backend().list_nodes().unwrap();
+    let calls: Vec<_> = nodes
+        .iter()
+        .filter(|n| n.path == path && n.name.starts_with("rpc-call:rust:"))
+        .collect();
+    assert_eq!(calls.len(), 5);
+    let index = fed.contract_index().unwrap();
+    let mut keys = std::collections::BTreeSet::new();
+    for node in calls {
+        let id = lain::federation::repo_id::GlobalId::from_canonical(&node.id);
+        let resolution = index.consumer(&id).unwrap();
+        assert!(
+            matches!(
+                resolution.target,
+                Some(lain::federation::contracts::index::ConsumerTarget::Binds { .. })
+            ),
+            "{resolution:?}"
+        );
+        assert_eq!(resolution.bound_endpoints.len(), 1);
+        assert_eq!(resolution.bound_endpoints[0].0 .0, "gateway");
+        keys.insert(resolution.bound_endpoints[0].1.to_string());
+    }
+    assert_eq!(keys.len(), 4);
+}
+
+#[tokio::test]
+async fn automatic_cached_wrapper_binds_five_sites_to_four_proto_rpcs() {
+    let fixture = Fixture::new();
+    let methods = [
+        "get_draft_policy",
+        "submit_policy_analysis",
+        "report_policy_status",
+        "report_endpoint_status",
+    ];
+    write(
+        &fixture.root.join("openshell"),
+        "crates/openshell-core/Cargo.toml",
+        r#"[package]
+name = "openshell-core"
+version = "0.0.0"
+edition = "2021"
+"#,
+    );
+    write(&fixture.root.join("openshell"), "proto/policy.proto", "syntax = \"proto3\"; package openshell.v1; service OpenShell { rpc GetDraftPolicy(Req) returns (Res); rpc SubmitPolicyAnalysis(Req) returns (Res); rpc ReportPolicyStatus(Req) returns (Res); rpc ReportEndpointStatus(Req) returns (Res); }");
+    let mut wrapper = String::from("pub struct CachedOpenShellClient { inner: openshell_core::proto::open_shell_client::OpenShellClient<Channel> }\nimpl CachedOpenShellClient {\n");
+    for method in methods {
+        wrapper.push_str(&format!(
+            "pub async fn {method}(&mut self, req: Req) {{ self.inner.{method}(req).await; }}\n"
+        ));
+    }
+    wrapper.push_str("pub async fn ambiguous(&mut self, req: Req) { self.inner.get_draft_policy(req).await; self.inner.submit_policy_analysis(req).await; }\n");
+    wrapper.push_str("}\n");
+    write(
+        &fixture.root.join("openshell"),
+        "crates/openshell-core/src/grpc_client.rs",
+        &wrapper,
+    );
+    let path = "crates/openshell-sdk/src/wrapper.rs";
+    write(&fixture.root.join("openshell"), path, "use openshell_core::grpc_client::CachedOpenShellClient;\nasync fn send(c: CachedOpenShellClient) {\n c.get_draft_policy(req).await;\n c.get_draft_policy(req).await;\n c.submit_policy_analysis(req).await;\n c.report_policy_status(req).await;\n c.report_endpoint_status(req).await;\n}\n");
+    let fallback_path = "crates/openshell-sdk/src/fallback.rs";
+    write(&fixture.root.join("openshell"), fallback_path,
+        "async fn fallback() { cached_open_shell_client.report_endpoint_status(req).await; }\nasync fn ambiguous(c: openshell_core::grpc_client::CachedOpenShellClient) { c.ambiguous(req).await; }\n");
+    commit_changes(&fixture.root.join("openshell"), "automatic wrapper fixture");
+    let fed = fixture.live().await;
+    let nodes = fed.backend().list_nodes().unwrap();
+    let calls: Vec<_> = nodes
+        .iter()
+        .filter(|n| n.path == path && n.name.starts_with("rpc-call:rust:"))
+        .collect();
+    assert_eq!(calls.len(), 5);
+    let index = fed.contract_index().unwrap();
+    let mut keys = std::collections::BTreeSet::new();
+    for node in calls {
+        let id = lain::federation::repo_id::GlobalId::from_canonical(&node.id);
+        let resolution = index.consumer(&id).unwrap();
+        assert!(
+            matches!(
+                resolution.target,
+                Some(lain::federation::contracts::index::ConsumerTarget::Binds { .. })
+            ),
+            "{resolution:?}"
+        );
+        assert_eq!(resolution.bound_endpoints.len(), 1);
+        assert_eq!(resolution.bound_endpoints[0].0 .0, "gateway");
+        keys.insert(resolution.bound_endpoints[0].1.to_string());
+    }
+    assert_eq!(keys.len(), 4);
+    assert_automatic_wrapper_fallback(&index, &fed.backend().all_edges().unwrap(), fallback_path);
+    assert!(index
+        .rust_rpcs
+        .values()
+        .filter_map(|d| d.candidate.as_ref())
+        .any(|c| c.site.path == path
+            && c.evidence
+                .iter()
+                .any(|e| e.description.starts_with("wrapper_followed:"))));
+    let manager = fixture.manager();
+    let snapshot = fixture.snapshot(&manager).await;
+    let record = manager.get(&snapshot, 5000).await.unwrap().record;
+
+    // A live edit must retract the inferred delegation. The pinned snapshot
+    // still rebuilds its bindings from the original wrapper source.
+    let ambiguous_wrapper = wrapper.replace(
+        "self.inner.get_draft_policy(req).await;",
+        "self.inner.get_draft_policy(req).await; self.inner.submit_policy_analysis(req).await;",
+    );
+    write(
+        &fixture.root.join("openshell"),
+        "crates/openshell-core/src/grpc_client.rs",
+        &ambiguous_wrapper,
+    );
+    fixture.index(&fed, "openshell", IndexMode::Live).await;
+    fed.rejoin_contracts_if_dirty().unwrap();
+    let changed = fed.contract_index().unwrap();
+    assert!(!changed.rust_rpcs.values().any(|d| d.contract_key.is_some()
+        && d.candidate
+            .as_ref()
+            .is_some_and(|c| c.site.path == path && c.method == "get_draft_policy")));
+    let (snap, _hold) = manager.from_snapshot(&record).unwrap();
+    let pinned = snap.contract_index.read().as_ref().unwrap().clone();
+    assert_eq!(
+        pinned
+            .rust_rpcs
+            .values()
+            .filter(
+                |d| d.candidate.as_ref().is_some_and(|c| c.site.path == path)
+                    && d.contract_key.is_some()
+            )
+            .count(),
+        5
+    );
+    assert_automatic_wrapper_fallback(&pinned, &snap.backend.all_edges().unwrap(), fallback_path);
+}
+
+fn assert_automatic_wrapper_fallback(
+    index: &ContractIndex,
+    edges: &[lain::schema::GraphEdge],
+    path: &str,
+) {
+    let (id, _) = index
+        .rust_rpcs
+        .iter()
+        .find(|(_, d)| {
+            d.candidate
+                .as_ref()
+                .is_some_and(|c| c.site.path == path && c.method == "report_endpoint_status")
+        })
+        .unwrap();
+    let resolution = index.consumer(id).unwrap();
+    let Some(lain::federation::contracts::index::ConsumerTarget::Binds {
+        provenance,
+        confidence,
+        ..
+    }) = &resolution.target
+    else {
+        panic!("{resolution:?}");
+    };
+    assert_eq!(*confidence, 0.6);
+    assert!(
+        matches!(provenance, lain::schema::EdgeProvenance::Heuristic { detector, confidence } if detector == "wrapper_followed" && *confidence == 0.6)
+    );
+    let edge = edges
+        .iter()
+        .find(|e| e.source_id == id.as_str() && e.edge_type == EdgeType::Binds)
+        .unwrap();
+    assert_eq!(edge.weight, Some(0.6));
+    assert_eq!(edge.provenance.as_ref(), Some(provenance));
+    assert!(!index.rust_rpcs.values().any(|d| d.contract_key.is_some()
+        && d.candidate
+            .as_ref()
+            .is_some_and(|c| c.site.path == path && c.method == "ambiguous")));
 }

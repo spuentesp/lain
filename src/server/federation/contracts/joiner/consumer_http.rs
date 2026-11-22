@@ -369,6 +369,27 @@ pub(super) fn resolve_consumer(
     hits.sort();
     hits.dedup();
     if hits.is_empty() {
+        // A dynamic method can lower route confidence without making a
+        // same-origin call cross-service. If only our own endpoint is
+        // compatible, classify it as internal rather than a coverage gap.
+        if matches!(consumer.url.host, HostPart::None) {
+            if let Some((key, detail)) = best_provider_for(
+                own_service,
+                &target_method,
+                target_template.as_deref(),
+                endpoints,
+            ) {
+                if detail.kind != RouteMatch::PrefixStripped {
+                    return ConsumerResolution {
+                        call_id: call_id.clone(),
+                        service: own_service.clone(),
+                        target: Some(ConsumerTarget::Internal),
+                        bound_endpoints: vec![(own_service.clone(), key)],
+                        reads_complete: consumer.reads_complete,
+                    };
+                }
+            }
+        }
         let reason = if env_unmapped_pending {
             UnresolvedReason::EnvUnmapped
         } else {

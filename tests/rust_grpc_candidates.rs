@@ -275,3 +275,248 @@ fn local_nominal_items_do_not_inherit_generated_client_imports() {
         "out-of-scope type hid a known client"
     );
 }
+
+#[test]
+fn result_helpers_are_never_rpc_candidates() {
+    let helpers = [
+        "unwrap",
+        "expect",
+        "unwrap_or",
+        "unwrap_or_else",
+        "unwrap_or_default",
+        "unwrap_err",
+        "expect_err",
+        "map_err",
+    ];
+    for helper in helpers {
+        let src = format!("fn f(c: api::orders_client::OrdersClient<Ch>) {{ c.{helper}(arg); }}");
+        assert!(
+            candidates(&src).is_empty(),
+            "Result helper emitted: {helper}"
+        );
+        let config = RustGrpcConfig::from_sources(None, None).unwrap();
+        assert!(
+            lain::server::sensors::grpc_consumer_sensor::semantic::probes(
+                &src,
+                "sample.rs",
+                &config
+            )
+            .is_empty(),
+            "Result helper probed: {helper}"
+        );
+    }
+}
+
+#[test]
+fn configured_wrapper_methods_preserve_call_sites_and_require_exact_types() {
+    let yaml = format!("{}\nwrappers:\n  - receiver_type: openshell_core::grpc_client::CachedOpenShellClient\n    method: draft\n    generated_type: api::open_shell_client::OpenShellClient\n    rpc_method: get_draft_policy\n    provenance: grpc_client.rs delegates to generated client\n", include_str!("../src/server/sensors/patterns/rust-grpc.yaml"));
+    let config = RustGrpcConfig::from_sources(Some(&yaml), None).unwrap();
+    let src = "use openshell_core::grpc_client::CachedOpenShellClient as Cached; fn f(c: Cached, unrelated: Other) { c.draft(req); unrelated.draft(req); }";
+    let calls = detect_rust_grpc_candidates(src, "wrapper.rs", &config).unwrap();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_eq!(calls[0].method, "get_draft_policy");
+    assert_eq!(
+        calls[0].generated_type,
+        "api::open_shell_client::OpenShellClient"
+    );
+    assert_eq!(
+        &src[calls[0].site.start_byte..calls[0].site.end_byte],
+        "draft"
+    );
+    assert!(calls[0]
+        .evidence
+        .iter()
+        .any(|e| e.description.contains("configured wrapper")));
+    let probes =
+        lain::server::sensors::grpc_consumer_sensor::semantic::probes(src, "wrapper.rs", &config);
+    assert!(
+        probes
+            .iter()
+            .all(|p| p.site.start_byte != calls[0].site.start_byte),
+        "explicit mappings must not be overwritten by an unproven wrapper definition"
+    );
+    assert_eq!(
+        probes.len(),
+        1,
+        "unmapped receivers still need semantic probing"
+    );
+}
+
+#[test]
+fn wrapper_mappings_require_unique_methods_generated_targets_and_provenance() {
+    let entry = "  - receiver_type: Cached\n    method: get\n    generated_type: api::orders_client::OrdersClient\n    rpc_method: get\n    provenance: verified wrapper body\n";
+    let base = include_str!("../src/server/sensors/patterns/rust-grpc.yaml");
+    for invalid in [
+        entry.replace("verified wrapper body", "''"),
+        entry.replace("api::orders_client::OrdersClient", "PlainClient"),
+        format!("{entry}{entry}"),
+    ] {
+        let yaml = format!("{base}\nwrappers:\n{invalid}");
+        assert!(
+            RustGrpcConfig::from_sources(Some(&yaml), None).is_err(),
+            "accepted invalid mapping: {yaml}"
+        );
+    }
+}
+
+#[test]
+fn automatic_wrappers_follow_renamed_rpcs_and_reject_ambiguous_bodies() {
+    let src = r#"
+use api::orders_client::OrdersClient;
+struct Cached { inner: OrdersClient<Channel> }
+impl Cached {
+    fn draft(&mut self) { self.inner.get_draft_policy(req); }
+    fn ambiguous(&mut self) { self.inner.get_draft_policy(req); self.inner.submit_policy_analysis(req); }
+    fn unwrap(&mut self) { self.inner.get_draft_policy(req); }
+}
+fn send(c: Cached, other: Other) {
+    c.draft();
+    unknown.draft();
+    other.draft();
+    c.ambiguous();
+    unknown.ambiguous();
+    c.unwrap();
+}
+"#;
+    let calls = candidates(src);
+    let followed: Vec<_> = calls
+        .iter()
+        .filter(|c| c.enclosing_name.as_deref() == Some("send"))
+        .collect();
+    assert_eq!(followed.len(), 1, "{followed:#?}");
+    assert!(followed.iter().all(|c| c.method == "get_draft_policy"));
+    assert!(followed.iter().all(|c| c
+        .evidence
+        .iter()
+        .any(|e| e.description.contains("wrapper_followed"))));
+}
+
+#[test]
+fn automatic_wrapper_unique_name_fallback_rejects_competing_methods() {
+    let src = r#"
+use api::orders_client::OrdersClient;
+struct Cached { inner: OrdersClient<Channel> }
+impl Cached { fn draft(&mut self) { self.inner.get_draft_policy(req); } }
+struct Other;
+impl Other { fn draft(&mut self) {} }
+fn send(c: Cached) { c.draft(); unknown.draft(); }
+"#;
+    let calls = candidates(src);
+    let followed: Vec<_> = calls
+        .iter()
+        .filter(|c| c.enclosing_name.as_deref() == Some("send"))
+        .collect();
+    assert_eq!(followed.len(), 1, "{followed:#?}");
+    assert_eq!(followed[0].receiver, "c");
+}
+
+#[test]
+fn automatic_wrappers_obey_config_priority_and_denied_targets() {
+    let src = r#"
+use api::orders_client::OrdersClient;
+struct Cached { inner: OrdersClient<Channel> }
+impl Cached { fn draft(&mut self) { self.inner.get_draft_policy(req); } }
+fn send(c: Cached) { c.draft(); }
+"#;
+    let yaml = format!("{}\nwrappers:\n  - receiver_type: Cached\n    method: draft\n    generated_type: api::orders_client::OrdersClient\n    rpc_method: configured_rpc\n    provenance: operator\n", include_str!("../src/server/sensors/patterns/rust-grpc.yaml"));
+    let config = RustGrpcConfig::from_sources(Some(&yaml), None).unwrap();
+    let calls = detect_rust_grpc_candidates(src, "wrapper.rs", &config).unwrap();
+    assert_eq!(
+        calls
+            .iter()
+            .find(|c| c.enclosing_name.as_deref() == Some("send"))
+            .unwrap()
+            .method,
+        "configured_rpc"
+    );
+    let mut config = RustGrpcConfig::from_sources(None, None).unwrap();
+    config.deny_methods.push("get_draft_policy".into());
+    assert!(detect_rust_grpc_candidates(src, "wrapper.rs", &config)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn automatic_wrappers_follow_fields_accessors_and_aliases_across_files() {
+    use lain::server::sensors::grpc_consumer_sensor::follow_rust_grpc_wrappers;
+    let sources = vec![
+        (
+            "src/grpc_client.rs".into(),
+            r#"
+use api::orders_client::OrdersClient as Generated;
+type ClientAlias = Generated<Channel>;
+struct Cached { inner: ClientAlias }
+impl Cached { fn draft(&mut self) { self.inner.get_draft_policy(req); } }
+"#
+            .into(),
+        ),
+        (
+            "src/caller.rs".into(),
+            r#"
+use crate::grpc_client::Cached;
+struct Session { client: Cached }
+impl Session { fn client(&self) -> &Cached { &self.client } }
+fn send(session: Session) { session.client.draft(); session.client().draft(); }
+"#
+            .into(),
+        ),
+    ];
+    let mut config = RustGrpcConfig::from_sources(None, None).unwrap();
+    follow_rust_grpc_wrappers(&mut config, &sources).unwrap();
+    let calls = detect_rust_grpc_candidates(&sources[1].1, &sources[1].0, &config).unwrap();
+    assert_eq!(calls.len(), 2, "{calls:#?}");
+    assert!(calls.iter().all(|c| c.method == "get_draft_policy"));
+    assert!(calls.iter().all(|c| c
+        .evidence
+        .iter()
+        .any(|e| e.description.contains("receiver_type; confidence=1.0"))));
+    let probes = lain::server::sensors::grpc_consumer_sensor::semantic::probes(
+        &sources[1].1,
+        &sources[1].0,
+        &config,
+    );
+    assert!(!probes
+        .iter()
+        .any(|p| calls.iter().any(|c| c.site.start_byte == p.site.start_byte)));
+}
+
+#[test]
+fn automatic_wrappers_do_not_confuse_same_named_local_types() {
+    let src = r#"
+mod rpc {
+    use api::orders_client::OrdersClient;
+    struct Cached { inner: OrdersClient<Channel> }
+    impl Cached { fn draft(&mut self) { self.inner.get_draft_policy(req); } }
+    fn send(c: Cached) { c.draft(); }
+}
+mod unrelated {
+    struct Cached;
+    impl Cached { fn draft(&mut self) {} }
+    fn send(c: Cached) { c.draft(); }
+}
+"#;
+    let calls = candidates(src);
+    let followed: Vec<_> = calls
+        .iter()
+        .filter(|c| c.enclosing_name.as_deref() == Some("send"))
+        .collect();
+    assert_eq!(followed.len(), 1, "{followed:#?}");
+    assert_eq!(followed[0].site.line, 6);
+}
+
+#[test]
+fn unique_wrapper_method_requires_receiver_evidence() {
+    let src = r#"
+use api::orders_client::OrdersClient;
+struct Cached { inner: OrdersClient<Channel> }
+impl Cached { fn draft(&mut self) { self.inner.get_draft_policy(req); } }
+fn send() { unrelated.draft(); cached.draft(); }
+"#;
+    let calls = candidates(src);
+    let followed: Vec<_> = calls
+        .iter()
+        .filter(|c| c.enclosing_name.as_deref() == Some("send"))
+        .collect();
+    assert_eq!(followed.len(), 1, "{followed:#?}");
+    assert_eq!(followed[0].receiver, "cached");
+}

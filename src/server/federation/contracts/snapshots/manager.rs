@@ -1337,7 +1337,11 @@ impl SnapshotManager {
                     .map_err(|e| LainError::Other(format!("Rust RPC source is not UTF-8: {e}")))
             })?;
         let _ = rust_nodes; // resolve already installed facts in the ephemeral backend
-        let mut contract_index = build_snapshot_contract_index(backend.as_ref(), &config)?;
+        let mut contract_index = build_snapshot_contract_index_with_rust_details(
+            backend.as_ref(),
+            &config,
+            &rust_details,
+        )?;
         crate::federation::contracts::rust_rpc::attach(&mut contract_index, rust_details);
         let fed = Arc::new(SnapshotFederation {
             snapshot_id: record.id.clone(),
@@ -1827,6 +1831,17 @@ pub fn build_snapshot_contract_index(
     backend: &PetgraphBackend,
     config: &ContractFederationConfig,
 ) -> Result<ContractIndex, LainError> {
+    build_snapshot_contract_index_with_rust_details(backend, config, &BTreeMap::new())
+}
+
+fn build_snapshot_contract_index_with_rust_details(
+    backend: &PetgraphBackend,
+    config: &ContractFederationConfig,
+    rust_details: &BTreeMap<
+        crate::federation::repo_id::GlobalId,
+        crate::federation::contracts::rust_rpc::RustRpcDetail,
+    >,
+) -> Result<ContractIndex, LainError> {
     let nodes: Vec<GraphNode> = backend.list_nodes()?;
     let edges: Vec<GraphEdge> = backend.all_edges()?;
     let contract_edges: Vec<GraphEdge> = edges
@@ -1846,7 +1861,8 @@ pub fn build_snapshot_contract_index(
         .into_iter()
         .filter(|n| !n.contract.is_empty())
         .collect();
-    let out = ContractJoiner::run(&contract_nodes, &contract_edges, config);
+    let mut out = ContractJoiner::run(&contract_nodes, &contract_edges, config);
+    crate::federation::contracts::rust_rpc::apply_wrapper_provenance(&mut out, rust_details);
 
     // Persist the join's `Binds` edges into the snapshot backend,
     // exactly as the live `rejoin_contracts` does. §9.5 traces

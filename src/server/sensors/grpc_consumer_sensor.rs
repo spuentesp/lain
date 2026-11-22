@@ -55,9 +55,11 @@ use std::path::Path;
 /// It supplies syntactic candidates, without claiming semantic binding.
 #[path = "grpc_consumer_sensor/rust.rs"]
 mod rust;
+#[path = "grpc_consumer_sensor/typescript.rs"]
+mod typescript;
 pub use rust::{
-    detect_rust_grpc_candidates, discover_rust_grpc_candidates, RustGrpcCandidate, RustGrpcConfig,
-    RustGrpcEvidence, RustGrpcSite,
+    detect_rust_grpc_candidates, discover_rust_grpc_candidates, follow_rust_grpc_wrappers,
+    RustGrpcCandidate, RustGrpcConfig, RustGrpcEvidence, RustGrpcProvenance, RustGrpcSite,
 };
 
 // ─── Public sensor shape ───────────────────────────────────────────────
@@ -112,22 +114,7 @@ impl crate::server::sensors::Sensor for GrpcConsumerSensor {
         namespace: &RepoNamespace,
     ) -> Result<crate::server::sensors::ScanReport, LainError> {
         let emitted = self.scan(graph, root, namespace)?;
-        let rust_files: Vec<String> = crate::server::sensors::util::scan_files(root, |p| {
-            (p.extension()?.to_str()? == "rs").then(|| "rs".to_string())
-        })
-        .map(|(path, _, _)| graph_path(root, &path))
-        .collect();
-        // PR2 proves individual identities, not absence of RPCs behind arbitrary
-        // Rust wrappers. A missing mapping must never turn into clean coverage.
-        let unresolved = if rust_files.is_empty() {
-            vec![]
-        } else {
-            vec![crate::federation::contracts::coverage::UnresolvedRecord {
-                reason: crate::federation::contracts::model::UnresolvedReason::RpcStubUnknown,
-                count: rust_files.len(),
-                sample_ids: rust_files.iter().take(5).cloned().collect(),
-            }]
-        };
+        let unresolved = unproven_rust_rpc_files(root)?;
         Ok(crate::server::sensors::ScanReport {
             emitted,
             unresolved,
@@ -135,6 +122,43 @@ impl crate::server::sensors::Sensor for GrpcConsumerSensor {
         })
     }
 }
+/// The gap in Rust RPC coverage: files that name a generated gRPC client type
+/// but yielded no identified call. A wrapper this sensor cannot follow can hide
+/// an RPC exactly there, so a gap must not read as clean coverage. This used to
+/// be one record counting every Rust file in the repo (774 for OpenShell), which
+/// inflated every blind-spot figure for a Rust repository.
+fn unproven_rust_rpc_files(
+    root: &Path,
+) -> Result<Vec<crate::federation::contracts::coverage::UnresolvedRecord>, LainError> {
+    use std::sync::OnceLock;
+    static CLIENT_TYPE: OnceLock<regex::Regex> = OnceLock::new();
+    let client_type = CLIENT_TYPE.get_or_init(|| {
+        regex::Regex::new(r"\b[a-zA-Z_][a-zA-Z_0-9]*_client::[A-Z][A-Za-z_0-9]*Client\b")
+            .expect("generated client type regex")
+    });
+    let with_candidates: BTreeSet<String> = discover_rust_grpc_candidates(root)?
+        .into_iter()
+        .map(|c| c.site.path)
+        .collect();
+    let gaps: Vec<String> = crate::server::sensors::util::scan_files(root, |p| {
+        (p.extension()?.to_str()? == "rs").then(|| "rs".to_string())
+    })
+    .filter(|(_, content, _)| client_type.is_match(content))
+    .map(|(path, _, _)| graph_path(root, &path))
+    .filter(|path| !with_candidates.contains(path))
+    .collect();
+    Ok(if gaps.is_empty() {
+        vec![]
+    } else {
+        vec![crate::federation::contracts::coverage::UnresolvedRecord {
+            locations: None,
+            reason: crate::federation::contracts::model::UnresolvedReason::RpcStubUnknown,
+            count: gaps.len(),
+            sample_ids: gaps.iter().take(5).cloned().collect(),
+        }]
+    })
+}
+
 inventory::submit!(SensorEntry(&GrpcConsumerSensor));
 
 /// Walk `root`, find every recognised stub call, resolve the
@@ -152,7 +176,23 @@ pub fn scan_workspace_grpc_consumer(
     let code_ext = |p: &Path| {
         p.extension()
             .and_then(|e| e.to_str())
-            .filter(|e| matches!(*e, "go" | "py" | "java" | "cc" | "cpp" | "h" | "hpp"))
+            .filter(|e| {
+                matches!(
+                    *e,
+                    "go" | "py"
+                        | "java"
+                        | "cc"
+                        | "cpp"
+                        | "h"
+                        | "hpp"
+                        | "ts"
+                        | "tsx"
+                        | "js"
+                        | "jsx"
+                        | "mjs"
+                        | "cjs"
+                )
+            })
             .map(|e| e.to_string())
     };
     let mut total = 0usize;
@@ -263,6 +303,9 @@ pub fn detect_stub_calls(content: &str, ext: &str, graph_path: &str) -> Vec<Grpc
         "go" => detect_go_stub_calls(content, graph_path, &channel, &mut out),
         "py" => detect_python_stub_calls(content, graph_path, &channel, &mut out),
         "java" => detect_java_stub_calls(content, graph_path, &channel, &mut out),
+        "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" if !graph_path.ends_with(".d.ts") => {
+            typescript::detect_ts_stub_calls(content, graph_path, &mut out)
+        }
         "cc" | "cpp" | "h" | "hpp" => {
             detect_cpp_stub_calls(content, graph_path, &channel, &mut out)
         }
@@ -425,6 +468,8 @@ fn detect_go_stub_calls(
     channel: &Option<ChannelTarget>,
     out: &mut Vec<GrpcStubCall>,
 ) {
+    let http_clients = go_http_client_receivers(content);
+    let lines: Vec<&str> = content.lines().collect();
     for det in crate::server::sensors::util_tokenize::detect_method_calls(
         content,
         |rcv| rcv.ends_with("Client"),
@@ -432,6 +477,20 @@ fn detect_go_stub_calls(
     ) {
         let service = strip_client_suffix(det.receiver);
         if service.is_empty() {
+            continue;
+        }
+        // `oidcHTTPClient.Do(req)` is `net/http`, not a generated stub.
+        let receiver = det.receiver.rsplit('.').next().unwrap_or(det.receiver);
+        if http_clients.contains(receiver) {
+            continue;
+        }
+        // The `http.Client` method names a gRPC service could also define.
+        // A generated stub takes a context first (`Get(ctx, req)`); an HTTP
+        // client takes a request or URL (`Do(req)`, `Get(url)`).
+        let line = lines.get(det.line_no as usize - 1).copied().unwrap_or("");
+        if GO_HTTP_CLIENT_METHODS.contains(&det.method)
+            && !go_first_argument_is_context(line, det.method)
+        {
             continue;
         }
         let (channel_target, host_part) = host_parts_from_channel(channel);
@@ -447,6 +506,47 @@ fn detect_go_stub_calls(
             },
         });
     }
+}
+
+/// `net/http.Client` methods; a Go receiver named `*Client` calling one of
+/// these without a context argument is an HTTP client, not a gRPC stub.
+const GO_HTTP_CLIENT_METHODS: &[&str] = &["Do", "Get", "Post", "PostForm", "Head"];
+
+/// Names declared in `content` as `net/http` clients: `x := &http.Client{..}`,
+/// `var x = http.DefaultClient`, `x *http.Client` (field or parameter).
+fn go_http_client_receivers(content: &str) -> BTreeSet<String> {
+    use std::sync::OnceLock;
+    static ASSIGNED: OnceLock<regex::Regex> = OnceLock::new();
+    static TYPED: OnceLock<regex::Regex> = OnceLock::new();
+    let assigned = ASSIGNED.get_or_init(|| {
+        regex::Regex::new(
+            r"\b(\w+)\s*(?::=|=)\s*&?(?:http\.Client\b|http\.DefaultClient\b|retryablehttp\.\w+)",
+        )
+        .expect("go http assigned regex")
+    });
+    let typed = TYPED.get_or_init(|| {
+        regex::Regex::new(r"\b(\w+)\s+\*?(?:http\.Client\b|retryablehttp\.Client\b)")
+            .expect("go http typed regex")
+    });
+    let mut out = BTreeSet::new();
+    for re in [assigned, typed] {
+        for cap in re.captures_iter(content) {
+            out.insert(cap[1].to_string());
+        }
+    }
+    out
+}
+
+/// Whether the first argument of `method(` on `line` looks like a context:
+/// `ctx`, `context.Background()`, `req.Context()`, `r.Context()`.
+fn go_first_argument_is_context(line: &str, method: &str) -> bool {
+    let Some(at) = line.find(&format!(".{method}(")) else {
+        return false;
+    };
+    let rest = &line[at + method.len() + 2..];
+    let first = rest.split([',', ')']).next().unwrap_or("").trim();
+    let lower = first.to_ascii_lowercase();
+    lower.contains("ctx") || lower.contains("context")
 }
 
 fn detect_python_stub_calls(
@@ -958,5 +1058,72 @@ x := helper.foo(1)
 ";
         let calls = detect_stub_calls(src, "go", "main.go");
         assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn go_http_client_declared_as_such_is_not_a_stub() {
+        let src = "package oidc\nvar oidcHTTPClient = &http.Client{Timeout: 5}\nfunc f() {\n\tresp, err := oidcHTTPClient.Do(req)\n}\n";
+        assert!(detect_stub_calls(src, "go", "oidc/discovery.go").is_empty());
+    }
+
+    #[test]
+    fn go_http_method_without_a_context_argument_is_not_a_stub() {
+        let src = "package p\nfunc f() {\n\tr, _ := apiClient.Get(url)\n\tr2, _ := apiClient.Do(req)\n}\n";
+        assert!(detect_stub_calls(src, "go", "p/x.go").is_empty());
+    }
+
+    #[test]
+    fn go_stub_method_named_like_an_http_method_keeps_its_context_call() {
+        let src = "package p\nfunc f() {\n\tr, _ := ordersClient.Get(ctx, &pb.GetRequest{})\n\tr2, _ := ordersClient.Do(context.Background(), req)\n}\n";
+        let calls = detect_stub_calls(src, "go", "p/x.go");
+        assert_eq!(calls.len(), 2, "{calls:?}");
+        assert_eq!(calls[0].method, "Get");
+    }
+
+    fn rust_repo(files: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        git2::Repository::init(dir.path()).unwrap();
+        for (path, body) in files {
+            let full = dir.path().join(path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(full, body).unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn rust_repo_without_generated_clients_reports_no_rpc_gap() {
+        let dir = rust_repo(&[
+            ("src/a.rs", "fn a() { let x = 1; }"),
+            ("src/b.rs", "fn b() { println!(\"hi\"); }"),
+        ]);
+        assert!(unproven_rust_rpc_files(dir.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn rust_files_with_identified_calls_are_not_a_gap() {
+        let dir = rust_repo(&[(
+            "src/c.rs",
+            "fn call(c: api::orders_client::OrdersClient<Channel>) { c.get_order(req); }",
+        )]);
+        assert!(unproven_rust_rpc_files(dir.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn rust_file_naming_a_client_type_without_an_identified_call_is_a_gap() {
+        let dir = rust_repo(&[
+            (
+                "src/d.rs",
+                "use api::orders_client::OrdersClient;\nfn unused() {}",
+            ),
+            ("src/e.rs", "fn other() {}"),
+        ]);
+        let gaps = unproven_rust_rpc_files(dir.path()).unwrap();
+        assert_eq!(gaps.len(), 1, "{gaps:?}");
+        assert_eq!(
+            gaps[0].count, 1,
+            "only the file naming a client type counts"
+        );
+        assert_eq!(gaps[0].sample_ids, vec!["src/d.rs".to_string()]);
     }
 }

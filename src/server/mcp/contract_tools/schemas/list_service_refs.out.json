@@ -68,6 +68,54 @@
           },
           "linked_to_call": {
             "type": "boolean"
+          },
+          "edge": {
+            "description": "A service reference relation for UI rendering, separate from executable call bindings; null when the service is not uniquely resolved.",
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "source": {
+                "type": "object",
+                "properties": {
+                  "repo": {
+                    "type": "string"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "line": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "repo",
+                  "path",
+                  "line"
+                ]
+              },
+              "target_service": {
+                "type": "string"
+              },
+              "provenance": {
+                "const": "ref"
+              },
+              "usage": {
+                "enum": [
+                  "production",
+                  "test",
+                  "configuration",
+                  "documentation"
+                ]
+              }
+            },
+            "required": [
+              "source",
+              "target_service",
+              "provenance",
+              "usage"
+            ]
           }
         },
         "required": [

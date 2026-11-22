@@ -176,22 +176,31 @@ pub fn scan_workspace_django_orm_with_report(
     if graph.is_read_only() {
         return Ok(crate::server::sensors::ScanReport::default());
     }
-    let analysis = analyze_workspace(root);
+    let analysis = crate::server::sensors::util::django_analysis(root);
     let (nodes, edges) = build_graph(graph, &analysis, namespace);
     graph.replace_sensor_output(SensorOwner::DjangoOrmSensor, &nodes, &edges)?;
 
+    let mut locations = crate::federation::contracts::coverage::LocationCounts::default();
     let mut sample_ids: Vec<String> = Vec::new();
-    for u in &analysis.unresolved {
+    // A dynamic query in a test or fixture is not a production blind spot.
+    let mut count = 0usize;
+    for u in analysis.unresolved.iter().filter(|u| {
+        crate::federation::contracts::service_refs::classify_usage(&u.path)
+            != crate::federation::contracts::service_refs::Usage::Test
+    }) {
+        count += 1;
+        locations.add(&u.path, 1);
         if sample_ids.len() < 5 {
             sample_ids.push(format!("{}:{}", u.path, u.line));
         }
     }
-    let unresolved = if analysis.unresolved.is_empty() {
+    let unresolved = if count == 0 {
         Vec::new()
     } else {
         vec![UnresolvedRecord {
+            locations: Some(locations),
             reason: UnresolvedReason::OrmDynamicQuery,
-            count: analysis.unresolved.len(),
+            count,
             sample_ids,
         }]
     };
@@ -204,10 +213,13 @@ pub fn scan_workspace_django_orm_with_report(
 
 // ─── Workspace analysis ────────────────────────────────────────────────
 
-/// Two passes over the repo's `*.py` files: collect model classes, then
-/// find access sites. Nothing is retained between passes but the (small)
-/// class table.
+#[cfg(test)]
+thread_local! { static ANALYSIS_RUNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
+/// Two passes over the repo's Python files: collect models, then access sites.
 pub fn analyze_workspace(root: &Path) -> Analysis {
+    #[cfg(test)]
+    ANALYSIS_RUNS.with(|n| n.set(n.get() + 1));
     let patterns = Patterns::with_overrides(root).unwrap_or_else(|e| {
         tracing::warn!(
             "django_orm_sensor: {}: override load failed ({e}); using bundled patterns",
@@ -1597,5 +1609,36 @@ class Product(SeoModel):
                 println!("  {}:{} UNRESOLVED {}", u.path, u.line, u.why);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod review_regressions {
+    use super::*;
+    #[test]
+    fn sql_and_django_share_one_analysis_per_index() {
+        let root = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let g = GraphDatabase::new(&data.path().join("db.bin")).unwrap();
+        let ns = RepoNamespace::for_test();
+        ANALYSIS_RUNS.with(|n| n.set(0));
+        crate::server::sensors::util::with_workspace_scan_cache(root.path(), || {
+            crate::server::sensors::sql_sensor::scan_workspace_sql_with_report(
+                &g,
+                root.path(),
+                &ns,
+            )
+            .unwrap();
+            scan_workspace_django_orm_with_report(&g, root.path(), &ns).unwrap();
+        });
+        assert_eq!(ANALYSIS_RUNS.with(|n| n.get()), 1);
+        crate::server::sensors::util::with_workspace_scan_cache(root.path(), || {
+            scan_workspace_django_orm_with_report(&g, root.path(), &ns).unwrap();
+        });
+        assert_eq!(
+            ANALYSIS_RUNS.with(|n| n.get()),
+            2,
+            "next index must recompute"
+        );
     }
 }

@@ -68,6 +68,8 @@ pub struct Executor<'a> {
     /// Cap applied when a query specifies no `limit` of its own.
     /// 0 disables the cap.
     default_limit: usize,
+    services: Vec<crate::federation::contracts::config::ServiceDecl>,
+    repo_workspaces: HashMap<String, std::path::PathBuf>,
 }
 
 impl<'a> Executor<'a> {
@@ -103,7 +105,22 @@ impl<'a> Executor<'a> {
             workspace,
             nodes_visited: 0,
             default_limit,
+            services: Vec::new(),
+            repo_workspaces: HashMap::new(),
         }
+    }
+
+    pub fn with_services(
+        mut self,
+        services: Vec<crate::federation::contracts::config::ServiceDecl>,
+    ) -> Self {
+        self.services = services;
+        self
+    }
+
+    pub fn with_repo_workspaces(mut self, roots: HashMap<String, std::path::PathBuf>) -> Self {
+        self.repo_workspaces = roots;
+        self
     }
 
     /// Execute a query spec and return results
@@ -117,6 +134,7 @@ impl<'a> Executor<'a> {
     /// failure as an advertised edge type nothing produces.
     pub fn execute(&mut self, spec: &QuerySpec) -> Result<QueryResult, LainError> {
         let start = Instant::now();
+        self.nodes_visited = 0;
 
         match spec.mode {
             // Named handler only. Asking for it without naming one is a
@@ -158,7 +176,11 @@ impl<'a> Executor<'a> {
         // reported nodes — filters, `limit`, and the default cap included.
         let mut current_paths: HashMap<String, GraphPath> = HashMap::new();
         let mut groups: Option<Vec<QueryGroup>> = None;
+        let mut group_op: Option<GroupOp> = None;
         let mut explicitly_sorted = false;
+        let mut rows: Vec<GraphPath> = Vec::new();
+        let mut explanation = Vec::new();
+        let mut explicit_matched = None;
 
         for op in &spec.ops {
             match op {
@@ -168,30 +190,123 @@ impl<'a> Executor<'a> {
                     // A find replaces the working set, so no reported node
                     // came from a walk and there is nothing left to report.
                     current_paths.clear();
+                    rows.clear();
+                    groups = None;
+                    group_op = None;
                 }
                 crate::query::spec::GraphOp::Connect(connect) => {
-                    let (nodes, paths) =
-                        self.execute_connect(&current_nodes, &current_paths, connect)?;
+                    let (nodes, paths, next_rows) =
+                        self.execute_connect(&current_nodes, &current_paths, &rows, connect)?;
+                    rows = next_rows;
+                    groups = None;
+                    group_op = None;
                     current_nodes = nodes;
                     current_paths = paths;
                     explicitly_sorted = false;
                 }
                 crate::query::spec::GraphOp::Filter(filter) => {
-                    self.apply_filter(&mut current_nodes, filter);
+                    if rows.is_empty() {
+                        current_nodes.retain(|n| self.filter_matches(n, None, filter));
+                    } else {
+                        rows.retain(|p| {
+                            p.nodes
+                                .last()
+                                .is_some_and(|n| self.filter_matches(n, Some(p), filter))
+                        });
+                        current_nodes.retain(|n| {
+                            rows.iter()
+                                .any(|p| p.nodes.last().is_some_and(|v| v.id == n.id))
+                        });
+                    }
+                    current_paths.retain(|_, selected| {
+                        rows.iter().any(|path| {
+                            path.edges
+                                .iter()
+                                .map(|e| &e.id)
+                                .eq(selected.edges.iter().map(|e| &e.id))
+                        })
+                    });
+                    for path in &rows {
+                        if let Some(node) = path.nodes.last() {
+                            current_paths
+                                .entry(node.id.clone())
+                                .or_insert_with(|| path.clone());
+                        }
+                    }
                 }
                 crate::query::spec::GraphOp::SemanticFilter(sem) => {
                     self.apply_semantic_filter(&mut current_nodes, sem)?;
                 }
                 crate::query::spec::GraphOp::Group(group) => {
-                    groups = Some(self.apply_group(&current_nodes, group));
+                    groups = Some(self.apply_group(&current_nodes, &rows, group)?);
+                    group_op = Some(group.clone());
                 }
                 crate::query::spec::GraphOp::Sort(sort) => {
+                    if let Some(groups) = groups.as_mut() {
+                        groups.sort_by(|a, b| {
+                            let order = if sort.by == SortField::Count {
+                                a.count.cmp(&b.count)
+                            } else {
+                                a.key.cmp(&b.key)
+                            };
+                            (if sort.direction == SortDirection::Desc {
+                                order.reverse()
+                            } else {
+                                order
+                            })
+                            .then_with(|| a.key.cmp(&b.key))
+                        });
+                    } else if sort.by == SortField::Count {
+                        return Err(LainError::InvalidArgument(
+                            "sort by count/call_sites requires group first".into(),
+                        ));
+                    }
                     self.apply_sort(&mut current_nodes, sort);
                     explicitly_sorted = true;
                 }
                 crate::query::spec::GraphOp::Limit(limit) => {
-                    self.apply_limit(&mut current_nodes, limit);
+                    explicit_matched
+                        .get_or_insert(groups.as_ref().map_or(current_nodes.len(), Vec::len));
+                    if let Some(groups) = groups.as_mut() {
+                        let start = limit.offset.min(groups.len());
+                        let end = start.saturating_add(limit.count).min(groups.len());
+                        *groups = groups[start..end].to_vec();
+                        current_nodes.retain(|n| {
+                            groups.iter().any(|g| g.nodes.iter().any(|v| v.id == n.id))
+                        });
+                    } else {
+                        self.apply_limit(&mut current_nodes, limit);
+                    }
                 }
+            }
+            rows.retain(|p| {
+                p.nodes
+                    .last()
+                    .is_some_and(|n| current_nodes.iter().any(|v| v.id == n.id))
+            });
+            if matches!(
+                op,
+                crate::query::spec::GraphOp::Filter(_)
+                    | crate::query::spec::GraphOp::SemanticFilter(_)
+                    | crate::query::spec::GraphOp::Limit(_)
+            ) {
+                self.refresh_groups(&mut groups, group_op.as_ref(), &current_nodes, &rows)?;
+            }
+            if spec.explain {
+                let mut edges = std::collections::HashSet::new();
+                for path in &rows {
+                    for edge in &path.edges {
+                        edges.insert(edge.id.clone());
+                    }
+                }
+                explanation.push(crate::query::spec::QueryStep {
+                    op: serde_json::to_value(op).map_err(LainError::Json)?["op"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .into(),
+                    nodes: current_nodes.len(),
+                    edges: edges.len(),
+                });
             }
         }
 
@@ -242,6 +357,13 @@ impl<'a> Executor<'a> {
             truncated = true;
         }
 
+        rows.retain(|path| {
+            path.nodes
+                .last()
+                .is_some_and(|node| current_nodes.iter().any(|n| n.id == node.id))
+        });
+        self.refresh_groups(&mut groups, group_op.as_ref(), &current_nodes, &rows)?;
+
         // `edges`/`paths` describe exactly the *reported* nodes: one path
         // per node (parallel to `nodes`), and the deduplicated union of the
         // edges on those paths in (from, to, type) order. A find/filter-only
@@ -268,6 +390,7 @@ impl<'a> Executor<'a> {
         let count = current_nodes.len();
 
         Ok(QueryResult {
+            explain: spec.explain.then_some(explanation),
             nodes: current_nodes,
             edges: edge_set.into_values().collect(),
             paths,
@@ -277,7 +400,8 @@ impl<'a> Executor<'a> {
                 exec_us,
                 nodes_visited: self.nodes_visited,
                 truncated,
-                matched_before_limit: truncated.then_some(matched),
+                matched_before_limit: explicit_matched
+                    .or_else(|| (truncated || spec.limit.is_some()).then_some(matched)),
                 next_cursor,
             }),
             groups,
@@ -320,10 +444,18 @@ impl<'a> Executor<'a> {
         &mut self,
         start_nodes: &[GraphNodeRef],
         start_paths: &HashMap<String, GraphPath>,
+        start_rows: &[GraphPath],
         connect: &ConnectOp,
-    ) -> Result<(Vec<GraphNodeRef>, HashMap<String, GraphPath>), LainError> {
+    ) -> Result<
+        (
+            Vec<GraphNodeRef>,
+            HashMap<String, GraphPath>,
+            Vec<GraphPath>,
+        ),
+        LainError,
+    > {
         if start_nodes.is_empty() {
-            return Ok((Vec::new(), HashMap::new()));
+            return Ok((Vec::new(), HashMap::new(), Vec::new()));
         }
 
         let depth_range = connect.depth.to_range();
@@ -340,6 +472,7 @@ impl<'a> Executor<'a> {
         // `order` keeps first-report order across the walk loop.
         let mut best: HashMap<String, TraversalCandidate> = HashMap::new();
         let mut order: Vec<String> = Vec::new();
+        let mut rows = Vec::new();
 
         for direction in directions {
             for start_node in start_nodes {
@@ -349,6 +482,24 @@ impl<'a> Executor<'a> {
                     depth_range.clone(),
                     direction,
                 )? {
+                    let prefixes: Vec<_> = start_rows
+                        .iter()
+                        .filter(|p| p.nodes.last().is_some_and(|n| n.id == start_node.id))
+                        .collect();
+                    if prefixes.is_empty() {
+                        rows.push(
+                            start_paths
+                                .get(&start_node.id)
+                                .map(|prefix| compose_paths(prefix, &cand.path))
+                                .unwrap_or_else(|| cand.path.clone()),
+                        );
+                    } else {
+                        rows.extend(
+                            prefixes
+                                .into_iter()
+                                .map(|prefix| compose_paths(prefix, &cand.path)),
+                        );
+                    }
                     let replace = match best.get(&cand.node.id) {
                         None => {
                             order.push(cand.node.id.clone());
@@ -398,7 +549,12 @@ impl<'a> Executor<'a> {
                 paths.insert(id, path);
             }
         }
-        Ok((nodes, paths))
+        rows.retain(|p| {
+            p.nodes
+                .last()
+                .is_some_and(|n| nodes.iter().any(|v| v.id == n.id))
+        });
+        Ok((nodes, paths, rows))
     }
 
     /// One pure walk from `start_id` (never mixed-direction): plain BFS
@@ -570,28 +726,310 @@ impl<'a> Executor<'a> {
         })
     }
 
-    fn apply_filter(&self, nodes: &mut Vec<GraphNodeRef>, filter: &FilterOp) {
-        nodes.retain(|n| {
-            if let Some(ref type_sel) = filter.type_filter {
-                if !type_sel.matches(&n.node_type) {
-                    return false;
-                }
-            }
+    fn filter_matches(
+        &self,
+        n: &GraphNodeRef,
+        path: Option<&GraphPath>,
+        filter: &FilterOp,
+    ) -> bool {
+        filter
+            .type_filter
+            .as_ref()
+            .is_none_or(|v| v.matches(&n.node_type))
+            && filter
+                .label_filter
+                .as_ref()
+                .is_none_or(|v| v.matches(n.label.as_deref()))
+            && filter.name.as_ref().is_none_or(|v| v.matches(&n.name))
+            && [
+                ("repo", &filter.repo),
+                ("path", &filter.path),
+                ("resolution", &filter.resolution),
+                ("provenance", &filter.provenance),
+                ("usage", &filter.usage),
+                ("confidence", &filter.confidence),
+            ]
+            .iter()
+            .all(|(property, predicate)| {
+                predicate
+                    .as_ref()
+                    .is_none_or(|p| p.matches(&self.property(n, path, property)))
+            })
+    }
 
-            if let Some(ref label_sel) = filter.label_filter {
-                if !label_sel.matches(n.label.as_deref()) {
-                    return false;
-                }
+    /// Resolve node, path-endpoint, and traversed-edge properties without
+    /// flattening away the consumer that contributed a row.
+    fn property(
+        &self,
+        node: &GraphNodeRef,
+        path: Option<&GraphPath>,
+        property: &str,
+    ) -> serde_json::Value {
+        use serde_json::Value;
+        if let Some(property) = property.strip_prefix("consumer.") {
+            return path
+                .and_then(|p| p.nodes.first())
+                .map(|n| self.property(n, None, property))
+                .unwrap_or(Value::Null);
+        }
+        if let Some(property) = property.strip_prefix("provider.") {
+            return self.property(node, None, property);
+        }
+        if let Some(property) = property
+            .strip_prefix("neighbour.")
+            .or_else(|| property.strip_prefix("neighbor."))
+        {
+            return path
+                .and_then(|p| p.nodes.iter().rev().nth(1))
+                .map(|n| self.property(n, None, property))
+                .unwrap_or(Value::Null);
+        }
+        if let Some(property) = property.strip_prefix("provenance.") {
+            return self.property(node, path, property);
+        }
+        // Resolve common node fields without graph lookups or edge discovery.
+        match property {
+            "id" => return Value::String(node.id.clone()),
+            "type" | "node_type" => return Value::String(node.node_type.clone()),
+            "name" => return Value::String(node.name.clone()),
+            "label" => return Value::String(node.label.clone().unwrap_or_default()),
+            "path" => return node.path.clone().map(Value::String).unwrap_or(Value::Null),
+            "repo" | "repo_id" => {
+                return node
+                    .repo_id
+                    .clone()
+                    .map(Value::String)
+                    .unwrap_or(Value::Null)
             }
-
-            if let Some(ref name_sel) = filter.name {
-                if !name_sel.matches(&n.name) {
-                    return false;
-                }
+            "line_start" => return serde_json::json!(node.line_start),
+            "line_end" => return serde_json::json!(node.line_end),
+            _ => {}
+        }
+        let needs_edge = property.starts_with("edge.")
+            || matches!(
+                property,
+                "resolution" | "provenance" | "kind" | "source" | "usage" | "confidence"
+            );
+        let edge = needs_edge
+            .then(|| {
+                path.and_then(|p| p.edges.last()).cloned().or_else(|| {
+                    self.graph
+                        .get_neighbors(&node.id, PetDirection::Outgoing)
+                        .iter()
+                        .find(|(_, e)| e.edge_type == crate::schema::EdgeType::Binds)
+                        .map(|(_, e)| GraphEdgeRef::from(e))
+                })
+            })
+            .flatten();
+        if let Some(p) = property.strip_prefix("edge.") {
+            if p == "provenance"
+                || p == "kind"
+                || p == "source"
+                || p == "resolution"
+                || p == "confidence"
+            {
+                return self.property(node, path, p);
             }
+            if let Some(nested) = p.strip_prefix("provenance.") {
+                return self.property(node, path, nested);
+            }
+            return edge
+                .as_ref()
+                .and_then(|e| serde_json::to_value(e).ok())
+                .and_then(|v| v.get(p).cloned())
+                .unwrap_or(Value::Null);
+        }
+        match property {
+            "service" => {
+                let service = self
+                    .services
+                    .iter()
+                    .filter(|s| {
+                        Some(s.repo.as_str()) == node.repo_id.as_deref()
+                            && (s.paths.is_empty()
+                                || s.paths
+                                    .iter()
+                                    .any(|p| node.path.as_ref().is_some_and(|v| v.starts_with(p))))
+                    })
+                    .max_by_key(|s| s.paths.iter().map(String::len).max().unwrap_or(0));
+                service
+                    .map(|s| Value::String(s.name.clone()))
+                    .unwrap_or_else(|| {
+                        node.repo_id
+                            .clone()
+                            .map(Value::String)
+                            .unwrap_or(Value::Null)
+                    })
+            }
+            "resolution" => Value::String(
+                if edge.as_ref().is_some_and(|e| {
+                    matches!(
+                        e.edge_type.as_str(),
+                        "Binds" | "SendsHttp" | "Consumes" | "CallsHttp"
+                    )
+                }) {
+                    "resolved"
+                } else {
+                    "unresolved"
+                }
+                .into(),
+            ),
+            "provenance" | "kind" => edge
+                .as_ref()
+                .and_then(|e| e.provenance.as_ref())
+                .map(|p| {
+                    Value::String(
+                        match p {
+                            crate::schema::EdgeProvenance::Static { .. } => "static",
+                            crate::schema::EdgeProvenance::Heuristic { .. } => "heuristic",
+                            crate::schema::EdgeProvenance::Runtime { .. } => "runtime",
+                            crate::schema::EdgeProvenance::Confirmed { .. } => "confirmed",
+                            crate::schema::EdgeProvenance::Ref { .. } => "ref",
+                        }
+                        .into(),
+                    )
+                })
+                .unwrap_or(Value::Null),
+            "source" => edge
+                .as_ref()
+                .and_then(|e| e.provenance.as_ref())
+                .map(|p| {
+                    Value::String(match p {
+                        crate::schema::EdgeProvenance::Static { source } => format!("{source:?}"),
+                        crate::schema::EdgeProvenance::Heuristic { detector, .. } => {
+                            detector.clone()
+                        }
+                        crate::schema::EdgeProvenance::Runtime { trace_id, .. } => trace_id.clone(),
+                        crate::schema::EdgeProvenance::Confirmed { source } => source.clone(),
+                        crate::schema::EdgeProvenance::Ref { .. } => "service_reference".into(),
+                    })
+                })
+                .unwrap_or(Value::Null),
+            "usage" => edge
+                .as_ref()
+                .and_then(|e| e.usage)
+                .and_then(|v| serde_json::to_value(v).ok())
+                .unwrap_or(Value::Null),
+            "confidence" => edge
+                .and_then(|e| e.confidence)
+                .map(|v| serde_json::json!(v))
+                .unwrap_or(Value::Null),
+            "commit" => node
+                .commit
+                .clone()
+                .map(Value::String)
+                .unwrap_or(Value::Null),
+            _ => self.stored_property(node, property).unwrap_or(Value::Null),
+        }
+    }
 
-            true
-        });
+    fn stored_property(
+        &self,
+        node: &GraphNodeRef,
+        property: &str,
+    ) -> Result<serde_json::Value, LainError> {
+        let indices = self.graph.find_indices_by_name(&node.name);
+        let stored = self.graph.graph_ref_for_read();
+        let node = indices
+            .into_iter()
+            .filter_map(|index| stored.node_weight(index))
+            .find(|n| n.id == node.id)
+            .ok_or_else(|| {
+                LainError::Graph(format!("property lookup failed for node {}", node.id))
+            })?;
+        let mut parts = property.split('.');
+        let value = match parts.next().unwrap_or_default() {
+            "signature" => serde_json::to_value(&node.signature).map_err(LainError::Json)?,
+            "docstring" => serde_json::to_value(&node.docstring).map_err(LainError::Json)?,
+            "fan_in" => serde_json::to_value(&node.fan_in).map_err(LainError::Json)?,
+            "fan_out" => serde_json::to_value(&node.fan_out).map_err(LainError::Json)?,
+            "calls_in" => serde_json::to_value(&node.calls_in).map_err(LainError::Json)?,
+            "calls_out" => serde_json::to_value(&node.calls_out).map_err(LainError::Json)?,
+            "anchor_score" => serde_json::to_value(&node.anchor_score).map_err(LainError::Json)?,
+            "depth_from_main" => {
+                serde_json::to_value(&node.depth_from_main).map_err(LainError::Json)?
+            }
+            "co_change_count" => {
+                serde_json::to_value(&node.co_change_count).map_err(LainError::Json)?
+            }
+            "is_deprecated" => {
+                serde_json::to_value(&node.is_deprecated).map_err(LainError::Json)?
+            }
+            "container" => serde_json::to_value(&node.container).map_err(LainError::Json)?,
+            "last_lsp_sync" => {
+                serde_json::to_value(&node.last_lsp_sync).map_err(LainError::Json)?
+            }
+            "last_git_sync" => {
+                serde_json::to_value(&node.last_git_sync).map_err(LainError::Json)?
+            }
+            "commit_hash" => serde_json::to_value(&node.commit_hash).map_err(LainError::Json)?,
+            "is_hydrated" => serde_json::to_value(&node.is_hydrated).map_err(LainError::Json)?,
+            "contract" => serde_json::to_value(&node.contract).map_err(LainError::Json)?,
+            "entry" => serde_json::to_value(&node.entry).map_err(LainError::Json)?,
+            _ => return Ok(serde_json::Value::Null),
+        };
+        let mut current = &value;
+        for part in parts {
+            let Some(next) = current.get(part) else {
+                return Ok(serde_json::Value::Null);
+            };
+            current = next;
+        }
+        Ok(current.clone())
+    }
+
+    /// Grouping propagates failed stored-node lookups instead of manufacturing
+    /// a null bucket. Missing optional field values remain valid null keys.
+    fn group_property(
+        &self,
+        node: &GraphNodeRef,
+        path: Option<&GraphPath>,
+        property: &str,
+    ) -> Result<serde_json::Value, LainError> {
+        if let Some(property) = property.strip_prefix("consumer.") {
+            return path
+                .and_then(|p| p.nodes.first())
+                .map_or(Ok(serde_json::Value::Null), |node| {
+                    self.group_property(node, None, property)
+                });
+        }
+        if let Some(property) = property.strip_prefix("provider.") {
+            return self.group_property(node, None, property);
+        }
+        if let Some(property) = property
+            .strip_prefix("neighbour.")
+            .or_else(|| property.strip_prefix("neighbor."))
+        {
+            return path
+                .and_then(|p| p.nodes.iter().rev().nth(1))
+                .map_or(Ok(serde_json::Value::Null), |node| {
+                    self.group_property(node, None, property)
+                });
+        }
+        if [
+            "signature",
+            "docstring",
+            "fan_in",
+            "fan_out",
+            "calls_in",
+            "calls_out",
+            "anchor_score",
+            "depth_from_main",
+            "co_change_count",
+            "is_deprecated",
+            "container",
+            "last_lsp_sync",
+            "last_git_sync",
+            "commit_hash",
+            "is_hydrated",
+            "contract",
+            "entry",
+        ]
+        .contains(&property.split('.').next().unwrap_or_default())
+        {
+            return self.stored_property(node, property);
+        }
+        Ok(self.property(node, path, property))
     }
 
     fn apply_semantic_filter(
@@ -611,21 +1049,12 @@ impl<'a> Executor<'a> {
             .embed_query(&sem.like)
             .map_err(|e| LainError::Nlp(format!("Failed to embed query: {}", e)))?;
 
-        // Get full graph nodes to access their embeddings
-        let all_graph_nodes: HashMap<String, crate::schema::GraphNode> = self
-            .graph
-            .get_all_nodes()
-            .into_iter()
-            .map(|n| (n.id.clone(), n))
-            .collect();
-
         nodes.retain(|node_ref| {
-            let full_node = match all_graph_nodes.get(&node_ref.id) {
-                Some(n) => n,
-                None => return false,
+            let full_node = match self.graph.get_node(&node_ref.id) {
+                Ok(Some(node)) => node,
+                _ => return false,
             };
-
-            let node_emb = self.get_node_embedding(full_node);
+            let node_emb = self.get_node_embedding(&full_node);
             if let Some(emb) = node_emb {
                 cosine_similarity(&query_emb, &emb) > sem.threshold
             } else {
@@ -653,7 +1082,7 @@ impl<'a> Executor<'a> {
         }
 
         // On-demand embed
-        let text = build_enriched_text(node, self.workspace);
+        let text = self.node_embedding_text(node);
         self.embedder.embed(&text).ok().inspect(|emb| {
             self.embedding_cache
                 .lock()
@@ -661,30 +1090,175 @@ impl<'a> Executor<'a> {
         })
     }
 
-    fn apply_group(&self, nodes: &[GraphNodeRef], group: &GroupOp) -> Vec<QueryGroup> {
-        let mut groups: HashMap<String, Vec<GraphNodeRef>> = HashMap::new();
+    fn node_embedding_text(&self, node: &crate::schema::GraphNode) -> String {
+        let workspace = node
+            .repo_id
+            .as_ref()
+            .and_then(|repo| self.repo_workspaces.get(repo))
+            .map(std::path::PathBuf::as_path)
+            .unwrap_or(self.workspace);
+        build_enriched_text(node, workspace)
+    }
 
-        for node in nodes {
-            let key = match group.by {
-                GroupBy::Type => node.node_type.clone(),
-                GroupBy::Label => node.label.clone().unwrap_or_default(),
-                GroupBy::Name => node.name.clone(),
+    fn apply_group(
+        &self,
+        nodes: &[GraphNodeRef],
+        rows: &[GraphPath],
+        group: &GroupOp,
+    ) -> Result<Vec<QueryGroup>, LainError> {
+        for node in nodes.iter().chain(rows.iter().flat_map(|p| p.nodes.iter())) {
+            if !self.graph.has_node(&node.id) {
+                return Err(LainError::Graph(format!("group node {} vanished", node.id)));
+            }
+        }
+        let mut groups: BTreeMap<String, Vec<GraphNodeRef>> = BTreeMap::new();
+        let properties = match &group.by {
+            GroupBy::Type => vec!["type".to_string()],
+            GroupBy::Label => vec!["label".to_string()],
+            GroupBy::Name => vec!["name".to_string()],
+            GroupBy::Property(p) => vec![p.clone()],
+            GroupBy::Properties(p) => p.clone(),
+            GroupBy::PathPrefix(_) => vec!["path".to_string()],
+        };
+        for property in &properties {
+            let leaf = property
+                .strip_prefix("consumer.")
+                .or_else(|| property.strip_prefix("provider."))
+                .or_else(|| property.strip_prefix("neighbor."))
+                .or_else(|| property.strip_prefix("neighbour."))
+                .unwrap_or(property);
+            let valid = if let Some(edge) = leaf.strip_prefix("edge.") {
+                [
+                    "id",
+                    "type",
+                    "from",
+                    "to",
+                    "provenance",
+                    "confidence",
+                    "kind",
+                    "source",
+                    "resolution",
+                    "site",
+                    "detail",
+                ]
+                .contains(&edge.split('.').next().unwrap_or_default())
+            } else {
+                let root = leaf.split('.').next().unwrap_or_default();
+                [
+                    "type",
+                    "repo",
+                    "service",
+                    "resolution",
+                    "provenance",
+                    "confidence",
+                    "kind",
+                    "source",
+                    "commit",
+                ]
+                .contains(&root)
+                    || [
+                        "id",
+                        "node_type",
+                        "name",
+                        "label",
+                        "path",
+                        "repo_id",
+                        "line_start",
+                        "line_end",
+                        "signature",
+                        "docstring",
+                        "fan_in",
+                        "fan_out",
+                        "calls_in",
+                        "calls_out",
+                        "anchor_score",
+                        "depth_from_main",
+                        "co_change_count",
+                        "is_deprecated",
+                        "container",
+                        "last_lsp_sync",
+                        "last_git_sync",
+                        "commit_hash",
+                        "is_hydrated",
+                        "contract",
+                        "entry",
+                    ]
+                    .contains(&root)
+            };
+            if !valid {
+                return Err(LainError::InvalidArgument(format!("unknown group property `{property}`; expected a node property, repo, service, resolution, provenance, confidence, consumer.*, provider.*, neighbour.*, or edge.*")));
+            }
+        }
+        let add = |node: &GraphNodeRef,
+                   path: Option<&GraphPath>,
+                   groups: &mut BTreeMap<String, Vec<GraphNodeRef>>|
+         -> Result<(), LainError> {
+            let values: Vec<_> = properties
+                .iter()
+                .map(|p| self.group_property(node, path, p))
+                .collect::<Result<Vec<_>, _>>()?;
+            let key = if let GroupBy::PathPrefix(prefix) = &group.by {
+                if !node.path.as_ref().is_some_and(|p| p.starts_with(prefix)) {
+                    return Ok(());
+                }
+                prefix.clone()
+            } else if values.len() == 1 {
+                values[0]
+                    .as_str()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| values[0].to_string())
+            } else {
+                serde_json::to_string(&values).unwrap_or_default()
             };
             groups.entry(key).or_default().push(node.clone());
+            Ok(())
+        };
+        if rows.is_empty() {
+            for node in nodes {
+                add(node, None, &mut groups)?;
+            }
+        } else {
+            for path in rows {
+                if let Some(node) = path.nodes.last() {
+                    add(node, Some(path), &mut groups)?;
+                }
+            }
         }
-
-        groups
+        Ok(groups
             .into_iter()
             .map(|(key, nodes)| QueryGroup {
                 key,
                 count: nodes.len(),
                 nodes,
             })
-            .collect()
+            .collect())
+    }
+
+    fn refresh_groups(
+        &self,
+        groups: &mut Option<Vec<QueryGroup>>,
+        operation: Option<&GroupOp>,
+        nodes: &[GraphNodeRef],
+        rows: &[GraphPath],
+    ) -> Result<(), LainError> {
+        if let (Some(previous), Some(operation)) = (groups, operation) {
+            let mut updated: HashMap<_, _> = self
+                .apply_group(nodes, rows, operation)?
+                .into_iter()
+                .map(|group| (group.key.clone(), group))
+                .collect();
+            // Preserve group sorting and explicit group-limit selection.
+            *previous = previous
+                .iter()
+                .filter_map(|group| updated.remove(&group.key))
+                .collect();
+        }
+        Ok(())
     }
 
     fn apply_sort(&self, nodes: &mut [GraphNodeRef], sort: &SortOp) {
         let cmp = match (sort.by, sort.direction) {
+            (SortField::Count, _) => return,
             (SortField::Name, SortDirection::Asc) => {
                 |a: &GraphNodeRef, b: &GraphNodeRef| a.name.cmp(&b.name)
             }
@@ -805,4 +1379,65 @@ fn check_node_types(find: &FindOp) -> Result<(), LainError> {
         "unknown node type(s) {unknown:?}; valid types: {}",
         valid.join(", ")
     )))
+}
+
+#[cfg(test)]
+mod review_g_property_tests {
+    use super::*;
+
+    #[test]
+    fn review_g_semantic_text_uses_owning_repository() {
+        let home = tempfile::tempdir().unwrap();
+        let foreign = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join("lib.rs"), "wrong body\nwrong end\n").unwrap();
+        std::fs::write(foreign.path().join("lib.rs"), "foreign body\nforeign end\n").unwrap();
+        let graph = GraphDatabase::empty_writable();
+        let embedder = NlpEmbedder::new_stub();
+        let cache = Arc::new(Mutex::new(lru::LruCache::new(
+            std::num::NonZeroUsize::new(8).unwrap(),
+        )));
+        let executor = Executor::new(&graph, &embedder, &cache, home.path()).with_repo_workspaces(
+            HashMap::from([("foreign".into(), foreign.path().to_path_buf())]),
+        );
+        let mut node = crate::schema::GraphNode::new(
+            crate::schema::NodeType::Function,
+            "f".into(),
+            "lib.rs".into(),
+        )
+        .with_location(1, 2);
+        node.repo_id = Some("foreign".into());
+        let text = executor.node_embedding_text(&node);
+        assert!(text.contains("foreign body"), "{text}");
+        assert!(!text.contains("wrong body"), "{text}");
+    }
+
+    #[test]
+    fn review_g_properties_use_refs_and_missing_group_nodes_error() {
+        let graph = GraphDatabase::empty_writable();
+        let embedder = NlpEmbedder::new_stub();
+        let cache = Arc::new(Mutex::new(lru::LruCache::new(
+            std::num::NonZeroUsize::new(8).unwrap(),
+        )));
+        let executor = Executor::new(&graph, &embedder, &cache, std::path::Path::new("."));
+        let node = crate::schema::GraphNode::new(
+            crate::schema::NodeType::Function,
+            "retained".into(),
+            "lib.rs".into(),
+        );
+        let reference = GraphNodeRef::from(&node);
+        assert_eq!(
+            executor.property(&reference, None, "name"),
+            serde_json::json!("retained")
+        );
+        let group: GroupOp = serde_json::from_value(serde_json::json!({"by":"signature"})).unwrap();
+        assert!(executor
+            .apply_group(&[reference.clone()], &[], &group)
+            .is_err());
+        // An existing ID with a stale name also represents a failed lookup,
+        // rather than a legitimate missing optional signature.
+        let mut renamed = node;
+        renamed.name = "renamed".into();
+        graph.upsert_node(renamed).unwrap();
+        assert!(executor.apply_group(&[reference], &[], &group).is_err());
+    }
 }

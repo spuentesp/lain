@@ -314,6 +314,7 @@ async fn build_three_repo_federation(
     http_call.line_start = Some(20);
     http_call.line_end = Some(21);
     http_call.contract = vec![ContractFact::Consumer(ConsumerFact {
+        url_defaults: None,
         method: MethodSpec::Known(HttpMethod::Get),
         url: NormalizedUrl {
             host: HostPart::Env(vec!["BILLING_URL".to_string()]),
@@ -4786,6 +4787,7 @@ mod pr18_operation_id {
         n.id = format!("{repo}:HttpClientCall:{path}:{name}:{line}");
         n.line_start = Some(line);
         n.contract = vec![ContractFact::Consumer(ConsumerFact {
+            url_defaults: None,
             method: MethodSpec::Known(HttpMethod::Get),
             url: NormalizedUrl {
                 host: lain::federation::contracts::model::HostPart::Literal("orders.svc".into()),

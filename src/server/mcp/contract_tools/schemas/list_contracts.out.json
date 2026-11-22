@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "list_contracts data",
-  "description": "`data` field of the `list_contracts` envelope (§10.2). Endpoints sorted by `(service, key)`.",
+  "description": "`data` field of the `list_contracts` envelope (§10.2). Endpoints sorted by `(service, key)`. GraphQL SDL operations include request and response schemas; has_schema reports available field schemas.",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -23,7 +23,7 @@
             "type": "array",
             "items": { "$ref": "#/$defs/EvidenceRef" }
           },
-          "has_schema": { "type": "boolean" },
+          "has_schema": { "type": "boolean", "description": "At least one request, response or payload schema contains fields, including GraphQL scalar results and SDL arguments." },
           "bound_consumers": { "type": "integer" }
         },
         "required": ["endpoint", "providers", "has_schema", "bound_consumers"]

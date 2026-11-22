@@ -118,6 +118,11 @@ pub(crate) fn resolve_env_consumer(
     if vars.is_empty() {
         return None;
     }
+    // A declared env-to-service mapping establishes identity even when the
+    // repository has no source env file. Do not record a resolved var as a gap.
+    if let Some(service) = target_service_from_env(consumer, config) {
+        return Some(EnvResolution::Service(service));
+    }
     let mut distinct_hosts: Vec<String> = Vec::new();
     let mut any_unmapped = false;
     for var in vars {
@@ -371,5 +376,34 @@ mod endpoint_tests {
         let pat = endpoint_pattern("http://localhost:8000/graphql/").unwrap();
         assert_eq!(pat, "localhost:8000");
         assert!(endpoint_matches(&pat, &ep("http://localhost:8000/other")));
+    }
+}
+
+#[cfg(test)]
+mod declared_env_tests {
+    use super::*;
+    #[test]
+    fn declared_env_mapping_does_not_enter_unmapped_ledger() {
+        let config: ContractFederationConfig =
+            serde_yaml::from_str("services:\n  - name: api\n    repo: api\n    env: [API_URL]\n")
+                .unwrap();
+        let call = ConsumerFact {
+            url_defaults: None,
+            method: crate::federation::contracts::model::MethodSpec::Unknown,
+            url: crate::federation::contracts::model::NormalizedUrl {
+                host: HostPart::Env(vec!["API_URL".into()]),
+                template: Some("/items".into()),
+            },
+            via: crate::federation::contracts::model::CallVia::Library {
+                name: "fetch".into(),
+            },
+            url_expr: "process.env.API_URL".into(),
+            reads_complete: true,
+        };
+        let mut unmapped = BTreeMap::new();
+        let result =
+            resolve_env_consumer(&call, &EnvBindingIndex::default(), &config, &mut unmapped);
+        assert!(matches!(result, Some(EnvResolution::Service(ServiceName(name))) if name == "api"));
+        assert!(unmapped.is_empty());
     }
 }

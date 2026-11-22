@@ -82,6 +82,7 @@ fn consumer_node(
     n.id = make_id(repo, NodeType::HttpClientCall, path, name, line);
     n.line_start = Some(line);
     n.contract = vec![ContractFact::Consumer(ConsumerFact {
+        url_defaults: None,
         method,
         url,
         via,
@@ -895,10 +896,9 @@ fn rule_6_own_service_skip() {
 }
 
 #[test]
-fn rule_6_own_service_unknown_method_stays_unresolved() {
-    // An unknown-method relative call (`fetch("/api/ping", { method: verb })`)
-    // has heuristic confidence (0.6) and must not be promoted to a certain
-    // `Internal` binding.
+fn rule_6_own_service_only_unknown_method_is_internal() {
+    // A call with only an own-service compatible endpoint is internal,
+    // even when its HTTP method is dynamic. It creates no cross-service edge.
     let p = provider_node(
         "billing",
         "src/billing.py",
@@ -926,16 +926,20 @@ fn rule_6_own_service_unknown_method_stays_unresolved() {
     let call_id = GlobalId::parse(&c.id).expect("parse");
     let resolution = out.index.consumer(&call_id).expect("consumer resolution");
     assert!(
-        matches!(
-            resolution.target,
-            Some(ConsumerTarget::Unresolved {
-                reason: UnresolvedReason::NoMatch,
-                ..
-            })
-        ),
-        "unknown-method same-service call must remain Unresolved, got {:?}",
+        matches!(resolution.target, Some(ConsumerTarget::Internal)),
+        "same-service-only call must be Internal, got {:?}",
         resolution.target
     );
+    let coverage = crate::federation::contracts::diff::build_coverage(
+        &out.index,
+        vec![],
+        crate::federation::contracts::diff::Scope {
+            reviewed: vec![],
+            unreviewed: vec![],
+            configured_only: true,
+        },
+    );
+    assert!(coverage.unresolved_consumers.is_empty());
 }
 
 #[test]
@@ -1162,6 +1166,7 @@ fn confirmed_binding_reads_complete_comes_from_the_matched_fact() {
     c.line_start = Some(10);
     c.contract = vec![
         ContractFact::Consumer(ConsumerFact {
+            url_defaults: None,
             method: MethodSpec::Known(HttpMethod::Post),
             url: url_with_host_method(HostPart::Literal("orders.svc".into()), Some("/api/orders")),
             via: CallVia::Library {
@@ -4022,6 +4027,14 @@ fn rpc_consumer_node(
     n
 }
 
+fn hostless_rpc_consumer_node(repo: &str, service: &str, method: &str, line: u32) -> GraphNode {
+    let mut n = rpc_consumer_node(repo, service, method, "", line);
+    if let Some(ContractFact::RpcConsumer(f)) = n.contract.first_mut() {
+        f.channel_host_part = HostPart::None;
+    }
+    n
+}
+
 /// Config whose services all share the repo name (the implicit
 /// service mapping) with optional `hosts` for channel resolution.
 fn multi_service_config(services: &[(&str, &[&str])]) -> ContractFederationConfig {
@@ -4311,6 +4324,66 @@ fn rpc_second_pass_rejects_a_provider_outside_the_channel_service() {
     assert!(out.binds.is_empty(), "no Binds expected: {:?}", out.binds);
 }
 
+#[test]
+fn unmatched_test_site_is_not_a_call_but_production_site_stays_unresolved() {
+    let cfg = multi_service_config(&[("web", &[]), ("orders", &[])]);
+    let prod = ws_consumer_node("web", "client.example.com", "/live", 10);
+    let mut test = ws_consumer_node("web", "client:test*.com", "/live", 20);
+    test.path = "tests/client.test.js".into();
+    test.id = make_id(
+        "web",
+        NodeType::HttpClientCall,
+        "tests/client.test.js",
+        "/live",
+        20,
+    );
+
+    let out = ContractJoiner::run(&[prod.clone(), test.clone()], &[], &cfg);
+    let reason = |n: &GraphNode| {
+        let cid = GlobalId::parse(&n.id).unwrap();
+        match out.index.consumer(&cid).and_then(|r| r.target.clone()) {
+            Some(ConsumerTarget::Unresolved { reason, .. }) => Some(reason),
+            _ => None,
+        }
+    };
+    assert_eq!(reason(&test), Some(UnresolvedReason::NotACall));
+    assert_ne!(reason(&prod), Some(UnresolvedReason::NotACall));
+    assert!(reason(&prod).is_some(), "production site stays unresolved");
+}
+
+#[test]
+fn hostless_rpc_stub_binds_to_the_unique_proto_owner() {
+    // A tonic/python stub with no dial address still names a proto
+    // service+method; exactly one other service exposes it, so it binds.
+    let provider = rpc_provider_node("orders", "pkg.Greeter", "SayHi", 10);
+    let consumer = hostless_rpc_consumer_node("billing", "Greeter", "SayHi", 20);
+    let cfg = multi_service_config(&[("orders", &[]), ("billing", &[])]);
+
+    let out = ContractJoiner::run(&[provider, consumer.clone()], &[], &cfg);
+    assert_eq!(
+        out.binds.len(),
+        1,
+        "unique proto owner must bind: {:?}",
+        out.binds
+    );
+    assert_eq!(out.binds[0].provider_service.0, "orders");
+}
+
+#[test]
+fn hostless_rpc_stub_with_two_owners_stays_unresolved() {
+    let p1 = rpc_provider_node("orders", "pkg.Greeter", "SayHi", 10);
+    let p2 = rpc_provider_node("greeter", "other.Greeter", "SayHi", 10);
+    let consumer = hostless_rpc_consumer_node("billing", "Greeter", "SayHi", 20);
+    let cfg = multi_service_config(&[("orders", &[]), ("greeter", &[]), ("billing", &[])]);
+
+    let out = ContractJoiner::run(&[p1, p2, consumer.clone()], &[], &cfg);
+    assert!(
+        out.binds.is_empty(),
+        "ambiguous owners must not bind: {:?}",
+        out.binds
+    );
+}
+
 // ─── WebSocket route filter (consumer_protocol resolve_websocket) ─────
 
 #[test]
@@ -4336,4 +4409,154 @@ fn ws_consumer_with_route_mismatch_does_not_bind() {
         "no Binds edge expected for a route mismatch: {:?}",
         out.binds
     );
+}
+
+#[test]
+fn source_url_default_keeps_declared_env_service_identity() {
+    let provider = provider_node(
+        "orders",
+        "src/orders.py",
+        "items",
+        10,
+        HttpMethod::Get,
+        "/items",
+    );
+    let mut consumer = consumer_node(
+        "billing",
+        "src/client.js",
+        "fetch_items",
+        1,
+        MethodSpec::Known(HttpMethod::Get),
+        url_with_host_method(HostPart::Literal("default.example".into()), Some("/items")),
+        CallVia::Library {
+            name: "fetch".into(),
+        },
+    );
+    if let ContractFact::Consumer(fact) = &mut consumer.contract[0] {
+        fact.url_defaults = Some(vec!["ORDERS_URL".into()]);
+    }
+    let out = ContractJoiner::run(&[provider, consumer], &[], &default_config());
+    assert_eq!(
+        out.binds.len(),
+        1,
+        "the declared env mapping must beat its literal default host"
+    );
+    assert!(out.index.external.is_empty());
+    assert!(out.unresolved_env_vars.is_empty());
+}
+
+#[test]
+fn source_url_default_binding_is_heuristic() {
+    let provider = provider_node(
+        "orders",
+        "src/orders.py",
+        "items",
+        10,
+        HttpMethod::Get,
+        "/items",
+    );
+    let mut consumer = consumer_node(
+        "billing",
+        "src/client.js",
+        "fetch_items",
+        1,
+        MethodSpec::Known(HttpMethod::Get),
+        url_with_host_method(HostPart::Literal("orders.svc".into()), Some("/items")),
+        CallVia::Library {
+            name: "fetch".into(),
+        },
+    );
+    if let ContractFact::Consumer(fact) = &mut consumer.contract[0] {
+        fact.url_defaults = Some(vec!["OPTIONAL_URL".into()]);
+    }
+    let out = ContractJoiner::run(&[provider, consumer], &[], &default_config());
+    assert_eq!(out.binds.len(), 1);
+    assert_eq!(out.binds[0].confidence, 0.5);
+    assert!(matches!(
+        out.binds[0].provenance,
+        crate::schema::EdgeProvenance::Heuristic { .. }
+    ));
+}
+
+#[test]
+fn declared_env_does_not_bind_a_different_services_literal_default() {
+    let provider = provider_node(
+        "orders",
+        "src/orders.py",
+        "items",
+        10,
+        HttpMethod::Get,
+        "/items",
+    );
+    let mut consumer = consumer_node(
+        "billing",
+        "src/client.js",
+        "fetch_items",
+        1,
+        MethodSpec::Known(HttpMethod::Get),
+        url_with_host_method(HostPart::Literal("orders.svc".into()), Some("/items")),
+        CallVia::Library {
+            name: "fetch".into(),
+        },
+    );
+    if let ContractFact::Consumer(fact) = &mut consumer.contract[0] {
+        fact.url_defaults = Some(vec!["PAYMENTS_URL".into()]);
+    }
+    let mut config = default_config();
+    let mut service = config.services[0].clone();
+    service.name = "payments".into();
+    service.repo = "payments".into();
+    service.env = vec!["PAYMENTS_URL".into()];
+    service.hosts = vec!["payments.svc".into()];
+    config.services.push(service);
+    let out = ContractJoiner::run(&[provider, consumer], &[], &config);
+    assert!(
+        out.binds.is_empty(),
+        "a declared override must not use a different host's fallback"
+    );
+}
+
+#[test]
+fn followup_review_url_default_never_increases_ambiguous_confidence() {
+    let orders = provider_node(
+        "orders",
+        "src/orders.py",
+        "items",
+        1,
+        HttpMethod::Get,
+        "/items",
+    );
+    let payments = provider_node(
+        "payments",
+        "src/payments.py",
+        "items",
+        1,
+        HttpMethod::Get,
+        "/items",
+    );
+    let mut consumer = consumer_node(
+        "billing",
+        "src/client.js",
+        "fetch_items",
+        1,
+        MethodSpec::Known(HttpMethod::Get),
+        url_with_host_method(HostPart::None, Some("/items")),
+        CallVia::Library {
+            name: "fetch".into(),
+        },
+    );
+    if let ContractFact::Consumer(fact) = &mut consumer.contract[0] {
+        fact.url_defaults = Some(vec!["PATH_OVERRIDE".into()]);
+    }
+    let id = GlobalId::from_canonical(&consumer.id);
+    let out = ContractJoiner::run(&[orders, payments, consumer], &[], &default_config());
+    assert_eq!(out.binds.len(), 2);
+    for bind in &out.binds {
+        assert_eq!(bind.confidence, 0.3);
+        assert!(
+            matches!(&bind.provenance, EdgeProvenance::Heuristic { detector, confidence } if detector == "url_default" && *confidence == 0.3)
+        );
+    }
+    assert!(matches!(&out.index.consumer(&id).unwrap().target,
+        Some(ConsumerTarget::Binds { confidence, provenance: EdgeProvenance::Heuristic { confidence: recorded, .. }, .. }) if *confidence == 0.3 && recorded == confidence));
 }

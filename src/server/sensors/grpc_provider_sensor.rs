@@ -301,6 +301,7 @@ pub fn scan_workspace_grpc_with_report(
     let unresolved_records: Vec<UnresolvedRecord> = unresolved_by_reason
         .into_iter()
         .map(|(reason, (count, sample_ids))| UnresolvedRecord {
+            locations: None,
             reason,
             count,
             sample_ids,

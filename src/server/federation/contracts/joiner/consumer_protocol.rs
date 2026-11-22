@@ -314,9 +314,12 @@ pub fn resolve_rpc_consumer(
     binds: &mut Vec<crate::federation::contracts::joiner::BindsEdge>,
 ) -> ConsumerResolution {
     let candidate_services: Vec<ServiceName> = match &consumer.channel_host_part {
-        HostPart::None => {
-            return rpc_stub_unknown(call_id, own_service);
-        }
+        // No dial address evidence at all (generated stub built from a
+        // channel injected elsewhere, or a non-literal host expression):
+        // fall back to the proto contract itself. An empty candidate set
+        // means "any service"; `resolve_by_key` still refuses to bind when
+        // more than one service exposes the method.
+        HostPart::None => Vec::new(),
         HostPart::Literal(host) => {
             let mut svcs: Vec<ServiceName> = config
                 .services
@@ -330,9 +333,7 @@ pub fn resolve_rpc_consumer(
             svcs.sort();
             svcs
         }
-        HostPart::Env(var) if var.is_empty() => {
-            return rpc_stub_unknown(call_id, own_service);
-        }
+        HostPart::Env(var) if var.is_empty() => Vec::new(),
         HostPart::Env(vars) => {
             // A file that reads several env vars may dial through
             // only one of them (an SDK reads `XDG_CONFIG_HOME` and its
@@ -391,10 +392,10 @@ pub fn resolve_rpc_consumer(
             svcs.sort();
             svcs
         }
-        HostPart::Expr(_) => {
-            return rpc_stub_unknown(call_id, own_service);
-        }
+        HostPart::Expr(_) => Vec::new(),
     };
+    // Empty candidate set = host unknown: match on the proto key alone.
+    let any_host = candidate_services.is_empty();
     let target_key = ContractKey::Rpc {
         system: consumer.system,
         service: consumer.service.clone(),
@@ -407,7 +408,7 @@ pub fn resolve_rpc_consumer(
         &target_key,
         endpoints,
         |(svc, key): &(ServiceName, ContractKey)| {
-            candidate_services_ref.contains(svc) && key == target_key_ref
+            (any_host || candidate_services_ref.contains(svc)) && key == target_key_ref
         },
         AmbiguityPolicy::RpcStubUnknown,
         own_service,
@@ -432,7 +433,7 @@ pub fn resolve_rpc_consumer(
         &target_key,
         endpoints,
         |(svc, key): &(ServiceName, ContractKey)| {
-            candidate_services_ref2.contains(svc)
+            (any_host || candidate_services_ref2.contains(svc))
                 && matches!(
                     key,
                     ContractKey::Rpc { ref service, method, .. }

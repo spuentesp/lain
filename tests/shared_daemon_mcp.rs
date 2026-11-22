@@ -1062,6 +1062,10 @@ fn spawn_stale_info(
                 Ok((stream, _)) => {
                     // A connection that carries no request (the bridge
                     // connect) must not pin the fake forever.
+                    // The listener is non-blocking; macOS/BSD pass that mode to
+                    // the accepted socket (Linux does not), which would make the
+                    // read time out as `WouldBlock` before the request arrives.
+                    stream.set_nonblocking(false).unwrap();
                     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
                     let mut writer = stream.try_clone().unwrap();
                     let mut reader = BufReader::new(stream);

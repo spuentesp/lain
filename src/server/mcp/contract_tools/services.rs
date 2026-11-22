@@ -213,6 +213,24 @@ fn parse_cursor(
     Ok(Some(cur))
 }
 
+/// Absolute on-disk checkout of `repo`, so a consumer resolves
+/// code-graph paths exactly instead of guessing a directory from the repo
+/// id (ids like `nat` need not match the checkout name). `None` for pinned
+/// snapshot reads, where no live checkout is in play.
+fn repo_checkout_path(
+    fed: Option<&crate::federation::federated_index::FederatedIndex>,
+    repo: &crate::federation::repo_id::RepoId,
+) -> Option<String> {
+    let local = fed?.get_repo(repo)?.source().local_path().to_path_buf();
+    if local.as_os_str().is_empty() {
+        return None;
+    }
+    let abs = std::fs::canonicalize(&local)
+        .or_else(|_| std::path::absolute(&local))
+        .ok()?;
+    Some(abs.display().to_string())
+}
+
 // ─── list_services implementation ─────────────────────────────────────
 
 async fn run_list_services(
@@ -237,6 +255,7 @@ async fn run_list_services(
         ));
     };
 
+    let fed_opt = resolved.live_federation();
     let mut items: Vec<Value> = Vec::new();
     for (name, info) in idx.services.iter() {
         if let Some(ref r) = repo_filter {
@@ -246,14 +265,18 @@ async fn run_list_services(
         }
         let consumer_services = count_distinct_consumer_services(&idx, info);
         let unresolved_inbound = count_unresolved_inbound(&idx, info);
-        items.push(json!({
+        let mut item = json!({
             "service": name.0.as_str(),
             "repo": info.repo.as_str(),
             "paths": info.paths,
             "endpoints": info.endpoint_ids.len(),
             "consumer_services": consumer_services,
             "unresolved_inbound": unresolved_inbound,
-        }));
+        });
+        if let Some(path) = repo_checkout_path(fed_opt, &info.repo) {
+            item["repo_path"] = json!(path);
+        }
+        items.push(item);
     }
 
     let cursor_token = cursor.as_ref().map(|c| c.after.clone());
@@ -435,6 +458,9 @@ async fn run_get_service(
         "consumers": consumers_page,
         "unresolved_candidates": unresolved_candidates,
     });
+    if let Some(path) = repo_checkout_path(fed_opt, &info.repo) {
+        data["repo_path"] = json!(path);
+    }
     data["scope"] = scope;
     if let Some(tok) = next_cursor {
         data["cursor"] = json!(tok);
@@ -809,6 +835,7 @@ fn provenance_to_json(p: &crate::schema::EdgeProvenance) -> Value {
             Some(trace_id.clone()),
             Some(last_seen_unix.to_string()),
         ),
+        crate::schema::EdgeProvenance::Ref { .. } => ("ref", 1.0_f32, None, None),
         crate::schema::EdgeProvenance::Confirmed { source } => {
             ("confirmed", 1.0_f32, None, Some(source.clone()))
         }

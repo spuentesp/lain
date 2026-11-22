@@ -76,6 +76,8 @@ pub struct HttpClientCall {
     pub url: NormalizedUrl,
     pub via: CallVia,
     pub url_expr: String,
+    /// Source-declared environment fallbacks used for this URL, never process env.
+    pub default_env: Vec<String>,
     pub reads_complete: bool,
     pub path: String,
     pub line: u32,
@@ -634,6 +636,7 @@ fn synthetic_url_call(
         method: MethodSpec::Unknown,
         url: final_url,
         via: CallVia::Library { name: via_lib },
+        default_env: Vec::new(),
         url_expr: format!("{}://dynamic", framework.effective_id()),
         reads_complete: true,
         path: path.to_string(),
@@ -689,6 +692,12 @@ fn build_call(
         url: final_url,
         via,
         url_expr,
+        default_env: if ctx.js {
+            url.map(|u| js_resolution::default_envs(u, src, ctx, &url_scope_chain))
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        },
         reads_complete: true,
         path: path.to_string(),
         line: call_line,
@@ -2319,6 +2328,7 @@ fn build_graph(
     node.line_start = Some(call.line);
     node.contract = vec![crate::federation::contracts::model::ContractFact::Consumer(
         ConsumerFact {
+            url_defaults: (!call.default_env.is_empty()).then(|| call.default_env.clone()),
             method: call.method.clone(),
             url: call.url.clone(),
             via: call.via.clone(),
@@ -3311,6 +3321,7 @@ requests.Post(\"/b\")
             via: CallVia::Library {
                 name: "requests".to_string(),
             },
+            default_env: Vec::new(),
             url_expr: "\"/api/x\"".to_string(),
             reads_complete: true,
             path: "src/main.py".to_string(),
@@ -3350,6 +3361,7 @@ requests.Post(\"/b\")
             via: CallVia::Library {
                 name: "requests".to_string(),
             },
+            default_env: Vec::new(),
             url_expr: "\"/healthz\"".to_string(),
             reads_complete: true,
             path: "src/main.py".to_string(),

@@ -48,7 +48,8 @@
               "dynamic_sql",
               "orm_dynamic_query",
               "external_schema_ref",
-              "dynamic_target"
+              "dynamic_target",
+              "not_a_call"
             ]
           },
           "target_service": {
@@ -142,6 +143,106 @@
     },
     "scope": {
       "$ref": "#/$defs/Scope"
+    },
+    "summary": {
+      "type": "object",
+      "description": "Counts of ORM dynamic query sites across the complete filtered result, before pagination. Grouped by repo, directory, and file.",
+      "properties": {
+        "orm_dynamic_query": {
+          "type": "object",
+          "properties": {
+            "total": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "directories": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "repo": {
+                    "type": "string"
+                  },
+                  "directory": {
+                    "type": "string"
+                  },
+                  "count": {
+                    "type": "integer",
+                    "minimum": 1
+                  }
+                },
+                "required": [
+                  "repo",
+                  "directory",
+                  "count"
+                ]
+              }
+            },
+            "files": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "repo": {
+                    "type": "string"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "count": {
+                    "type": "integer",
+                    "minimum": 1
+                  }
+                },
+                "required": [
+                  "repo",
+                  "path",
+                  "count"
+                ]
+              }
+            },
+            "repos": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "repo": {
+                    "type": "string"
+                  },
+                  "count": {
+                    "type": "integer",
+                    "minimum": 1
+                  }
+                },
+                "required": [
+                  "repo",
+                  "count"
+                ]
+              }
+            },
+            "groups_are_samples": {
+              "type": "boolean",
+              "description": "False for exact sensor location counts (including explicit <other> overflow buckets); true only for legacy ledgers without location counts."
+            },
+            "source": {
+              "enum": [
+                "consumer_index",
+                "sensor_ledger"
+              ],
+              "description": "Live views contain consumer-index evidence only; pinned sensor ledgers also count sites that emit no consumer nodes."
+            }
+          },
+          "required": [
+            "total",
+            "repos",
+            "directories",
+            "files"
+          ]
+        }
+      },
+      "required": [
+        "orm_dynamic_query"
+      ]
     }
   },
   "required": [
@@ -444,6 +545,16 @@
             "integer",
             "null"
           ]
+        },
+        "provenance": {
+          "type": "string",
+          "enum": [
+            "Generated",
+            "ConfiguredWrapper",
+            "FollowedWrapper",
+            "InferredWrapper"
+          ],
+          "description": "Typed candidate identity evidence; descriptions are display text only."
         }
       },
       "required": [
@@ -453,7 +564,8 @@
         "site",
         "evidence",
         "enclosing_name",
-        "enclosing_start_line"
+        "enclosing_start_line",
+        "provenance"
       ]
     }
   }

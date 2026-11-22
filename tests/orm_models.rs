@@ -858,3 +858,27 @@ fn js_ts_migration_comments_do_not_create_sql_evidence() {
         Some("migrations/0003.sql")
     );
 }
+
+#[test]
+fn dynamic_orm_model_reports_retain_exact_location_counts() {
+    let tmp = tempfile::tempdir().unwrap();
+    for i in 0..40 {
+        write(tmp.path(), &format!("src/model{i}.js"),
+            "const Product = sequelize.define('Product', { name: { type: DataTypes.STRING } }, { tableName: process.env.TABLE });\n");
+    }
+    let graph = GraphDatabase::new(&tmp.path().join("graph.bin")).unwrap();
+    let report = lain::sensors::orm_model_sensor::scan_workspace_orm_models_with_report(
+        &graph,
+        tmp.path(),
+        &RepoNamespace::for_test(),
+    )
+    .unwrap();
+    let record = &report.unresolved[0];
+    // Each model retains two distinct diagnostics (table and field mapping).
+    assert_eq!(record.count, 80);
+    assert!(record.sample_ids.len() <= 5);
+    let locations = record.locations.as_ref().unwrap();
+    assert_eq!(locations.files.len(), 40);
+    assert!(locations.files.values().all(|n| *n == 2));
+    assert_eq!(locations.directories["src"], 80);
+}

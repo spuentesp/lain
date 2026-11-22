@@ -411,6 +411,7 @@ mod tests {
             repos: vec![
                 RepoConfig {
                     packages: Vec::new(),
+                    index_timeout_secs: None,
                     id: "a".into(),
                     source: SourceConfig::WorkspaceDir {
                         path: PathBuf::from("/a"),
@@ -418,6 +419,7 @@ mod tests {
                 },
                 RepoConfig {
                     packages: Vec::new(),
+                    index_timeout_secs: None,
                     id: "b".into(),
                     source: SourceConfig::WorkspaceDir {
                         path: PathBuf::from("/b"),
@@ -455,6 +457,7 @@ mod tests {
             repos: vec![
                 RepoConfig {
                     packages: Vec::new(),
+                    index_timeout_secs: None,
                     id: "a".into(),
                     source: SourceConfig::WorkspaceDir {
                         path: PathBuf::from("/a"),
@@ -462,6 +465,7 @@ mod tests {
                 },
                 RepoConfig {
                     packages: Vec::new(),
+                    index_timeout_secs: None,
                     id: "b".into(),
                     source: SourceConfig::WorkspaceDir {
                         path: PathBuf::from("/b"),
@@ -469,6 +473,7 @@ mod tests {
                 },
                 RepoConfig {
                     packages: Vec::new(),
+                    index_timeout_secs: None,
                     id: "c".into(),
                     source: SourceConfig::WorkspaceDir {
                         path: PathBuf::from("/c"),
@@ -492,6 +497,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let repo = RepoConfig {
             packages: Vec::new(),
+            index_timeout_secs: None,
             id: "test".to_string(),
             source: crate::server::federation::config::SourceConfig::WorkspaceDir {
                 path: tmp.path().to_path_buf(),

@@ -105,6 +105,9 @@ pub struct FederatedIndex {
     /// Package names each repo publishes (`repos[].packages`), keyed by
     /// repo id. Read by [`Self::repo_depends_on`] as extra identifiers.
     declared_packages: DashMap<String, Vec<String>>,
+    /// Per-repo indexing budgets (`repos[].index_timeout_secs`), applied
+    /// to each `RepoIndex` when it is added.
+    index_timeouts: DashMap<String, u64>,
     /// The `repos.yaml` the federation was loaded from; see [`Self::set_config_path`].
     config_path: RwLock<Option<std::path::PathBuf>>,
     /// Repo index passes running right now, and the most that ran at
@@ -137,6 +140,9 @@ pub struct FederatedIndex {
             Vec<crate::federation::contracts::service_refs::ServiceRef>,
         >,
     >,
+    /// Reference-node inventory, including nodes from interrupted joins.
+    /// Loaded backends are scanned once; empty backends start with no ids.
+    reference_node_ids: parking_lot::Mutex<Option<std::collections::BTreeSet<String>>>,
     /// Atomic `(contract_index, binds)` pair (TLA+ RejoinProtocol
     /// variant (c) — epoch-stamped atomic publish). The rejoin
     /// produces both halves in one write-lock acquisition; readers
@@ -202,7 +208,11 @@ impl FederatedIndex {
     }
 
     pub fn new(backend: Arc<dyn GraphBackend>) -> Self {
+        let reference_node_ids = parking_lot::Mutex::new(
+            (backend.node_count() == 0).then(std::collections::BTreeSet::new),
+        );
         Self {
+            reference_node_ids,
             repos: RwLock::new(std::collections::BTreeMap::new()),
             backend,
             symbol_to_repos: DashMap::new(),
@@ -213,6 +223,7 @@ impl FederatedIndex {
             projection_lock: parking_lot::Mutex::new(()),
             depends_cache: DashMap::new(),
             declared_packages: DashMap::new(),
+            index_timeouts: DashMap::new(),
             config_path: RwLock::new(None),
             index_concurrency_now: AtomicUsize::new(0),
             index_concurrency_peak: AtomicUsize::new(0),
@@ -453,7 +464,10 @@ impl FederatedIndex {
         // pattern is to roll back AFTER `RepoIndex::new` fails, when
         // we know no partial state was committed.
         let index = match RepoIndex::new(source, &per_repo_dir) {
-            Ok(idx) => Arc::new(idx),
+            Ok(idx) => {
+                idx.set_index_timeout(self.index_timeouts.get(id.as_str()).map(|v| *v));
+                Arc::new(idx)
+            }
             Err(e) => {
                 // Best-effort cleanup. A failure here logs but
                 // doesn't override the original error.
@@ -924,6 +938,26 @@ impl FederatedIndex {
     ///    projection from the current node set, so a node
     ///    disappearing (or losing a match) must retract the edge the
     ///    next time that repo's `project_edges` runs. Reconciled.
+    /// Whether `error` is a projection racing a concurrent re-index: an edge
+    /// names a node the projected node set no longer (or does not yet) holds.
+    /// That repairs itself on the next projection, so the repo is queued for
+    /// one and the caller must not report a failure or mark it degraded.
+    pub fn defer_projection_race(&self, id: &RepoId, error: &LainError) -> bool {
+        let LainError::NotFound(message) = error else {
+            return false;
+        };
+        if !(message.contains("node") && message.contains("not found")) {
+            return false;
+        }
+        tracing::debug!(
+            "[federation] projection of {id} raced a re-index ({message}); will project again"
+        );
+        if let Some(repo) = self.get_repo(id) {
+            repo.mark_projection_stale();
+        }
+        true
+    }
+
     pub async fn project_edges(&self, id: &RepoId) -> Result<(), LainError> {
         let repo = self
             .get_repo(id)
@@ -990,7 +1024,9 @@ impl FederatedIndex {
                             continue;
                         };
                         let kind = parse_node_type(kind_str);
-                        tracing::warn!(
+                        // Expected whenever the owning repo has not projected yet;
+                        // its own projection overwrites the placeholder.
+                        tracing::debug!(
                             "[federation] {:?}: cross-repo target {} not yet projected; upserting placeholder (owning repo's projection will overwrite when it runs)",
                             id.as_str(),
                             gid.as_str(),
@@ -1466,17 +1502,24 @@ impl FederatedIndex {
         // Never let task completion order choose which cross-repo edges exist.
         for (id, _) in self.list_repos() {
             if let Err(error) = self.project_nodes(&id).await {
-                tracing::warn!("node projection failed for {id}: {error}");
-                if let Some(repo) = self.get_repo(&id) {
-                    repo.set_health(RepoHealth::Degraded);
+                if !self.defer_projection_race(&id, &error) {
+                    tracing::warn!("node projection failed for {id}: {error}");
+                    if let Some(repo) = self.get_repo(&id) {
+                        repo.set_health(RepoHealth::Degraded);
+                    }
                 }
             }
         }
         for (id, _) in self.list_repos() {
             if let Err(error) = self.project_edges(&id).await {
-                tracing::warn!("edge projection failed for {id}: {error}");
-                if let Some(repo) = self.get_repo(&id) {
-                    repo.set_health(RepoHealth::Degraded);
+                if self.defer_projection_race(&id, &error) {
+                    // The graph moved between projecting nodes and edges: not a
+                    // failure. The repo is queued for another projection.
+                } else {
+                    tracing::warn!("edge projection failed for {id}: {error}");
+                    if let Some(repo) = self.get_repo(&id) {
+                        repo.set_health(RepoHealth::Degraded);
+                    }
                 }
             }
             self.refresh_service_refs(&id);
@@ -1658,6 +1701,112 @@ impl FederatedIndex {
         self.contracts_dirty.mark();
     }
 
+    /// Materialize reference sites and declared-service anchors. These nodes
+    /// have dedicated labels so reconciliation can retract them independently
+    /// of sensor-owned nodes; references never enter executable contract facts.
+    fn reference_bindings(
+        &self,
+        config: &ContractFederationConfig,
+    ) -> Result<Vec<GraphEdge>, LainError> {
+        use crate::federation::contracts::service_refs::RefOutcome;
+        use crate::schema::{EdgeProvenance, EdgeType, NodeType, RepoNamespace};
+        let mut edges = Vec::new();
+        let mut nodes = std::collections::BTreeMap::new();
+        for (repo, refs) in self.service_refs.read().iter() {
+            for reference in refs {
+                let RefOutcome::Resolved(service) = &reference.outcome else {
+                    continue;
+                };
+                let Some(decl) = config.services.iter().find(|s| s.name == service.0) else {
+                    continue;
+                };
+                let target_repo = RepoId::new(&decl.repo)?;
+                let mut source = GraphNode::new_in(
+                    NodeType::ServiceRef,
+                    format!("ref:{}", reference.url),
+                    reference.path.clone(),
+                    &RepoNamespace::from_repo_id(repo),
+                );
+                source.line_start = Some(reference.line);
+                source.label = Some("service_reference".into());
+                source.repo_id = Some(repo.as_str().into());
+                source.id = GlobalId::new(
+                    repo,
+                    NodeType::ServiceRef,
+                    &source.path,
+                    &source.name,
+                    source.line_start,
+                )
+                .as_str()
+                .into();
+                let mut target = GraphNode::new_in(
+                    NodeType::Module,
+                    service.0.clone(),
+                    "<service>".into(),
+                    &RepoNamespace::from_repo_id(&target_repo),
+                );
+                target.label = Some("service_anchor".into());
+                target.repo_id = Some(decl.repo.clone());
+                target.id = GlobalId::new(
+                    &target_repo,
+                    NodeType::Module,
+                    &target.path,
+                    &target.name,
+                    None,
+                )
+                .as_str()
+                .into();
+                let mut edge =
+                    GraphEdge::new(EdgeType::Binds, source.id.clone(), target.id.clone());
+                edge.provenance = Some(EdgeProvenance::Ref {
+                    usage: reference.usage,
+                });
+                edge.site = Some(crate::federation::contracts::model::SourceSite {
+                    path: reference.path.clone(),
+                    line: reference.line,
+                });
+                edge.cross_repo = repo != &target_repo;
+                edge.weight = Some(1.0);
+                nodes.insert(source.id.clone(), source);
+                nodes.insert(target.id.clone(), target);
+                edges.push(edge);
+            }
+        }
+        {
+            let mut inventory = self.reference_node_ids.lock();
+            if inventory.is_none() {
+                let mut ids = std::collections::BTreeSet::new();
+                self.backend.visit_nodes(&mut |node| {
+                    if matches!(
+                        node.label.as_deref(),
+                        Some("service_reference" | "service_anchor")
+                    ) {
+                        ids.insert(node.id.clone());
+                    }
+                })?;
+                *inventory = Some(ids);
+            }
+            // Register before persistence: a partial/failed save can leave
+            // nodes without any edge from which cleanup could discover them.
+            inventory
+                .get_or_insert_with(Default::default)
+                .extend(nodes.keys().cloned());
+        }
+        let mut changed = Vec::new();
+        for node in nodes.into_values() {
+            let existing = self.backend.get_node(&node.id)?;
+            if existing.as_ref().map(serde_json::to_value).transpose()?
+                != Some(serde_json::to_value(&node)?)
+            {
+                changed.push(node);
+            }
+        }
+        if !changed.is_empty() {
+            self.backend.upsert_nodes_batch(&changed)?;
+        }
+        Ok(edges)
+    }
+
     /// The dirty-flagged inner work: compute the desired
     /// `ContractJoiner::run` output over the projected contract
     /// nodes, diff against the current backend `Binds` set, and
@@ -1800,43 +1949,15 @@ impl FederatedIndex {
             )
         };
 
+        crate::federation::contracts::rust_rpc::apply_wrapper_provenance(&mut out, &rust_details);
         crate::federation::contracts::rust_rpc::attach(&mut out.index, rust_details);
 
-        // Diff against current backend `Binds`. Build the desired
-        // set keyed by `(consumer_id, provider_id)`; build the
-        // stored set the same way. Adds and removes are batched.
-        let desired: std::collections::BTreeSet<(String, String)> = out
+        // Reconcile executable joins and reference relations as one desired
+        // generation. Upsert metadata too: path usage can change while ids stay.
+        let mut desired_edges: Vec<GraphEdge> = out
             .binds
             .iter()
             .filter(|b| !is_declared_provider(&b.provider))
-            .map(|b| {
-                (
-                    b.consumer.as_str().to_string(),
-                    b.provider.as_str().to_string(),
-                )
-            })
-            .collect();
-        let stored_edges: Vec<GraphEdge> = self
-            .backend
-            .all_edges()?
-            .into_iter()
-            .filter(|e| e.edge_type == EdgeType::Binds)
-            .collect();
-        let stored: std::collections::BTreeSet<(String, String)> = stored_edges
-            .iter()
-            .map(|e| (e.source_id.clone(), e.target_id.clone()))
-            .collect();
-
-        let to_add: Vec<GraphEdge> = out
-            .binds
-            .iter()
-            .filter(|b| !is_declared_provider(&b.provider))
-            .filter(|b| {
-                !stored.contains(&(
-                    b.consumer.as_str().to_string(),
-                    b.provider.as_str().to_string(),
-                ))
-            })
             .map(|b| GraphEdge {
                 edge_type: EdgeType::Binds,
                 source_id: b.consumer.as_str().to_string(),
@@ -1852,24 +1973,97 @@ impl FederatedIndex {
                 }),
             })
             .collect();
-        let to_remove: Vec<GraphEdge> = stored_edges
+        // The published snapshot pairs the index with its executable joins
+        // only; reference relations are persisted graph edges but are not
+        // consumer resolutions (RejoinProtocol I7 variant (c)).
+        let snapshot_binds: Vec<(String, String)> = desired_edges
+            .iter()
+            .map(|e| (e.source_id.clone(), e.target_id.clone()))
+            .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
-            .filter(|e| !desired.contains(&(e.source_id.clone(), e.target_id.clone())))
             .collect();
-
-        // One disk save at the end: upsert adds, then remove
-        // removes. The backend handles dedup.
+        desired_edges.extend(self.reference_bindings(&config)?);
+        let desired: std::collections::BTreeSet<(String, String)> = desired_edges
+            .iter()
+            .map(|e| (e.source_id.clone(), e.target_id.clone()))
+            .collect();
+        let existing: std::collections::BTreeMap<_, _> = self
+            .backend
+            .all_edges()?
+            .into_iter()
+            .filter(|e| e.edge_type == EdgeType::Binds)
+            .map(|e| ((e.source_id.clone(), e.target_id.clone()), e))
+            .collect();
+        let mut to_remove: Vec<GraphEdge> = existing
+            .iter()
+            .filter(|(key, _)| !desired.contains(*key))
+            .map(|(_, e)| e.clone())
+            .collect();
+        let to_add: Vec<GraphEdge> = desired_edges
+            .iter()
+            .filter(|edge| {
+                existing
+                    .get(&(edge.source_id.clone(), edge.target_id.clone()))
+                    .is_none_or(|old| {
+                        old.weight != edge.weight
+                            || old.cross_repo != edge.cross_repo
+                            || old.provenance != edge.provenance
+                            || old.site != edge.site
+                            || old.detail != edge.detail
+                    })
+            })
+            .cloned()
+            .collect();
+        // Backends deduplicate upserts by identity. Retract the old value
+        // first when only metadata changed, so usage/confidence is replaced.
+        to_remove.extend(to_add.iter().filter_map(|edge| {
+            existing
+                .get(&(edge.source_id.clone(), edge.target_id.clone()))
+                .cloned()
+        }));
+        if !to_remove.is_empty() {
+            self.backend.remove_edges(&to_remove)?;
+        }
         if !to_add.is_empty() {
             self.backend.upsert_edges_batch(&to_add)?;
         }
-        if !to_remove.is_empty() {
-            self.backend.remove_edges(&to_remove)?;
+        // Keep an inventory so interrupted generations can be retracted too.
+        // The steady-state work visits reference ids only, not all graph nodes.
+        let referenced: std::collections::HashSet<&str> = desired_edges
+            .iter()
+            .flat_map(|e| [e.source_id.as_str(), e.target_id.as_str()])
+            .collect();
+        let candidates: Vec<String> = self
+            .reference_node_ids
+            .lock()
+            .as_ref()
+            .into_iter()
+            .flatten()
+            .filter(|id| !referenced.contains(id.as_str()))
+            .cloned()
+            .collect();
+        let mut stale_nodes = Vec::new();
+        for id in candidates {
+            if self.backend.get_node(&id)?.is_some_and(|n| {
+                matches!(
+                    n.label.as_deref(),
+                    Some("service_reference" | "service_anchor")
+                )
+            }) {
+                stale_nodes.push(id);
+            }
+        }
+        if !stale_nodes.is_empty() {
+            self.backend.remove_nodes(&stale_nodes)?;
+        }
+        if let Some(inventory) = self.reference_node_ids.lock().as_mut() {
+            inventory.retain(|id| referenced.contains(id.as_str()));
         }
 
         *self.contract_snapshot.write() = Some(Arc::new(ContractSnapshot {
             index: Arc::new(out.index),
-            // The `desired` set is the join's intended output and
-            // exactly what was just written to the backend. A
+            // The executable-join subset of `desired` (reference edges are
+            // graph-only) — what the joiner just wrote to the backend. A
             // reader that takes `contract_snapshot` sees this
             // set together with `index` from the same generation
             // (TLA+ RejoinProtocol.tla I7 variant (c) — atomic
@@ -1878,7 +2072,7 @@ impl FederatedIndex {
             // been updated at line ~1215, leaving a torn-view
             // window where a reader could observe the old index
             // but the new binds.
-            binds: Arc::new(desired.into_iter().collect::<Vec<(String, String)>>()),
+            binds: Arc::new(snapshot_binds),
         }));
         // Dirty is managed by `rejoin_contracts_if_dirty` (it
         // clears at the start, restores on error); a mid-rejoin
@@ -2028,6 +2222,21 @@ impl FederatedIndex {
     /// Record the package names `repo` publishes. A declaration can
     /// link repos the directory and manifest names cannot, so the
     /// cached dependency answers are dropped.
+    /// Record a repo's configured indexing budget. Call before `add_repo`.
+    pub fn set_index_timeout(&self, repo: &RepoId, secs: Option<u64>) {
+        match secs {
+            Some(s) => {
+                self.index_timeouts.insert(repo.as_str().to_string(), s);
+            }
+            None => {
+                self.index_timeouts.remove(repo.as_str());
+            }
+        }
+        if let Some(r) = self.get_repo(repo) {
+            r.set_index_timeout(secs);
+        }
+    }
+
     pub fn set_declared_packages(&self, repo: &RepoId, packages: Vec<String>) {
         self.declared_packages
             .insert(repo.as_str().to_string(), packages);
@@ -2683,5 +2892,105 @@ mod dependency_tests {
             .is_none(),
             "a same-named target is not linked without a declared dependency"
         );
+    }
+}
+
+#[cfg(test)]
+mod review_regressions {
+    use super::*;
+    use crate::federation::contracts::service_refs::{RefOutcome, ServiceRef, Usage};
+    use crate::federation::graph_backend::PetgraphBackend;
+    #[test]
+    fn followup_review_rejoin_cleans_nodes_from_interrupted_reference_generation() {
+        for restart in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let mut backend = Arc::new(PetgraphBackend::new(tmp.path()).unwrap());
+            let fed = FederatedIndex::new(backend.clone());
+            let config: ContractFederationConfig =
+                serde_yaml::from_str("services: [{name: api, repo: api, hosts: [api]}]").unwrap();
+            fed.service_refs.write().insert(
+                RepoId::new("client").unwrap(),
+                vec![ServiceRef {
+                    path: "client.js".into(),
+                    line: 1,
+                    value: "http://api".into(),
+                    url: "http://api/items".into(),
+                    host: "api".into(),
+                    outcome: RefOutcome::Resolved(
+                        crate::federation::contracts::model::ServiceName("api".into()),
+                    ),
+                    usage: Usage::Production,
+                    self_reference: false,
+                    linked_to_call: false,
+                }],
+            );
+            // Reproduce a generation interrupted after nodes save but before
+            // its edges are persisted, followed by source removal.
+            fed.reference_bindings(&config).unwrap();
+            assert_eq!(backend.node_count(), 2);
+            assert_eq!(backend.edge_count(), 0);
+            fed.service_refs.write().clear();
+            let fed = if restart {
+                drop(fed);
+                backend = Arc::new(PetgraphBackend::new(tmp.path()).unwrap());
+                FederatedIndex::new(backend.clone())
+            } else {
+                fed
+            };
+            fed.set_contract_config(ContractFederationConfig::default());
+            fed.rejoin_contracts().unwrap();
+            assert_eq!(
+                backend.node_count(),
+                0,
+                "orphan references must be cleaned (restart={restart})"
+            );
+            let before = backend.save_count();
+            fed.rejoin_contracts().unwrap();
+            assert_eq!(backend.save_count(), before);
+        }
+    }
+
+    #[test]
+    fn rejoin_noop_references_performs_zero_saves_and_updates_usage() {
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = Arc::new(PetgraphBackend::new(tmp.path()).unwrap());
+        let fed = FederatedIndex::new(backend.clone());
+        fed.set_contract_config(
+            serde_yaml::from_str("services: [{name: api, repo: api, hosts: [api]}]").unwrap(),
+        );
+        let repo = RepoId::new("client").unwrap();
+        fed.service_refs.write().insert(
+            repo.clone(),
+            vec![ServiceRef {
+                path: "client.js".into(),
+                line: 1,
+                value: "http://api".into(),
+                url: "http://api/items".into(),
+                host: "api".into(),
+                outcome: RefOutcome::Resolved(crate::federation::contracts::model::ServiceName(
+                    "api".into(),
+                )),
+                usage: Usage::Production,
+                self_reference: false,
+                linked_to_call: false,
+            }],
+        );
+        fed.rejoin_contracts().unwrap();
+        let before = backend.save_count();
+        fed.rejoin_contracts().unwrap();
+        assert_eq!(
+            backend.save_count(),
+            before,
+            "unchanged joins must not save"
+        );
+        fed.service_refs.write().get_mut(&repo).unwrap()[0].usage = Usage::Test;
+        fed.rejoin_contracts().unwrap();
+        assert!(backend.all_edges().unwrap().iter().any(|e| matches!(
+            e.provenance,
+            Some(crate::schema::EdgeProvenance::Ref { usage: Usage::Test })
+        )));
+        fed.service_refs.write().clear();
+        fed.rejoin_contracts().unwrap();
+        assert!(backend.list_nodes().unwrap().is_empty());
     }
 }

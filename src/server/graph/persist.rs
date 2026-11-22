@@ -38,7 +38,7 @@ use std::path::Path;
 ///    record several facts (two subscriptions to different topics on
 ///    one line used to collapse into one). Bincode layout changed:
 ///    old graphs are discarded and rebuilt on load, as above.
-pub const PATH_FORMAT_VERSION: u32 = 5;
+pub const PATH_FORMAT_VERSION: u32 = 6;
 
 #[derive(Serialize, Deserialize)]
 pub(super) struct GraphState {

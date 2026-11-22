@@ -431,6 +431,7 @@ fn test_execute_filter_by_name() {
             type_filter: None,
             label_filter: None,
             name: Some(NameSelector::Exact("main".to_string())),
+            ..Default::default()
         }),
     ]);
 
@@ -581,6 +582,7 @@ fn test_execute_chain_find_connect_filter() {
             type_filter: None,
             label_filter: None,
             name: Some(NameSelector::Exact("a".to_string())),
+            ..Default::default()
         }),
     ]);
 
@@ -930,6 +932,7 @@ fn test_execute_filter_no_matching() {
             type_filter: None,
             label_filter: None,
             name: Some(NameSelector::Exact("nonexistent_function".to_string())),
+            ..Default::default()
         }),
     ]);
 
@@ -1713,4 +1716,441 @@ proptest! {
         }
         prop_assert_eq!(actual, expected);
     }
+}
+
+#[test]
+fn query_screen_binding_counts_and_explain() {
+    let tmp = tempfile::tempdir().unwrap();
+    let graph = GraphDatabase::new(&tmp.path().join("query.bin")).unwrap();
+    let mut provider = GraphNode::new(NodeType::HttpRoute, "checkout".into(), "api.rs".into());
+    provider.repo_id = Some("saleor".into());
+    provider.id = crate::federation::repo_id::GlobalId::new(
+        &crate::federation::repo_id::RepoId::new("saleor").unwrap(),
+        provider.node_type.clone(),
+        &provider.path,
+        &provider.name,
+        provider.line_start,
+    )
+    .as_str()
+    .to_string();
+    graph.upsert_node(provider.clone()).unwrap();
+    for i in 0..3 {
+        let mut consumer = GraphNode::new(
+            NodeType::HttpClientCall,
+            format!("call{i}"),
+            "src/client.ts".into(),
+        );
+        consumer.repo_id = Some("storefront".into());
+        consumer.id = crate::federation::repo_id::GlobalId::new(
+            &crate::federation::repo_id::RepoId::new("storefront").unwrap(),
+            consumer.node_type.clone(),
+            &consumer.path,
+            &consumer.name,
+            consumer.line_start,
+        )
+        .as_str()
+        .to_string();
+        graph.upsert_node(consumer.clone()).unwrap();
+        let mut edge = GraphEdge::new(EdgeType::Binds, consumer.id, provider.id.clone());
+        edge.weight = Some(0.9);
+        edge.provenance = Some(crate::schema::EdgeProvenance::Heuristic {
+            confidence: 0.9,
+            detector: "contract".into(),
+        });
+        graph.insert_edge(&edge).unwrap();
+    }
+    use crate::federation::graph_backend::{GraphBackend, PetgraphBackend};
+    let backend = PetgraphBackend::ephemeral(tmp.path());
+    backend.upsert_nodes_batch(&graph.get_all_nodes()).unwrap();
+    backend.upsert_edges_batch(&graph.all_edges()).unwrap();
+    let graph = backend.query_graph_view().unwrap();
+    let (embedder, cache) = make_test_executor_params();
+    let spec: QuerySpec = serde_json::from_value(serde_json::json!({
+        "explain": true,
+        "ops": [
+            {"op":"find", "type":"HttpClientCall"},
+            {"op":"connect", "edge":["Consumes","SendsHttp"], "target":{"type":"HttpRoute"}},
+            {"op":"filter", "repo":{"ne":"storefront"}, "resolution":{"ne":"unresolved"}},
+            {"op":"group", "by":["consumer.repo","provider.service"]},
+            {"op":"sort", "by":"count", "direction":"desc"},
+            {"op":"limit", "count":10}
+        ]
+    }))
+    .unwrap();
+    let result = Executor::new(&graph, &embedder, &cache, tmp.path())
+        .with_services(vec![serde_json::from_value(
+            serde_json::json!({"name":"checkout-api", "repo":"saleor"}),
+        )
+        .unwrap()])
+        .execute(&spec)
+        .unwrap();
+    let wire = serde_json::to_value(result).unwrap();
+    assert_eq!(wire["groups"][0]["count"], 3);
+    assert_eq!(
+        wire["groups"][0]["key"],
+        "[\"storefront\",\"checkout-api\"]"
+    );
+    assert_eq!(wire["explain"][1]["edges"], 3);
+    assert_eq!(wire["explain"].as_array().unwrap().len(), 6);
+    assert_eq!(wire["meta"]["matched_before_limit"], 1);
+}
+
+#[test]
+fn query_filter_unknown_key_is_rejected() {
+    let result = serde_json::from_value::<QuerySpec>(serde_json::json!({
+        "ops":[{"op":"filter", "bogus":123}]
+    }));
+    assert!(
+        result.is_err(),
+        "unknown filter key must not select everything"
+    );
+    let message = result.unwrap_err().to_string();
+    assert!(
+        message.contains("bogus") && message.contains("repo"),
+        "{message}"
+    );
+}
+
+#[test]
+fn query_explicit_limit_reports_pre_limit_matches() {
+    let tmp = tempfile::tempdir().unwrap();
+    let graph = GraphDatabase::new(&tmp.path().join("limit.bin")).unwrap();
+    for i in 0..3 {
+        graph
+            .upsert_node(GraphNode::new(
+                NodeType::Function,
+                format!("fn{i}"),
+                "a.rs".into(),
+            ))
+            .unwrap();
+    }
+    let (embedder, cache) = make_test_executor_params();
+    let spec = QuerySpec::new(vec![
+        GraphOp::Find(FindOp::new()),
+        GraphOp::Limit(LimitOp {
+            count: 1,
+            offset: 0,
+        }),
+    ]);
+    let result = Executor::new(&graph, &embedder, &cache, tmp.path())
+        .execute(&spec)
+        .unwrap();
+    assert_eq!(result.meta.unwrap().matched_before_limit, Some(3));
+}
+
+#[test]
+fn query_federation_view_exposes_binding_edges_and_http_dependency_legs() {
+    use crate::federation::graph_backend::{GraphBackend, PetgraphBackend};
+    let tmp = tempfile::tempdir().unwrap();
+    let backend = PetgraphBackend::ephemeral(tmp.path());
+    let mut consumer = GraphNode::new(
+        NodeType::Function,
+        "graphql-call:query:checkout".into(),
+        "checkout.ts".into(),
+    );
+    consumer.repo_id = Some("storefront".into());
+    consumer.id = crate::federation::repo_id::GlobalId::new(
+        &crate::federation::repo_id::RepoId::new("storefront").unwrap(),
+        consumer.node_type.clone(),
+        &consumer.path,
+        &consumer.name,
+        consumer.line_start,
+    )
+    .as_str()
+    .to_string();
+    let mut provider = GraphNode::new(
+        NodeType::Function,
+        "query:checkout".into(),
+        "checkout.py".into(),
+    );
+    provider.repo_id = Some("saleor".into());
+    provider.id = crate::federation::repo_id::GlobalId::new(
+        &crate::federation::repo_id::RepoId::new("saleor").unwrap(),
+        provider.node_type.clone(),
+        &provider.path,
+        &provider.name,
+        provider.line_start,
+    )
+    .as_str()
+    .to_string();
+    let mut http_call = GraphNode::new(
+        NodeType::HttpClientCall,
+        "fetch checkout".into(),
+        "client.ts".into(),
+    );
+    http_call.repo_id = Some("storefront".into());
+    http_call.id = crate::federation::repo_id::GlobalId::new(
+        &crate::federation::repo_id::RepoId::new("storefront").unwrap(),
+        http_call.node_type.clone(),
+        &http_call.path,
+        &http_call.name,
+        http_call.line_start,
+    )
+    .as_str()
+    .to_string();
+    let mut route = GraphNode::new(NodeType::HttpRoute, "/checkout".into(), "routes.py".into());
+    route.repo_id = Some("saleor".into());
+    route.id = crate::federation::repo_id::GlobalId::new(
+        &crate::federation::repo_id::RepoId::new("saleor").unwrap(),
+        route.node_type.clone(),
+        &route.path,
+        &route.name,
+        route.line_start,
+    )
+    .as_str()
+    .to_string();
+    backend
+        .upsert_nodes_batch(&[
+            consumer.clone(),
+            provider.clone(),
+            http_call.clone(),
+            route.clone(),
+        ])
+        .unwrap();
+    for (from, to) in [(consumer.id, provider.id), (http_call.id, route.id)] {
+        let mut edge = GraphEdge::new(EdgeType::Binds, from, to);
+        edge.provenance = Some(crate::schema::EdgeProvenance::Confirmed {
+            source: "repos.yaml#bindings[0]".into(),
+        });
+        edge.weight = Some(1.0);
+        backend.upsert_edge(edge).unwrap();
+    }
+    let graph = backend.query_graph_view().unwrap();
+    let (embedder, cache) = make_test_executor_params();
+    for (kind, edge) in [
+        ("Function", "Binds"),
+        ("HttpClientCall", "SendsHttp"),
+        ("HttpClientCall", "Consumes"),
+    ] {
+        let spec: QuerySpec = serde_json::from_value(serde_json::json!({"ops":[
+            {"op":"find", "type":kind},
+            {"op":"filter", "repo":"storefront"},
+            {"op":"connect", "edge":edge}
+        ]}))
+        .unwrap();
+        let result = Executor::new(&graph, &embedder, &cache, tmp.path())
+            .execute(&spec)
+            .unwrap();
+        assert_eq!(result.count, 1, "{kind}/{edge}");
+        assert_eq!(result.nodes[0].repo_id.as_deref(), Some("saleor"));
+        let wire = serde_json::to_value(&result.edges[0]).unwrap();
+        assert_eq!(wire["confidence"], 1.0);
+        assert_eq!(wire["kind"], "confirmed");
+        assert_eq!(wire["source"], "repos.yaml#bindings[0]");
+    }
+    assert_eq!(
+        backend.all_edges().unwrap().len(),
+        2,
+        "derived HTTP legs must not alter persisted data"
+    );
+    assert!(
+        std::fs::read_dir(tmp.path()).unwrap().next().is_none(),
+        "query view must not write regenerable files"
+    );
+}
+
+#[test]
+fn query_groups_arbitrary_properties_and_sorts_aggregate_before_limit() {
+    let graph = GraphDatabase::empty_writable();
+    for (i, repo) in ["alpha", "alpha", "beta"].iter().enumerate() {
+        let mut node = GraphNode::new(NodeType::Function, format!("fn{i}"), "src/client.rs".into());
+        node.repo_id = Some((*repo).into());
+        node.container = Some("Client".into());
+        graph.upsert_node(node).unwrap();
+    }
+    let (embedder, cache) = make_test_executor_params();
+    for by in [
+        serde_json::json!("repo"),
+        serde_json::json!("container"),
+        serde_json::json!({"path_prefix":"src/"}),
+    ] {
+        let spec: QuerySpec = serde_json::from_value(serde_json::json!({"ops":[
+            {"op":"find"}, {"op":"group", "by":by},
+            {"op":"sort", "by":"call_sites", "direction":"desc"}, {"op":"limit","count":1}
+        ]}))
+        .unwrap();
+        let result = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""))
+            .execute(&spec)
+            .unwrap();
+        let groups = result.groups.unwrap();
+        assert_eq!(groups.len(), 1);
+        if by == "repo" {
+            assert_eq!(groups[0].key, "alpha");
+            assert_eq!(groups[0].count, 2);
+        } else {
+            assert_eq!(groups[0].count, 3);
+        }
+    }
+}
+
+#[test]
+fn query_binding_provenance_filter_preserves_surviving_path() {
+    let graph = GraphDatabase::empty_writable();
+    let target = GraphNode::new(NodeType::HttpRoute, "/checkout".into(), "api.rs".into());
+    graph.upsert_node(target.clone()).unwrap();
+    for (name, kind) in [("a", "heuristic"), ("b", "confirmed")] {
+        let caller = GraphNode::new(NodeType::HttpClientCall, name.into(), "client.rs".into());
+        graph.upsert_node(caller.clone()).unwrap();
+        let mut edge = GraphEdge::new(EdgeType::Binds, caller.id, target.id.clone());
+        edge.provenance = Some(if kind == "confirmed" {
+            crate::schema::EdgeProvenance::Confirmed {
+                source: "repos.yaml#bindings[0]".into(),
+            }
+        } else {
+            crate::schema::EdgeProvenance::Heuristic {
+                detector: "contract".into(),
+                confidence: 0.5,
+            }
+        });
+        graph.insert_edge(&edge).unwrap();
+    }
+    let (embedder, cache) = make_test_executor_params();
+    let spec: QuerySpec = serde_json::from_value(serde_json::json!({"ops":[
+        {"op":"find","type":"HttpClientCall"}, {"op":"connect","edge":"Binds"},
+        {"op":"filter","provenance":"confirmed"}, {"op":"group","by":["neighbour.name","edge.provenance.kind"]}
+    ]})).unwrap();
+    let result = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""))
+        .execute(&spec)
+        .unwrap();
+    assert_eq!(result.edges[0].kind.as_deref(), Some("confirmed"));
+    assert_eq!(result.groups.unwrap()[0].key, "[\"b\",\"confirmed\"]");
+}
+
+#[test]
+fn review_g_group_labels_and_membership_follow_results() {
+    let graph = GraphDatabase::empty_writable();
+    for (name, deprecated) in [("a", false), ("b", false), ("c", true)] {
+        let mut node = GraphNode::new(NodeType::Function, name.into(), "lib.rs".into());
+        node.is_deprecated = deprecated;
+        graph.upsert_node(node).unwrap();
+    }
+    let (embedder, cache) = make_test_executor_params();
+    for (tail, cap, limit) in [
+        (serde_json::json!([]), 0, None),
+        (serde_json::json!([{"op":"filter","name":"a"}]), 0, None),
+        (
+            serde_json::json!([{"op":"semantic_filter","like":"nothing","threshold":2.0}]),
+            0,
+            None,
+        ),
+        (serde_json::json!([]), 1, None),
+        (serde_json::json!([]), 0, Some(1)),
+    ] {
+        let mut ops = vec![
+            serde_json::json!({"op":"find"}),
+            serde_json::json!({"op":"group","by":"label"}),
+        ];
+        ops.extend(tail.as_array().unwrap().clone());
+        let mut spec: QuerySpec = serde_json::from_value(serde_json::json!({"ops":ops})).unwrap();
+        spec.limit = limit;
+        loop {
+            let result = Executor::with_default_limit(
+                &graph,
+                &embedder,
+                &cache,
+                std::path::Path::new("."),
+                cap,
+            )
+            .execute(&spec)
+            .unwrap();
+            let groups = result.groups.unwrap();
+
+            assert_eq!(groups.iter().map(|g| g.count).sum::<usize>(), result.count);
+            assert!(groups
+                .iter()
+                .flat_map(|g| &g.nodes)
+                .all(|n| result.nodes.iter().any(|v| v.id == n.id)));
+            spec.cursor = result.meta.unwrap().next_cursor;
+            if spec.cursor.is_none() {
+                break;
+            }
+        }
+    }
+}
+
+#[test]
+fn review_g_query_view_is_embedding_free_and_reused_until_write() {
+    use crate::federation::graph_backend::{GraphBackend, PetgraphBackend};
+    let backend = PetgraphBackend::ephemeral(std::path::Path::new("unused"));
+    let mut node = GraphNode::new(NodeType::Function, "f".into(), "lib.rs".into());
+    node.id = "repo:Function:lib.rs:f:0".into();
+    node.embedding = Some("[1,2,3]".into());
+    backend.upsert_node(node.clone()).unwrap();
+    let first = backend.query_graph_view().unwrap();
+    assert!(first.get_all_nodes().iter().all(|n| n.embedding.is_none()));
+    let second = backend.query_graph_view().unwrap();
+    assert!(std::ptr::eq(
+        &*first.graph_ref_for_read(),
+        &*second.graph_ref_for_read()
+    ));
+    let generation = backend.query_graph_view_at(42).unwrap();
+    let same_generation = backend.query_graph_view_at(42).unwrap();
+    assert!(!std::ptr::eq(
+        &*first.graph_ref_for_read(),
+        &*generation.graph_ref_for_read()
+    ));
+    assert!(std::ptr::eq(
+        &*generation.graph_ref_for_read(),
+        &*same_generation.graph_ref_for_read()
+    ));
+    node.name = "updated".into();
+    backend.upsert_node(node).unwrap();
+    let third = backend.query_graph_view().unwrap();
+    assert_eq!(third.get_all_nodes()[0].name, "updated");
+    assert!(!std::ptr::eq(
+        &*first.graph_ref_for_read(),
+        &*third.graph_ref_for_read()
+    ));
+    backend
+        .remove_nodes(&["repo:Function:lib.rs:f:0".into()])
+        .unwrap();
+    assert_eq!(backend.query_graph_view().unwrap().node_count(), 0);
+}
+
+#[test]
+fn review_g_group_labels_use_query_label() {
+    let graph = GraphDatabase::empty_writable();
+    let plain = GraphNode::new(NodeType::Function, "plain".into(), "lib.rs".into());
+    let mut deprecated = GraphNode::new(NodeType::Function, "old".into(), "lib.rs".into());
+    deprecated.is_deprecated = true;
+    graph.upsert_nodes_batch(vec![plain, deprecated]).unwrap();
+    let (embedder, cache) = make_test_executor_params();
+    let spec: QuerySpec = serde_json::from_value(
+        serde_json::json!({"ops":[{"op":"find"},{"op":"group","by":"label"}]}),
+    )
+    .unwrap();
+    let result = Executor::new(&graph, &embedder, &cache, std::path::Path::new("."))
+        .execute(&spec)
+        .unwrap();
+    let keys: Vec<_> = result.groups.unwrap().into_iter().map(|g| g.key).collect();
+    assert_eq!(keys, vec!["", "deprecated"]);
+}
+
+#[test]
+fn review_g_groups_drop_filtered_rows_with_shared_provider() {
+    let graph = GraphDatabase::empty_writable();
+    let provider = GraphNode::new(NodeType::HttpRoute, "provider".into(), "api.rs".into());
+    graph.upsert_node(provider.clone()).unwrap();
+    for (name, confidence) in [("alpha", 0.5), ("beta", 1.0)] {
+        let mut consumer =
+            GraphNode::new(NodeType::HttpClientCall, name.into(), "client.rs".into());
+        consumer.repo_id = Some(name.into());
+        graph.upsert_node(consumer.clone()).unwrap();
+        let mut edge = GraphEdge::new(EdgeType::Binds, consumer.id, provider.id.clone());
+        edge.weight = Some(confidence);
+        graph.insert_edge(&edge).unwrap();
+    }
+    let (embedder, cache) = make_test_executor_params();
+    let spec: QuerySpec = serde_json::from_value(serde_json::json!({"ops":[
+        {"op":"find","type":"HttpClientCall"}, {"op":"connect","edge":"Binds"},
+        {"op":"group","by":"consumer.repo"}, {"op":"filter","confidence":{"gte":0.9}}
+    ]}))
+    .unwrap();
+    let result = Executor::new(&graph, &embedder, &cache, std::path::Path::new("."))
+        .execute(&spec)
+        .unwrap();
+    let groups = result.groups.unwrap();
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].key, "beta");
+    assert_eq!(groups[0].count, 1);
 }

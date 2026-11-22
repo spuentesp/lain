@@ -437,7 +437,7 @@ impl ToolHandler for GetCouplingRadarHandler {
         "get_coupling_radar",
         "Use this when asking 'what changes together?': hidden coupling between files \
          from historical git co-change. `find_related` adds graph and semantic \
-         neighbours to the same question.",
+         neighbours to the same question. Accepts a node UUID; use find_symbol to get one.",
         r#"{"type":"object","properties":{"symbol":{"type":"string"}},"required":["symbol"]}"#,
         ReadOnly
     );
@@ -642,17 +642,7 @@ impl ToolHandler for QueryGraphHandler {
         ctx: &ToolContext,
         args: &Map<String, Value>,
     ) -> Result<String, LainError> {
-        handlers::query::query_graph_scoped(
-            &ctx.workspace,
-            &ctx.graph,
-            &ctx.embedder,
-            &ctx.embedding_cache,
-            &ctx.presence,
-            &ctx.occupancy,
-            Some(args),
-            ctx.tuning.ingestion.default_query_limit,
-            ctx.snapshot.is_some(),
-        )
+        handlers::query::query_graph_context(ctx, args)
     }
     async fn call_with_output(
         &self,

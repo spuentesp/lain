@@ -93,6 +93,7 @@ fn receiver_consumer_node(
     n.id = make_id(repo, NodeType::HttpClientCall, path, name, line);
     n.line_start = Some(line);
     n.contract = vec![ContractFact::Consumer(ConsumerFact {
+        url_defaults: None,
         method,
         url,
         via: CallVia::Receiver {
