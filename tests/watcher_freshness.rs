@@ -393,87 +393,57 @@ async fn watcher_does_not_panic_on_edit() {
     // 5 s ceiling catches a wedged receiver without making the test
     // slow on healthy runs.
     let overlay_notify = ri.overlay_updated();
-    let wait_for_refresh = |label: String| {
+    let target = tmp.path().join("src").join("lib.rs");
+    let overlay = ri.server_overlay();
+
+    // The wake signal is `notify_one`, which stores a permit when nobody
+    // is waiting, so a permit left by an *earlier* cycle would satisfy a
+    // single wait before the cycle for this edit has run. Each edit
+    // drains the stale permit, writes, and waits for a cycle that
+    // finished after the write. A receiver that died never wakes, and a
+    // receiver that does not repopulate the overlay leaves it empty, so
+    // the regression this test guards still fails.
+    let edit_and_wait = |label: &'static str| {
         let overlay_notify = Arc::clone(&overlay_notify);
+        let overlay = Arc::clone(&overlay);
+        let target = target.clone();
         async move {
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_millis(1),
+                overlay_notify.notified(),
+            )
+            .await;
+            std::fs::write(&target, format!("pub fn existing() {{ /* {label} */ }}\n")).unwrap();
             tokio::time::timeout(
                 std::time::Duration::from_secs(15),
                 overlay_notify.notified(),
             )
             .await
-            .unwrap_or_else(|_| panic!("{label}: receiver did not refresh overlay within 15s"))
+            .unwrap_or_else(|_| panic!("{label}: receiver did not refresh overlay within 15s"));
+            // `sync_overlay` drops a changed path's entries before
+            // re-scanning it, so a read can see the path briefly empty;
+            // poll rather than snapshot once.
+            let nodes = poll_until(&overlay, std::time::Duration::from_secs(15), |n| {
+                !n.is_empty()
+            })
+            .await;
+            assert!(
+                !nodes.is_empty(),
+                "{label}: the overlay should hold at least one node from the edited \
+                 lib.rs; an empty overlay means the receiver panicked or never ran \
+                 `sync_overlay`"
+            );
         }
     };
 
-    // `sync_overlay` drops a changed path's stale overlay entries and
-    // then re-scans it fresh (see `sync_overlay`'s "drop entries for
-    // changed paths BEFORE scanning" step) — a real, narrow window
-    // where a concurrent read can observe the path as transiently
-    // empty between the drop and the re-insert. `overlay_updated` also
-    // fires once per receiver iteration, and the poll-based watcher can
-    // legitimately produce more than one iteration close together (e.g.
-    // one noticing lib.rs's pre-existing content on the first tick,
-    // another for this edit) — a single `wait_for_refresh` here is not
-    // guaranteed to correspond to the specific edit that just happened,
-    // only to "some cycle completed". Poll instead of asserting on one
-    // snapshot: it still correctly fails (via the outer timeout) if the
-    // receiver task actually died, since a dead receiver never
-    // repopulates the overlay no matter how long this waits.
-    // Modify a tracked file. Pre-fix, this would panic the inotify thread.
-    let target = tmp.path().join("src").join("lib.rs");
-    std::fs::write(&target, "pub fn existing() { /* edited */ }\n").unwrap();
+    // First edit: pre-fix, this panicked the inotify thread.
+    edit_and_wait("first edit").await;
 
-    wait_for_refresh("first edit".to_string()).await;
-
-    // The watcher / receiver task must still be alive. We assert this
-    // indirectly by re-reading the overlay after each edit + wait: a
-    // populated overlay means `sync_overlay` ran, which means the
-    // receiver task processed the event end-to-end (no panic). If the
-    // receiver task had panicked inside `me.index()` or `me.sync_overlay()`
-    // between the two edits, the post-second-edit read would either hang
-    // (because the task is dead and the next event isn't drained) or
-    // surface an empty overlay (because the second `sync_overlay` never
-    // ran). Pre-fix, the inotify thread panicked on the first event and
-    // the overlay stayed at whatever it had before the test.
-    let overlay = ri.server_overlay();
-    // 15s window (was 5s): Windows runners under load can take ~10s
-    // for the inotify-equivalent watcher to deliver the first event.
-    // The test's intent is a panic-regression check, not a timing
-    // assertion — making the window generous preserves that.
-    let before = poll_until(&overlay, std::time::Duration::from_secs(15), |n| {
-        !n.is_empty()
-    })
-    .await;
-    assert!(
-        !before.is_empty(),
-        "after the first edit, the receiver task should have refreshed \
-         the overlay with at least one node from the edited lib.rs; an \
-         empty overlay here means the receiver panicked or never ran \
-         `sync_overlay`"
-    );
-
-    // Second edit — verify the receiver task is still processing events
-    // (this is the regression check for the panic).
-    std::fs::write(&target, "pub fn existing() { /* second edit */ }\n").unwrap();
-    wait_for_refresh("second edit".to_string()).await;
-
-    // Re-read the overlay after the second edit. If the receiver task
-    // had died after the first event, this call returns an empty
-    // overlay (because no further `sync_overlay` runs) and the assertion
-    // below fails — giving us a Rust-level signal that the watcher
-    // panicked, not just a process-level "did the test crash".
-    // 15s window matches the first-edit poll above; both polls share
-    // the same Windows-under-load rationale.
-    let after = poll_until(&overlay, std::time::Duration::from_secs(15), |n| {
-        !n.is_empty()
-    })
-    .await;
-    assert!(
-        !after.is_empty(),
-        "after the second edit, the overlay should still be populated by \
-         the receiver task; an empty overlay here means the receiver \
-         stopped processing events after the first one"
-    );
+    // Second edit: the receiver must still be alive and processing events
+    // (the regression check for the panic). The wait inside requires a
+    // cycle that completed after this write, so a dead receiver fails here
+    // even though the overlay still holds the first edit's nodes.
+    edit_and_wait("second edit").await;
 
     // Restore the env var so we don't leak it to the next test in
     // this process. The diag file we wrote (if any) is in the OS

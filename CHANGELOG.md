@@ -3,7 +3,19 @@
 All notable changes to LAIN are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## [0.16.0] - 2026-11-20
+
+- **The file watcher no longer busy-loops on an idle repo.** It reacted to read-only
+  access events (an `open`/`read` of the watched directory), and the indexer's own
+  directory reads and git status raise exactly those, so every indexing pass scheduled
+  the next one: thousands of passes per minute on an idle checkout, with the overlay
+  refreshing continuously. Read-only access events are now dropped at the watcher
+  callback; a completed write (`Close(Write)`), create, modify, remove and rename still
+  trigger a pass. The index-budget file count is also walked at most once per ten minutes
+  instead of on every pass. Measured on the watcher test repo: about 900 to 12,000 receiver
+  cycles per run down to 2 (one per edit). Test-only: the fake daemons in
+  `cli::oneshot`, `tests/oneshot_e2e.rs` and `tests/shared_daemon_mcp.rs` now reset
+  accepted sockets to blocking, which macOS does not do for them.
 
 - **The startup checkpoint is no longer skipped when the git sensor is briefly busy.**
   Publishing `startup-complete.json` used fail-fast git calls and gave up with
@@ -66,9 +78,14 @@ All notable changes to LAIN are documented here. Versions follow
   repo: 60 s plus one second per ten files, capped at 30 minutes (OpenShell's
   2.1k files get 273 s, NemoClaw's 6.7k get 725 s). A fixed 60 s failed both
   on a clean scan.
-- **Linux release binary runs on Ubuntu 22.04 and 24.04.** The release job
-  built on `ubuntu-latest` (glibc 2.43). It now builds on `ubuntu-22.04`
-  (glibc 2.35) and fails the release if either binary needs a newer glibc.
+- **Linux release binary is built for Ubuntu 24.04 or newer.** The release job
+  built on `ubuntu-latest` (glibc 2.43), so the binary ran on no supported
+  Ubuntu. It now builds on `ubuntu-24.04` (glibc 2.39) and fails the release if
+  either binary needs glibc newer than 2.39 or libstdc++ newer than
+  `GLIBCXX_3.4.33`. Measured: the binary needs glibc 2.39 and `GLIBCXX_3.4.31`,
+  so **Ubuntu 22.04 is not supported by the release binary**: the bundled ONNX
+  Runtime does not link there. A tested route for 22.04 (the `ort`
+  `load-dynamic` feature) is not done.
 - **Federation graph schema bump: `FEDERATION_GRAPH_VERSION` 6 → 7.** Reference
   edges (`list_service_refs`, provenance `ref` with `usage`) add an
   `EdgeProvenance` variant. Older graphs are refused at load; run `lain reindex`

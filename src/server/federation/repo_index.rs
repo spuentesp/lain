@@ -90,6 +90,25 @@ fn count_repo_files(root: &Path) -> usize {
         .count()
 }
 
+/// How long a counted file total stays valid before the next budget
+/// computation walks the tree again.
+const FILE_COUNT_TTL: Duration = Duration::from_secs(600);
+
+/// Whether a watcher event only reports that something was opened, read
+/// or closed without writing. Those say nothing about the repository's
+/// content, and the indexer's own directory reads (the file walk, git
+/// status) raise them on the watched root, so reacting to them made every
+/// indexing pass schedule the next one: a busy loop that pinned a core on
+/// an idle repo. A completed write (`Close(Write)`) still counts.
+fn is_read_only_access(kind: &notify::EventKind) -> bool {
+    use notify::event::{AccessKind, AccessMode};
+    matches!(
+        kind,
+        notify::EventKind::Access(access)
+            if !matches!(access, AccessKind::Close(AccessMode::Write))
+    )
+}
+
 /// Run `f` on a fresh OS thread and wait up to `budget` for it to
 /// signal completion. If `f` finishes within `budget`, the thread is
 /// joined and the function returns `true`. If `budget` elapses first,
@@ -166,6 +185,8 @@ pub struct RepoIndex {
     last_index_error: Arc<RwLock<Option<String>>>,
     /// Per-repo budget override in seconds (`repos[].index_timeout_secs`); 0 = unset.
     index_timeout_override: std::sync::atomic::AtomicU64,
+    /// Counted file total and when it was taken; see [`FILE_COUNT_TTL`].
+    file_count: parking_lot::Mutex<Option<(std::time::Instant, usize)>>,
     /// Shared handle to the federation's `VolatileOverlay`. `index()`
     /// touches it after a successful index pass so the overlay's own
     /// age reflects "we just indexed" rather than "no edits ever"
@@ -375,6 +396,7 @@ impl RepoIndex {
             last_indexed: Arc::new(RwLock::new(SystemTime::UNIX_EPOCH)),
             last_index_error: Arc::new(RwLock::new(None)),
             index_timeout_override: std::sync::atomic::AtomicU64::new(0),
+            file_count: parking_lot::Mutex::new(None),
             server_overlay: parking_lot::Mutex::new(Arc::new(VolatileOverlay::new())),
             overlay_paths: parking_lot::Mutex::new(HashMap::new()),
             sync_overlay_lock: AsyncMutex::new(()),
@@ -573,11 +595,25 @@ impl RepoIndex {
             .index_timeout_override
             .load(std::sync::atomic::Ordering::Relaxed)
         {
-            0 => explicit_env_timeout().unwrap_or_else(|| {
-                scaled_index_timeout(count_repo_files(self.source.local_path()))
-            }),
+            0 => explicit_env_timeout()
+                .unwrap_or_else(|| scaled_index_timeout(self.repo_file_count())),
             secs => Duration::from_secs(secs),
         }
+    }
+
+    /// The repo's file count for sizing the budget, walked at most once per
+    /// [`FILE_COUNT_TTL`]. The watcher runs a pass per change batch, and a
+    /// full tree walk on each one is work the budget does not need.
+    fn repo_file_count(&self) -> usize {
+        let mut cached = self.file_count.lock();
+        if let Some((taken, count)) = *cached {
+            if taken.elapsed() < FILE_COUNT_TTL {
+                return count;
+            }
+        }
+        let count = count_repo_files(self.source.local_path());
+        *cached = Some((std::time::Instant::now(), count));
+        count
     }
 
     /// The timeout failure message for `budget`. It starts with
@@ -1253,6 +1289,12 @@ impl RepoIndex {
         let outstanding_for_closure = outstanding;
         let mut watcher = RecommendedWatcher::new(
             move |res: notify::Result<notify::Event>| {
+                // Reads of the watched tree are not changes (see
+                // `is_read_only_access`); queueing them re-triggered the
+                // pipelines that caused them.
+                if matches!(&res, Ok(event) if is_read_only_access(&event.kind)) {
+                    return;
+                }
                 // PR B (spawn_blocking): increment *before* the
                 // try_send so the receiver loop's matching
                 // fetch_sub observes a non-negative depth even if
@@ -1806,6 +1848,52 @@ mod tests {
     }
 
     #[test]
+    fn read_only_access_events_are_not_changes() {
+        use notify::event::{AccessKind, AccessMode, CreateKind, DataChange, ModifyKind};
+        use notify::EventKind;
+        for kind in [
+            AccessKind::Open(AccessMode::Any),
+            AccessKind::Read,
+            AccessKind::Close(AccessMode::Read),
+            AccessKind::Any,
+        ] {
+            assert!(is_read_only_access(&EventKind::Access(kind)), "{kind:?}");
+        }
+        for kind in [
+            EventKind::Access(AccessKind::Close(AccessMode::Write)),
+            EventKind::Create(CreateKind::File),
+            EventKind::Modify(ModifyKind::Data(DataChange::Any)),
+            EventKind::Remove(notify::event::RemoveKind::File),
+            EventKind::Any,
+        ] {
+            assert!(!is_read_only_access(&kind), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn the_file_count_is_walked_once_per_ttl() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        git2::Repository::init(dir.path()).unwrap();
+        std::fs::write(dir.path().join("a.rs"), "fn a() {}").unwrap();
+        let src = Box::new(
+            WorkspaceDirSource::new(RepoId::new("r").unwrap(), dir.path().to_path_buf()).unwrap(),
+        );
+        let ri = RepoIndex::new(src, tmp.path()).unwrap();
+        assert_eq!(ri.repo_file_count(), 1);
+        std::fs::write(dir.path().join("b.rs"), "fn b() {}").unwrap();
+        assert_eq!(
+            ri.repo_file_count(),
+            1,
+            "a second pass must reuse the count"
+        );
+        *ri.file_count.lock() = Some((
+            std::time::Instant::now() - FILE_COUNT_TTL - Duration::from_secs(1),
+            1,
+        ));
+        assert_eq!(ri.repo_file_count(), 2, "an expired count is walked again");
+    }
+
     fn count_repo_files_counts_files_not_directories() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join("sub")).unwrap();
