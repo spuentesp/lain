@@ -13,11 +13,8 @@ name: Fuzz Nightly
 # between releases. Reproducer artefacts from any crash get
 # uploaded for the maintainer to triage.
 on:
-  schedule:
-    # Off-peak UTC, runs once a day. 17 picks a non-:00 minute so
-    # we don't compete with other repo's cron sweeps at the top of
-    # the hour.
-    - cron: '17 2 * * *'
+  # No schedule: nightly runs were dropped to cut CI cost (2026-11-22).
+  # Run on demand with workflow_dispatch.
   workflow_dispatch:
 
 # Deny everything by default; the lone job below only needs read.
