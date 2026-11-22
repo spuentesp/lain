@@ -113,8 +113,12 @@ jobs:
     if: github.event_name == 'push'
     # Pinned, not `ubuntu-latest`: the binary links the build host's glibc,
     # so a moving base (glibc 2.43) produced a release that would not start
-    # on Ubuntu 22.04 or 24.04. 22.04 (glibc 2.35) runs on both.
-    runs-on: ubuntu-22.04
+    # on Ubuntu 22.04 or 24.04. 24.04 (glibc 2.39) is the oldest base the
+    # bundled ONNX Runtime (`ort`) can link on: its prebuilt static library
+    # references glibc 2.38 symbols and libstdc++ from gcc 13, so the build
+    # fails on 22.04 (`undefined symbol: __isoc23_strtol`). The released
+    # binary therefore needs Ubuntu 24.04 or newer (see docs/DISTRIBUTION.md).
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
       id-token: write
@@ -154,17 +158,25 @@ jobs:
       - name: Verify built version before publishing
         shell: bash
         run: python scripts/check-release-version.py --tag "$GITHUB_REF_NAME" --binary target/x86_64-unknown-linux-gnu/release/lain
-      - name: Verify glibc floor (must run on Ubuntu 22.04, glibc 2.35)
+      - name: Verify glibc and libstdc++ floor (Ubuntu 24.04 baseline)
         shell: bash
         run: |
-          for bin in lain lain-git-sidecar; do
-            max=$(objdump -T "target/x86_64-unknown-linux-gnu/release/$bin" \
-              | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -V | tail -1)
-            echo "$bin needs glibc >= $max"
-            if [ "$(printf '%s\n2.35\n' "$max" | sort -V | tail -1)" != "2.35" ]; then
-              echo "::error::$bin requires glibc $max; the floor is 2.35"
+          # Fail the release if a runner or toolchain change makes either
+          # binary need more than Ubuntu 24.04 ships (glibc 2.39,
+          # libstdc++ GLIBCXX_3.4.33), so it cannot ship unrunnable silently.
+          check() { # symbol-prefix, ceiling, binary
+            local max
+            max=$(objdump -T "$3" | grep -o "$1_[0-9.]*" | sed "s/$1_//" | sort -V | tail -1)
+            echo "$(basename "$3") needs $1 >= ${max:-none}"
+            if [ -n "$max" ] && [ "$(printf '%s\n%s\n' "$max" "$2" | sort -V | tail -1)" != "$2" ]; then
+              echo "::error::$(basename "$3") requires $1 $max; the ceiling is $2"
               exit 1
             fi
+          }
+          for bin in lain lain-git-sidecar; do
+            f="target/x86_64-unknown-linux-gnu/release/$bin"
+            check GLIBC 2.39 "$f"
+            check GLIBCXX 3.4.33 "$f"
           done
       - name: Package tarball
         run: |
