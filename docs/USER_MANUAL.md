@@ -34,6 +34,7 @@ reference, tuning options, and day-to-day operating notes.
 | `lain schema` | Write the MCP tool schema used by schema-drift CI. |
 | `lain models` | List declared embedding models, install a model with `lain models install [name]`, or print the default model directory with `lain models path`. The installers run `lain models install` for the default model; pinned SHA-256 verification and ONNX loading are deferred to first use so startup is not blocked by them. The server never downloads models itself. |
 | `lain reindex` | Rebuild the federated graph from source after a schema bump. Backs up `federated_graph.bin` first. Add `--workspace <name>` to scope the rebuild. |
+| `lain prewarm` | Index everything once, publish the startup checkpoint, and exit: run it at image-build or deploy time so `lain server` restores the saved graph instead of re-indexing. Takes the same `--config`, `--param` and `--workspace` as `server`; exits non-zero and names the reason when no checkpoint could be published. |
 
 Run `lain <command> --help` for flags. The generated MCP tool schema lives at
 [`tool-schema.json`](tool-schema.json); the human-readable tool guide is

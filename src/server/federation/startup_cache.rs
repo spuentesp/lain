@@ -474,7 +474,7 @@ fn restore_checked(
         return Ok(Err(if key.is_none() {
             "the current inputs cannot be fingerprinted (a repo has uncommitted changes, is not a git checkout, or failed to load)".to_string()
         } else {
-            "the inputs differ from the checkpoint: the lain build, repos.yaml (including data_dir), run params, the LAIN_*LSP* environment, or a repo's absolute path, commit or tracked files changed since it was built".to_string()
+            "the inputs differ from the checkpoint: the lain binary version, repos.yaml (including data_dir), run params, the LAIN_*LSP* environment, or a repo's absolute path, commit or tracked files changed since it was built".to_string()
         }));
     }
     for (id, _) in fed.list_repos() {
