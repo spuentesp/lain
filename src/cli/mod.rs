@@ -10,6 +10,7 @@ pub mod mcp_client;
 pub mod mcp_stdio;
 pub mod models;
 pub mod oneshot;
+pub mod prewarm;
 pub mod query;
 pub mod readiness;
 pub mod reindex;
@@ -63,7 +64,6 @@ pub struct Args {
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
-
 /// Kept subcommands. Each variant carries its own `--config`
 /// (default: `./repos.yaml`) so the federation file follows the
 /// subcommand instead of being a binary-level flag. `schema` does
@@ -382,6 +382,26 @@ pub enum Commands {
         /// install none. Every language is indexed without them.
         #[arg(long, value_name = "none|detected|LANG,...")]
         lsp: Option<String>,
+    },
+    /// Index everything once, publish the startup checkpoint, and exit.
+    /// Run it at image-build or deploy time so `lain server` restores the
+    /// saved graph on every start instead of re-indexing. Takes the same
+    /// `--config`, `--param` and `--workspace` as `server`; the checkpoint
+    /// only restores when those, the repo paths and commits, and the
+    /// `LAIN_*LSP*` environment match at serve time. Fails (non-zero) when
+    /// no checkpoint could be published.
+    Prewarm {
+        #[arg(long, default_value = "./repos.yaml")]
+        config: PathBuf,
+        /// Run parameter `KEY=VALUE`, repeatable. Must match the `server`
+        /// invocation that will restore the checkpoint.
+        #[arg(long = "param", value_name = "KEY=VALUE")]
+        params: Vec<String>,
+        /// Active workspace; same meaning as for `server`.
+        #[arg(long, default_value = "auto")]
+        workspace: String,
+        #[arg(long, default_value = "info")]
+        log_level: String,
     },
     /// Re-index the workspace from scratch. Backs up any existing
     /// `<data_dir>/federated_graph.bin` to `federated_graph.bin.bak`

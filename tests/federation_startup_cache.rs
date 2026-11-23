@@ -631,3 +631,62 @@ async fn changed_membership_removes_unselected_repo_nodes_before_caching() {
     complete(&selected).await;
     assert!(load_federation(&config).await.unwrap().startup_restored());
 }
+
+// `lain reindex` rebuilds the graph but skips the cross-repo link and contract
+// join the server runs before it publishes, so it never writes the startup
+// checkpoint. A bake that used it left every boot to index from scratch.
+#[tokio::test]
+async fn reindex_does_not_publish_a_startup_checkpoint() {
+    let (_tmp, config) = fixture();
+    lain::cli::run_reindex(config.clone(), None, false)
+        .await
+        .unwrap();
+    let next = load_federation(&config).await.unwrap();
+    assert!(
+        !next.startup_restored(),
+        "reindex is not a prewarm: it must not claim a checkpoint it never built"
+    );
+}
+
+#[tokio::test]
+async fn prewarm_publishes_a_checkpoint_the_next_start_restores() {
+    use lain::cli::prewarm::{run_prewarm, PrewarmOutcome};
+    let (_tmp, config) = fixture();
+    let outcome = run_prewarm(&config, "none", "warn").await.unwrap();
+    assert_eq!(outcome, PrewarmOutcome::Published);
+
+    let restored = load_federation(&config).await.unwrap();
+    assert!(
+        restored.startup_restored(),
+        "the checkpoint prewarm published must be the one a server start restores"
+    );
+    assert!(
+        restored.backend().node_count() > 0,
+        "the restored graph holds the indexed repos"
+    );
+
+    let again = run_prewarm(&config, "none", "warn").await.unwrap();
+    assert_eq!(again, PrewarmOutcome::AlreadyWarm);
+}
+
+#[tokio::test]
+async fn prewarm_fails_and_names_the_gate_when_it_cannot_publish() {
+    use lain::cli::prewarm::run_prewarm;
+    let (tmp, config) = fixture();
+    std::fs::write(
+        tmp.path().join("alpha/main.py"),
+        "def uncommitted():\n    return 2\n",
+    )
+    .unwrap();
+    let error = run_prewarm(&config, "none", "warn").await.unwrap_err();
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("no startup checkpoint was published")
+            && message.contains("uncommitted changes"),
+        "a bake that cannot checkpoint must fail and say why: {message}"
+    );
+    assert!(
+        !tmp.path().join("data/startup-complete.json").exists(),
+        "no checkpoint file may be left behind"
+    );
+}

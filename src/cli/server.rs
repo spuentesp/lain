@@ -309,6 +309,27 @@ fn load_workspaces_for_server(
 /// when their pass finishes, so tools and `get_health` report progress
 /// honestly in the meantime.
 async fn index_federation(fed: Arc<FederatedIndex>) {
+    complete_startup(&fed).await;
+    refresh_forever(fed).await
+}
+
+/// What happened to the completed-federation checkpoint at the end of
+/// [`complete_startup`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum StartupCache {
+    /// A checkpoint from an earlier run was valid; no indexing was done.
+    Restored,
+    /// This run indexed everything and published a checkpoint.
+    Published,
+    /// Indexing finished but no checkpoint was written; the reason says why.
+    NotPublished(String),
+}
+
+/// Everything `lain server` does before it calls the federation ready: index
+/// (or restore), link across repos, mine anchors, join contracts, publish the
+/// startup checkpoint. `lain prewarm` runs exactly this and exits, so a baked
+/// checkpoint can never describe a different pipeline than the server's.
+pub(crate) async fn complete_startup(fed: &Arc<FederatedIndex>) -> StartupCache {
     // With several repos, a repo is not ready when its own pass ends:
     // calls into repos indexed after it are linked by the second pass
     // below. Hold it in `Indexing` until then, or a client that waits for
@@ -398,16 +419,30 @@ async fn index_federation(fed: Arc<FederatedIndex>) {
         cache_complete = false;
         tracing::warn!("startup contract join failed: {error}");
     }
-    match if cache_complete && !restored {
-        fed.checkpoint_startup_held()
+    let cache = if restored {
+        info!("federation startup cache: reusing completed checkpoint");
+        StartupCache::Restored
+    } else if !cache_complete {
+        let why = "a startup step failed; see the warnings above".to_string();
+        info!("federation startup cache: not published: {why}");
+        StartupCache::NotPublished(why)
     } else {
-        Ok(false)
-    } {
-        Ok(true) => info!("federation startup cache: completed graph published"),
-        Ok(false) if restored => info!("federation startup cache: reusing completed checkpoint"),
-        Ok(false) => info!("federation startup cache: inputs changed or worktree is dirty"),
-        Err(error) => tracing::warn!("federation startup cache publish failed: {error}"),
-    }
+        match fed.checkpoint_startup_held() {
+            Ok(outcome) if outcome.published() => {
+                info!("federation startup cache: completed graph published");
+                StartupCache::Published
+            }
+            Ok(crate::federation::startup_cache::PublishOutcome::Skipped(why)) => {
+                info!("federation startup cache: not published: {why}");
+                StartupCache::NotPublished(why)
+            }
+            Ok(_) => unreachable!("published outcomes are handled above"),
+            Err(error) => {
+                tracing::warn!("federation startup cache publish failed: {error}");
+                StartupCache::NotPublished(format!("publish failed: {error}"))
+            }
+        }
+    };
 
     if std::env::var("LAIN_STARTUP_DIGEST").as_deref() == Ok("1") {
         match crate::federation::contracts::digest::federation_content_digest(
@@ -424,6 +459,11 @@ async fn index_federation(fed: Arc<FederatedIndex>) {
         }
     }
 
+    cache
+}
+
+/// Keep the federation's global view current once startup is done.
+async fn refresh_forever(fed: Arc<FederatedIndex>) {
     // Keep the federation's global view current: a watcher-triggered
     // re-index changes one repo's graph, and until it is projected again
     // search_org and the cross-repo tools answer from the old one.
@@ -575,7 +615,7 @@ fn active_pointer_applies(active: &ActiveWorkspace, config_path: &Path) -> bool 
 /// on the server so hot reload re-scopes membership the same way.
 /// Exposed at the file level so a unit test can exercise the resolution
 /// without spinning up an MCP server.
-async fn load_federation_for_workspace(
+pub(crate) async fn load_federation_for_workspace(
     config_path: &Path,
     workspace_arg: &str,
 ) -> Result<(Arc<FederatedIndex>, Option<String>), anyhow::Error> {
@@ -696,7 +736,7 @@ async fn spawn_hot_reload(config_path: &Path, server: &LainServer) {
     });
 }
 
-fn init_tracing(log_level: &str) {
+pub(crate) fn init_tracing(log_level: &str) {
     let _ = tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
