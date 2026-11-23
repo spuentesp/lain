@@ -163,7 +163,7 @@ pub async fn load_federation(config_path: &Path) -> Result<Arc<FederatedIndex>, 
     if !restored
         && std::env::var("LAIN_REQUIRE_STARTUP_CACHE").is_ok_and(|v| !v.is_empty() && v != "0")
     {
-        return Err(LainError::Other("a valid completed federation cache is required; run lain server once without LAIN_REQUIRE_STARTUP_CACHE to prewarm it".into()));
+        return Err(LainError::Other("a valid completed federation cache is required; run `lain prewarm` (with the same --config, --param and --workspace as the server) to build it".into()));
     }
     if !restored {
         // Phase 1: project all nodes.
@@ -368,7 +368,7 @@ pub async fn load_federation_with_workspace(
     if !restored
         && std::env::var("LAIN_REQUIRE_STARTUP_CACHE").is_ok_and(|v| !v.is_empty() && v != "0")
     {
-        return Err(LainError::Other("a valid completed federation cache is required; run lain server once without LAIN_REQUIRE_STARTUP_CACHE to prewarm it".into()));
+        return Err(LainError::Other("a valid completed federation cache is required; run `lain prewarm` (with the same --config, --param and --workspace as the server) to build it".into()));
     }
     if !restored {
         // Phase 1: project all nodes.
