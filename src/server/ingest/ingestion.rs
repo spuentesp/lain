@@ -1675,6 +1675,25 @@ pub struct IndexOutcome {
     pub sensor_reports: Vec<(&'static str, crate::server::sensors::ScanReport)>,
 }
 
+/// Run CPU-bound synchronous work without pinning a tokio worker thread.
+///
+/// An indexing pass is an async task, but most of it is synchronous parsing,
+/// resolution and sensor scanning. Run inline, each repo being indexed
+/// occupies a whole worker for the duration, so a few repos indexing at once
+/// on a small machine (workers = CPUs) leave nothing to poll the HTTP
+/// listener: `/health` and every tool call stall until a scan ends. On the
+/// multi-thread runtime `block_in_place` hands the worker's queue to another
+/// thread first; on a current-thread runtime (tests) it would panic, so the
+/// work simply runs inline there.
+pub(crate) fn off_worker<T>(work: impl FnOnce() -> T) -> T {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(work)
+        }
+        _ => work(),
+    }
+}
+
 pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<IndexOutcome, LainError> {
     let IndexRequest {
         path,
@@ -1978,13 +1997,15 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<IndexOutcome, L
     }
     let resolver_for_resolve: Option<&dyn crate::federation::cross_repo::CrossRepoResolver> =
         if mode.skips_lsp() { None } else { resolver };
-    let call_edges = super::resolve::resolve_call_edges(
-        graph,
-        path,
-        &all_external_refs,
-        resolver_for_resolve,
-        source_repo,
-    );
+    let call_edges = off_worker(|| {
+        super::resolve::resolve_call_edges(
+            graph,
+            path,
+            &all_external_refs,
+            resolver_for_resolve,
+            source_repo,
+        )
+    });
     info!(
         "[federation] {:?}: ingesting {} call edges",
         path,
@@ -2007,12 +2028,14 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<IndexOutcome, L
         graph.update_cached_static_refs(&scanned_rel, &tracked_rel, &all_static_refs);
         all_static_refs.extend(refs_into_rescanned(path, graph, &files_to_scan, &tracked));
     }
-    let static_edges = super::resolve::resolve_static_edges(
-        graph,
-        &all_static_refs,
-        resolver_for_resolve,
-        source_repo,
-    );
+    let static_edges = off_worker(|| {
+        super::resolve::resolve_static_edges(
+            graph,
+            &all_static_refs,
+            resolver_for_resolve,
+            source_repo,
+        )
+    });
     // A full pass hands its refs to the cache instead of cloning them: one
     // copy exists, not two, while a large repo indexes (about 97 MB on
     // saleor). The cache is set before the edges are inserted so a failing
@@ -2032,11 +2055,13 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<IndexOutcome, L
     if cancel.is_cancelled() {
         return Err(LainError::Cancelled);
     }
-    let pattern_edges = super::resolve::resolve_pattern_edges(
-        graph,
-        &all_pattern_refs,
-        super::resolve::PatternLimits::FEDERATION,
-    );
+    let pattern_edges = off_worker(|| {
+        super::resolve::resolve_pattern_edges(
+            graph,
+            &all_pattern_refs,
+            super::resolve::PatternLimits::FEDERATION,
+        )
+    });
     info!(
         "[federation] {:?}: ingesting {} cross-boundary pattern edges",
         path,
@@ -2065,12 +2090,14 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<IndexOutcome, L
     // explicit that sensors are part of the snapshot-indexing
     // surface ("tree-sitter symbols + static resolve + sensors
     // only").
-    let (sensor_counts, sensor_reports) = crate::server::sensors::run_all_with_reports(
-        graph,
-        path,
-        namespace,
-        source_repo.as_ref().map(|r| r.as_str()).unwrap_or(""),
-    );
+    let (sensor_counts, sensor_reports) = off_worker(|| {
+        crate::server::sensors::run_all_with_reports(
+            graph,
+            path,
+            namespace,
+            source_repo.as_ref().map(|r| r.as_str()).unwrap_or(""),
+        )
+    });
     if sensor_counts.total() > 0 {
         info!(
             "[federation] {:?}: protocol sensors contributed {:?}",
@@ -3506,4 +3533,44 @@ fn partial_files_left(e: &LainError) -> Option<usize> {
         .strip_suffix(" left")?
         .parse()
         .ok()
+}
+
+#[cfg(test)]
+mod off_worker_tests {
+    use super::off_worker;
+    use std::time::{Duration, Instant};
+
+    /// The regression: synchronous indexing work ran inline on an async
+    /// worker, so on a small machine every worker was pinned by a scan and
+    /// nothing answered `/health`. With one worker, a task spawned before the
+    /// blocking work must still run *during* it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn blocking_work_does_not_pin_the_only_worker() {
+        // The test body runs on the test thread, not a worker, so the
+        // blocking work has to be spawned to land on the one worker.
+        let spawned = Instant::now();
+        let blocker = tokio::spawn(async {
+            off_worker(|| std::thread::sleep(Duration::from_millis(600)));
+        });
+        let ticker = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            Instant::now()
+        });
+        let ran_at = ticker.await.unwrap().duration_since(spawned);
+        blocker.await.unwrap();
+        assert!(
+            ran_at < Duration::from_millis(400),
+            "a sibling task waited {ran_at:?}: the blocking work pinned the worker"
+        );
+    }
+
+    #[tokio::test]
+    async fn runs_inline_on_a_current_thread_runtime() {
+        assert_eq!(off_worker(|| 7), 7);
+    }
+
+    #[test]
+    fn runs_inline_outside_any_runtime() {
+        assert_eq!(off_worker(|| 7), 7);
+    }
 }

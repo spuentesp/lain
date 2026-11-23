@@ -79,11 +79,17 @@ Raw evidence: [nvidia-startup-objective-gap-2026-11-08.json](benchmarks/nvidia-s
 
 Further cold-start work should target the remaining measured sensors. In the first new NemoClaw pass, ORM took 13.3 s, frontend values 10.6 s, HTTP clients 9.8 s, and field access 6.2 s. Its total local pass took 55.9 s, compared with 99.8 s in the original first run. Concurrent indexing is available through the existing configuration and benchmark flag, but these measurements keep concurrency at one to preserve the comparison.
 
-To prewarm, start the normal server and wait for `/health/index-status` to return HTTP 200. That endpoint reports readiness only after indexing, linking, the contract join, and checkpoint publication have been attempted. Publication errors are logged; ordinary startup can still serve its completed in-memory graph.
+To prewarm, run `lain prewarm` — at image-build or deploy time, not in the serving process:
 
 ```bash
-lain server --config repos.yaml --transport http
+lain prewarm --config repos.yaml
 ```
+
+It runs the server's own startup pipeline (index, cross-repo link, anchor mining, contract join, checkpoint publication) to completion and exits; it opens no listener. It exits non-zero, and names the gate that stopped it, when no checkpoint was published: a repository that is `Degraded` after hitting its index time budget, a dirty worktree, or inputs that changed while it ran. A second run against a valid checkpoint does nothing.
+
+`lain reindex` is not a prewarm. It rebuilds the graph but skips the relink and contract join, so it never writes the checkpoint; a server started after only a `reindex` indexes everything again. (Starting the normal server and waiting for `/health/index-status` to return HTTP 200 also publishes the checkpoint, and is what prewarming was before `lain prewarm` existed.)
+
+The checkpoint restores only when the serving process matches the one that built it. It is keyed on the `lain` build, the whole `repos.yaml` (including `data_dir`), run params, the `LAIN_DISABLE_LSP`, `LAIN_TEST_NO_LSP`, `LAIN_LSP_LEAN` and `LAIN_LSP_PREWARM` environment, and each repo's absolute path, commit and tracked-file contents. Bake with the same `--config`, `--param` and `--workspace` and the same environment the server will run with, at the same paths. When a start does not restore, the log says why (`federation startup cache miss: ...`).
 
 To require a prepared cache on subsequent launches:
 

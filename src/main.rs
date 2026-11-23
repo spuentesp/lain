@@ -258,6 +258,26 @@ fn main() -> Result<()> {
             });
             std::process::exit(code);
         }
+        Some(Commands::Prewarm {
+            config,
+            params,
+            workspace,
+            log_level,
+        }) => {
+            lain::server::federation::config::set_run_param_overrides(&params)?;
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .context("build tokio runtime for prewarm subcommand")?;
+            // Return from main (no process::exit) so language-server
+            // children are dropped and killed with the runtime.
+            rt.block_on(lain::cli::prewarm::run_prewarm(
+                &lain::cli::resolve_repos_config(&config),
+                &workspace,
+                &log_level,
+            ))
+            .map(|_| ())
+        }
         Some(Commands::Reindex {
             config,
             workspace,

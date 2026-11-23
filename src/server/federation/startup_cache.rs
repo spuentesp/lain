@@ -428,16 +428,27 @@ fn outputs(fed: &FederatedIndex, data_dir: &Path) -> Result<String, LainError> {
 
 pub(crate) fn restore(fed: &FederatedIndex, config: &FederationConfig) -> Result<bool, LainError> {
     let result = restore_checked(fed, config);
-    if !matches!(result, Ok(true)) {
-        let path = config.data_dir.join(RECORD);
-        if path.exists() {
-            std::fs::remove_file(path)?;
+    match &result {
+        Ok(Ok(())) => return Ok(true),
+        // A miss that says nothing sends the operator to guess why a baked
+        // checkpoint did not apply. Name the gate.
+        Ok(Err(why)) => {
+            tracing::info!("federation startup cache miss: {why}; indexing from source")
         }
+        Err(_) => {}
     }
-    result
+    let path = config.data_dir.join(RECORD);
+    if path.exists() {
+        std::fs::remove_file(path)?;
+    }
+    result.map(|_| false)
 }
 
-fn restore_checked(fed: &FederatedIndex, config: &FederationConfig) -> Result<bool, LainError> {
+/// `Ok(Ok(()))` is a hit; `Ok(Err(why))` is a miss with its reason.
+fn restore_checked(
+    fed: &FederatedIndex,
+    config: &FederationConfig,
+) -> Result<Result<(), String>, LainError> {
     let input_timing = StartupTiming::start("cache_input_validation");
     let key = inputs(fed, config)?;
     drop(input_timing);
@@ -449,10 +460,22 @@ fn restore_checked(fed: &FederatedIndex, config: &FederationConfig) -> Result<bo
         .and_then(|_| std::fs::read(&path).ok())
         .and_then(|bytes| serde_json::from_slice::<Completion>(&bytes).ok());
     let Some(record) = record else {
-        return Ok(false);
+        return Ok(Err(format!(
+            "no readable completed checkpoint at {} (run `lain prewarm` to build one)",
+            path.display()
+        )));
     };
-    if record.version != VERSION || Some(record.inputs) != key {
-        return Ok(false);
+    if record.version != VERSION {
+        return Ok(Err(
+            "the checkpoint was written by an incompatible format version".to_string(),
+        ));
+    }
+    if Some(record.inputs) != key {
+        return Ok(Err(if key.is_none() {
+            "the current inputs cannot be fingerprinted (a repo has uncommitted changes, is not a git checkout, or failed to load)".to_string()
+        } else {
+            "the inputs differ from the checkpoint: the lain binary version, repos.yaml (including data_dir), run params, the LAIN_*LSP* environment, or a repo's absolute path, commit or tracked files changed since it was built".to_string()
+        }));
     }
     for (id, _) in fed.list_repos() {
         let repo = fed.get_repo(&id).unwrap();
@@ -463,27 +486,48 @@ fn restore_checked(fed: &FederatedIndex, config: &FederationConfig) -> Result<bo
                 .db()
                 .was_written_by_build(crate::server::build_info::INDEX_BUILD_ID)
         {
-            return Ok(false);
+            return Ok(Err(format!(
+                "repository '{}' has no per-repo graph written by this build at its current commit",
+                id.as_str()
+            )));
         }
     }
     let output_timing = StartupTiming::start("cache_output_validation");
     let output_key = outputs(fed, &config.data_dir)?;
     drop(output_timing);
     if record.outputs != output_key {
-        return Ok(false);
+        return Ok(Err(
+            "the saved graph files differ from what the checkpoint recorded".to_string(),
+        ));
     }
     fed.restore_projection_metadata()?;
     fed.set_startup_restored(true);
     tracing::info!("federation startup cache hit: validated completed graph");
-    Ok(true)
+    Ok(Ok(()))
+}
+
+/// What [`publish`] did. A skip names the gate that stopped it, so a bake
+/// that produced no checkpoint can say why instead of leaving the operator to
+/// guess between a dirty worktree, a degraded repo and drifted inputs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PublishOutcome {
+    Published,
+    Skipped(String),
+}
+
+impl PublishOutcome {
+    pub fn published(&self) -> bool {
+        matches!(self, Self::Published)
+    }
 }
 
 pub(crate) fn publish(
     fed: &FederatedIndex,
     config: &FederationConfig,
     allow_held: bool,
-) -> Result<bool, LainError> {
-    if fed.list_repos().iter().any(|(id, h)| {
+) -> Result<PublishOutcome, LainError> {
+    let skip = |why: String| Ok(PublishOutcome::Skipped(why));
+    if let Some((id, health)) = fed.list_repos().into_iter().find(|(id, h)| {
         *h != crate::federation::health::RepoHealth::Ready
             && !(allow_held
                 && *h == crate::federation::health::RepoHealth::Indexing
@@ -491,18 +535,42 @@ pub(crate) fn publish(
                     .get_repo(id)
                     .is_some_and(|repo| repo.indexed_signal_was_fired()))
     }) {
-        return Ok(false);
+        return skip(format!(
+            "repository '{}' is {health:?}, not Ready (an index that failed or hit its time budget leaves it Degraded; see LAIN_INDEX_TIMEOUT_SECS and the repo's index_timeout_secs)",
+            id.as_str()
+        ));
     }
     let Some(key) = inputs(fed, config)? else {
-        return Ok(false);
+        let errors = fed.load_errors();
+        return skip(if fed.list_repos().is_empty() {
+            "the federation has no repositories".to_string()
+        } else if !errors.is_empty() {
+            format!(
+                "{} repository load error(s): {}",
+                errors.len(),
+                errors
+                    .iter()
+                    .map(|(repo, error)| format!("{repo}: {error}"))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            )
+        } else {
+            "a repository has uncommitted changes or is not a git checkout".to_string()
+        });
     };
     if fed.startup_inputs().as_ref() != Some(&key) {
-        return Ok(false);
+        return skip(
+            "the inputs changed after the federation was loaded (config, run params, repo commit or tracked files)"
+                .to_string(),
+        );
     }
     for (id, _) in fed.list_repos() {
         let repo = fed.get_repo(&id).unwrap();
         if !repo.analysis_checkpoint_current()? {
-            return Ok(false);
+            return skip(format!(
+                "repository '{}' has an analysis checkpoint that is not current",
+                id.as_str()
+            ));
         }
         repo.db().save_to_disk_sync()?;
     }
@@ -518,7 +586,7 @@ pub(crate) fn publish(
     let result = (|| {
         std::fs::write(&tmp, bytes)?;
         std::fs::rename(&tmp, config.data_dir.join(RECORD))?;
-        Ok::<_, LainError>(true)
+        Ok::<_, LainError>(PublishOutcome::Published)
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&tmp);

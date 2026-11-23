@@ -319,16 +319,27 @@ impl FederatedIndex {
     /// Checkpoint a fully ready, unchanged federation for the next launch.
     /// Also used by prewarming callers after indexing and linking complete.
     pub fn checkpoint_startup(&self) -> Result<bool, LainError> {
-        self.checkpoint_startup_inner(false)
+        Ok(self.checkpoint_startup_inner(false)?.published())
     }
 
-    pub(crate) fn checkpoint_startup_held(&self) -> Result<bool, LainError> {
+    /// The startup pipeline's own publish: repos still held in `Indexing`
+    /// until the cross-repo link finishes count as ready. Reports why a
+    /// checkpoint was not written.
+    pub(crate) fn checkpoint_startup_held(
+        &self,
+    ) -> Result<crate::federation::startup_cache::PublishOutcome, LainError> {
         self.checkpoint_startup_inner(true)
     }
 
-    fn checkpoint_startup_inner(&self, allow_held: bool) -> Result<bool, LainError> {
+    fn checkpoint_startup_inner(
+        &self,
+        allow_held: bool,
+    ) -> Result<crate::federation::startup_cache::PublishOutcome, LainError> {
+        use crate::federation::startup_cache::PublishOutcome;
         let Some(path) = self.config_path() else {
-            return Ok(false);
+            return Ok(PublishOutcome::Skipped(
+                "the federation was not loaded from a config file".to_string(),
+            ));
         };
         let config = crate::federation::loader::resolve_data_dir(
             crate::federation::config::FederationConfig::load(&path)?,

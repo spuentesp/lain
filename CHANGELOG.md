@@ -3,6 +3,27 @@
 All notable changes to LAIN are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+- **`lain prewarm` builds the startup checkpoint without serving.** It runs the server's
+  own startup pipeline to completion and exits, so an image build or deploy hook can bake
+  `startup-complete.json` and the next `lain server` restores the graph instead of
+  re-indexing (minutes of CPU on a small VM). It exits non-zero and names the reason when
+  no checkpoint could be published. `lain reindex` still does not write the checkpoint (it
+  skips the relink and contract join), and now says so in the docs.
+- **A startup that does not restore the checkpoint says why.** `federation startup cache
+  miss: ...` names the failed gate (no record, drifted inputs, a repo not written by this
+  build, changed output files), and a skipped publish names its cause (a repo `Degraded`,
+  a dirty worktree, inputs changed mid-run) in place of "inputs changed or worktree is
+  dirty" for all of them.
+- **The server answers while it indexes.** Indexing ran its synchronous parsing, sensor
+  scans and edge resolution directly on the tokio worker threads. With a few repos indexing
+  at once on a small machine (workers = CPUs), every worker sat inside a scan and nothing
+  polled the HTTP listener: `/health` and every tool call stalled for the length of a scan
+  (8–15 s on three ~1,000-file repos pinned to 2 CPUs, minutes on a large federation, long
+  enough for a client's handshake timeout to kill it). That work now runs off the async
+  workers; the same measurement peaks at about 0.4 s.
+
 ## [0.16.0] - 2026-11-20
 
 - **The file watcher no longer busy-loops on an idle repo.** It reacted to read-only
