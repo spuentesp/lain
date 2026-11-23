@@ -2,7 +2,8 @@ name: CodeQL
 
 # Static analysis on Rust source via CodeQL. Runs on:
 #   * push to main and dev (full scan on the integration branches)
-#   * pull_request targeting main or dev (delta scan on the PR diff)
+#   * NOT on pull_request: a ~7 min scan per PR push was a large share of
+#     CI spend; every change is scanned on merge to dev/main instead.
 #   * weekly cron on Monday 13:37 UTC (a non-:00 minute to avoid the
 #     shared GitHub API herd)
 #
@@ -12,8 +13,6 @@ name: CodeQL
 
 on:
   push:
-    branches: [main, dev]
-  pull_request:
     branches: [main, dev]
   schedule:
     - cron: '37 13 * * 1'

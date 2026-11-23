@@ -1,8 +1,8 @@
 name: Federation Nightly Benchmark
 
 on:
-  schedule:
-    - cron: '0 2 * * *'
+  # No schedule: nightly runs were dropped to cut CI cost (2026-11-22).
+  # Run on demand with workflow_dispatch.
   workflow_dispatch:
 
 # Deny everything by default; the lone job below only needs read.
