@@ -507,7 +507,8 @@ The `apply_contract_context` MCP tool adds entries to `provides` without a
 restart. It is dry-run by default: it returns the YAML it would write. With
 `dry_run: false` it validates the whole result, backs up `repos.yaml` to
 `repos.yaml.bak`, writes atomically, and re-joins the contract index. It
-reports `applied: true` only when the re-joined index serves the declaration.
+reports `applied: true` only when the re-joined index serves every requested
+declaration.
 A refused declaration leaves the file byte-identical. A write to a file that
 changed since it was read is refused. A failed re-join restores the file.
 
