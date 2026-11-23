@@ -16,6 +16,13 @@ All notable changes to LAIN are documented here. Versions follow
   build, changed output files), and a skipped publish names its cause (a repo `Degraded`,
   a dirty worktree, inputs changed mid-run) in place of "inputs changed or worktree is
   dirty" for all of them.
+- **The server answers while it indexes.** Indexing ran its synchronous parsing, sensor
+  scans and edge resolution directly on the tokio worker threads. With a few repos indexing
+  at once on a small machine (workers = CPUs), every worker sat inside a scan and nothing
+  polled the HTTP listener: `/health` and every tool call stalled for the length of a scan
+  (8–15 s on three ~1,000-file repos pinned to 2 CPUs, minutes on a large federation, long
+  enough for a client's handshake timeout to kill it). That work now runs off the async
+  workers; the same measurement peaks at about 0.4 s.
 
 ## [0.16.0] - 2026-11-20
 
