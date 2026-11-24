@@ -3,7 +3,7 @@
 All notable changes to LAIN are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.16.1] - 2026-11-23
 
 - **`lain prewarm` builds the startup checkpoint without serving.** It runs the server's
   own startup pipeline to completion and exits, so an image build or deploy hook can bake
@@ -23,6 +23,9 @@ All notable changes to LAIN are documented here. Versions follow
   (8–15 s on three ~1,000-file repos pinned to 2 CPUs, minutes on a large federation, long
   enough for a client's handshake timeout to kill it). That work now runs off the async
   workers; the same measurement peaks at about 0.4 s.
+- **Housekeeping.** Dependency bumps (serde_json, loom, jsonschema 0.61, proptest-state-machine
+  0.9, three GitHub Actions); the nightly CI schedules are removed and CodeQL no longer runs on
+  every PR push; the Linux release binary is built on Ubuntu 24.04 (documented floor).
 
 ## [0.16.0] - 2026-11-20
 
