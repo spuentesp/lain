@@ -230,6 +230,24 @@ impl JobRunner {
         self.inner.lock().by_key.len()
     }
 
+    /// Claim the next `Queued` job for a worker: find it and mark it
+    /// `Indexing` under the runner lock, so two workers can never both
+    /// pick the same job (finding it and marking it in two steps let
+    /// both workers see `Queued` and index the same repo twice).
+    pub fn claim_next(&self) -> Option<Arc<JobState>> {
+        let inner = self.inner.lock();
+        for state in inner.by_key.values() {
+            let mut status = state.status.lock();
+            if matches!(*status, JobStatus::Queued) {
+                *status = JobStatus::Indexing;
+                drop(status);
+                state.revision.fetch_add(1, Ordering::Release);
+                return Some(Arc::clone(state));
+            }
+        }
+        None
+    }
+
     /// Mark a job as `Indexing` (called by the worker before it
     /// starts work). The counters are derived on read; this is the
     /// only state mutation the worker performs.
@@ -349,6 +367,22 @@ fn run_job_inner(
     // can build the right cache key. The cache is keyed on the
     // resolved SHA, not the operator-supplied ref (`spec.sha`).
     *_state.resolved_sha.lock() = Some(sha.clone());
+
+    // The entry may already be on disk: written by an earlier process
+    // (a restart, or a cache baked into an image) or by another
+    // snapshot manager over the same data_dir. Indexing it again costs
+    // minutes and GBs on a large repo and produces the same bytes.
+    let cached_key = CacheKey::new(&spec.repo, &sha, &spec.analyzer_version);
+    if runner.cache().has_entry(&cached_key) {
+        if let Ok(Some(manifest)) = runner.cache().read_manifest(&cached_key) {
+            info!(repo = %spec.repo, sha = %sha, "snapshot job: cache entry present, not re-indexing");
+            drop(lock);
+            return Ok(JobOutcome {
+                bytes: manifest.bytes,
+                files: manifest.files,
+            });
+        }
+    }
 
     let wt_path = worktree_add(runner.data_dir(), &spec.repo, &sha)
         .map_err(|e| LainError::Io(format!("snapshot job: worktree_add failed: {e}")))?;
@@ -565,6 +599,91 @@ mod tests {
             analyzer_version: "0.9.0+c1".into(),
             source: "/tmp/source".into(),
         }
+    }
+
+    #[test]
+    fn claim_next_hands_each_queued_job_to_exactly_one_worker() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = Arc::new(JobRunner::new(
+            IndexCache::new(dir.path()),
+            dir.path().to_path_buf(),
+        ));
+        runner.submit(spec("orders", "abc"));
+        let barrier = Arc::new(std::sync::Barrier::new(8));
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let runner = Arc::clone(&runner);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    runner.claim_next().is_some()
+                })
+            })
+            .collect();
+        let claimed = handles
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .filter(|c| *c)
+            .count();
+        assert_eq!(claimed, 1, "one queued job must be claimed once");
+        assert!(runner.claim_next().is_none());
+        assert_eq!(runner.counters().indexing, 1);
+    }
+
+    #[test]
+    fn run_job_reuses_a_cached_entry_instead_of_reindexing() {
+        let src = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(src.path())
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+        git(&["init", "-q"]);
+        std::fs::write(src.path().join("main.rs"), "fn main() {}\n").unwrap();
+        git(&["add", "."]);
+        git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "-m",
+            "init",
+        ]);
+        let sha = git(&["rev-parse", "HEAD"]);
+
+        let data = tempfile::tempdir().unwrap();
+        let cache = IndexCache::new(data.path());
+        let key = CacheKey::new("orders", &sha, "0.9.0+c1");
+        let manifest = build_manifest(
+            "orders",
+            &sha,
+            "0.9.0+c1",
+            vec!["main.rs".into()],
+            BTreeMap::new(),
+            7,
+        );
+        cache.write_entry(&key, b"baked", &manifest).unwrap();
+
+        let runner = JobRunner::new(cache.clone(), data.path().to_path_buf());
+        let (state, _) = runner.submit(JobSpec {
+            repo: "orders".into(),
+            sha: sha.clone(),
+            analyzer_version: "0.9.0+c1".into(),
+            source: src.path().display().to_string(),
+        });
+        let outcome = run_job(&runner, Arc::clone(&state)).unwrap();
+        assert_eq!(outcome.bytes, 7);
+        assert_eq!(outcome.files, vec!["main.rs".to_string()]);
+        assert!(matches!(*state.status.lock(), JobStatus::Done { .. }));
+        // Re-indexing would have replaced the entry with a real graph.
+        let graph = crate::federation::contracts::index_cache::graph_path(data.path(), &key);
+        assert_eq!(std::fs::read(graph).unwrap(), b"baked");
     }
 
     #[test]
