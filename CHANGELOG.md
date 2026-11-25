@@ -3,6 +3,26 @@
 All notable changes to LAIN are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Fixed
+
+- **A new commit re-indexed every repository of the federation.** A
+  snapshot job indexed its repo from scratch even when the index cache
+  already held the same commit — after a restart, or when an entry was
+  baked into an image, one analysis re-paid the full indexing cost of
+  every other repo in the workspace (NemoClaw: ~150 s and GBs of RSS).
+  A snapshot job now reuses the cache entry it finds on disk,
+  `prepare_snapshot` and restart recovery no longer queue cached repos
+  at all, and claiming a queued job is one atomic step so two workers
+  cannot index the same repo twice. A `git fetch` that only touches
+  `.git` no longer rebuilds the live graph and relinks every federated
+  repo. `LAIN_SNAPSHOT_RESIDENT_IDLE_SECS` (default `0` = off) drops
+  resident snapshot federations no tool call holds, and the server no
+  longer starts a second snapshot worker pool over the same data
+  directory. Two PR analyses on the Parallax Fly image: peak
+  6.6 GB -> 4.5 GB, settled 5.3 GB -> 3.3 GB.
+
 ## [0.16.1] - 2026-11-23
 
 - **`lain prewarm` builds the startup checkpoint without serving.** It runs the server's

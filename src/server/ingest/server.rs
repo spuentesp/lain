@@ -308,13 +308,15 @@ impl LainServer {
         // Phase 0 audit (2026-10-04): the snapshot manager that backs
         // `prepare_snapshot`, `get_snapshot`, `diff_contracts`,
         // `trace_impact`, `resolve_evidence`, and `read_source` is
-        // not wired by `LainMcpServer::with_federation`. The wiring
-        // exists in `constructors::with_federation_with_attribution`
-        // (line 405) but that entry point is not used by the live
-        // boot path. Without this block, the six snapshot-backed
-        // contract tools are advertised in `tools/list` but every call
-        // returns `snapshot_manager_unavailable`. Wire it here when
-        // `repos.yaml` is configured so the tools work in production.
+        // not wired by `LainMcpServer::with_federation`. This block is
+        // the single wiring site: it builds the one `SnapshotManager`
+        // over `data_dir`, installs it on the federation, and hands it
+        // to the served MCP. (`constructors.rs` deliberately does not
+        // build one — its eager MCP is discarded, and a manager built
+        // there leaked a second worker pool over the same `data_dir`.)
+        // Without this block, the six snapshot-backed contract tools
+        // are advertised in `tools/list` but every call returns
+        // `snapshot_manager_unavailable`.
         let mcp = if let Some(repos_yaml) = self.federation.repos_yaml() {
             match crate::federation::config::FederationConfig::load(repos_yaml) {
                 Ok(cfg) => {
