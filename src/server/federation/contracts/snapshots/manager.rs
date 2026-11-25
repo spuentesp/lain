@@ -57,6 +57,22 @@ pub fn snapshot_resident_cap() -> usize {
 
 pub const DEFAULT_SNAPSHOT_RESIDENT: usize = 2;
 
+/// `LAIN_SNAPSHOT_RESIDENT_IDLE_SECS`: a resident snapshot federation that
+/// no tool call holds and none has used for this many seconds is dropped,
+/// and rebuilt from the index cache if asked for again. `0` (the default)
+/// keeps residents until the LRU needs their slot. A federation projects
+/// every repo of the snapshot, so on a small machine the two left resident
+/// by the previous analysis raise the next analysis's peak by their size.
+pub fn snapshot_resident_idle_secs() -> u64 {
+    match std::env::var("LAIN_SNAPSHOT_RESIDENT_IDLE_SECS") {
+        Ok(s) if !s.trim().is_empty() => s.trim().parse::<u64>().unwrap_or_else(|e| {
+            warn!("LAIN_SNAPSHOT_RESIDENT_IDLE_SECS={s:?} is not a u64 ({e}); idle eviction stays off");
+            0
+        }),
+        _ => 0,
+    }
+}
+
 /// `LAIN_SNAPSHOT_RETENTION_DAYS` (`§8.4`): records older than 7
 /// days after their last access are deleted.
 pub fn snapshot_retention_days() -> u64 {
@@ -277,6 +293,9 @@ impl SnapshotManager {
                 // runner dedups by `(repo, sha, analyzer_version)`).
                 for (repo, commit) in &record.repos {
                     let key = CacheKey::new(repo, commit, &record.analyzer_version);
+                    if self.cache.has_entry(&key) {
+                        continue;
+                    }
                     let Some(source) = self.resolve_repo_source_inner(repo) else {
                         continue;
                     };
@@ -476,6 +495,14 @@ impl SnapshotManager {
         // share a triple see a single worker.
         let mut jobs: Vec<Arc<JobState>> = Vec::new();
         for (repo, commit) in &resolved_repos {
+            // Already cached (`refresh_repo_states` reports it as
+            // `cached` without a job): queueing it would re-index it.
+            if self
+                .cache
+                .has_entry(&CacheKey::new(repo, commit, &analyzer_version))
+            {
+                continue;
+            }
             let source = match self.resolve_repo_source_inner(repo) {
                 Some(s) => s,
                 None => return Err(PrepareError::RepoNotRegistered { repo: repo.clone() }),
@@ -1523,6 +1550,42 @@ impl SnapshotManager {
         }
     }
 
+    /// Drop every resident federation that no tool call holds and that
+    /// was last used more than `idle_secs` before `now_unix`. The hold
+    /// check and the removal happen under the resident lock, as in
+    /// [`Self::try_evict_one_lru_unheld`], so a held federation is never
+    /// dropped. `idle_secs == 0` disables the sweep. Returns how many
+    /// were dropped.
+    pub fn evict_idle_residents(self: &Arc<Self>, idle_secs: u64, now_unix: i64) -> usize {
+        if idle_secs == 0 {
+            return 0;
+        }
+        let idle = i64::try_from(idle_secs).unwrap_or(i64::MAX);
+        let dropped: Vec<String> = {
+            let mut resident = self.resident.lock();
+            let ids: Vec<String> = resident
+                .iter()
+                .filter(|(_, f)| {
+                    f.held.load(Ordering::Acquire) == 0
+                        && now_unix.saturating_sub(f.last_used()) >= idle
+                })
+                .map(|(id, _)| id.clone())
+                .collect();
+            for id in &ids {
+                resident.remove(id);
+            }
+            ids
+        };
+        if !dropped.is_empty() {
+            info!(
+                count = dropped.len(),
+                idle_secs, "snapshot manager: dropped idle resident snapshot federations"
+            );
+            self.residency_notify.1.notify_all();
+        }
+        dropped.len()
+    }
+
     /// Drop a federation from the resident set (used by the
     /// `from_snapshot` retention sweeper).
     pub fn evict_resident(self: &Arc<Self>, snapshot_id: &str) -> bool {
@@ -1936,19 +1999,13 @@ fn snapshot_worker_loop(mgr: Arc<SnapshotManager>) {
     // (a test-only escape hatch) so the loop can exit cleanly when
     // a test case needs it to.
     let mut idle_polls = 0u64;
+    let resident_idle_secs = snapshot_resident_idle_secs();
     loop {
         if SHUTDOWN_REQUESTED.load(std::sync::atomic::Ordering::Relaxed) {
             return;
         }
         // Find the next queued job.
-        let next: Option<Arc<JobState>> = {
-            let inner = mgr.runner.inner.lock();
-            inner
-                .by_key
-                .values()
-                .find(|state| matches!(*state.status.lock(), JobStatus::Queued))
-                .cloned()
-        };
+        let next: Option<Arc<JobState>> = mgr.runner.claim_next();
         if let Some(state) = next {
             idle_polls = 0;
             info!(repo = %state.spec.repo, sha = %state.spec.sha, "snapshot worker: picked job");
@@ -1959,6 +2016,10 @@ fn snapshot_worker_loop(mgr: Arc<SnapshotManager>) {
             }
         } else {
             idle_polls += 1;
+            // Every ~5 s of idleness (50 polls of 100 ms).
+            if idle_polls.is_multiple_of(50) {
+                mgr.evict_idle_residents(resident_idle_secs, now_unix());
+            }
             if idle_polls == 50 {
                 info!(
                     total_jobs = mgr.runner.total_jobs(),

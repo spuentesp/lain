@@ -4,7 +4,7 @@
 class Lain < Formula
   desc "Structural code intelligence for AI agents"
   homepage "https://github.com/spuentesp/lain"
-  version "0.16.1"
+  version "0.16.2"
 
   # No `on_macos` stanza: `release.yml` builds Linux and Windows only.
   # The macOS ARM64 target was dropped in v0.14.0 (an unresolvable ONNX
@@ -24,15 +24,15 @@ class Lain < Formula
 
   on_linux do
     on_intel do
-      url "https://github.com/spuentesp/lain/releases/download/v0.16.1/lain-0.16.1-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "5397b1fb9ca112f15fe670d2715d49d87f500503e5ae9834c3665b4c4a76883a"
+      url "https://github.com/spuentesp/lain/releases/download/v0.16.2/lain-0.16.2-x86_64-unknown-linux-gnu.tar.gz"
+      sha256 "5a7a503f8f50804d1eab21df835ca26c7ac209d0a8916583ca1235ce3404a958"
     end
   end
 
   on_windows do
     on_intel do
-      url "https://github.com/spuentesp/lain/releases/download/v0.16.1/lain-0.16.1-x86_64-pc-windows-msvc.tar.gz"
-      sha256 "b47d7967d28e6e8080e09bf626c148b3f13b98007c250241e795bc087ac620e6"
+      url "https://github.com/spuentesp/lain/releases/download/v0.16.2/lain-0.16.2-x86_64-pc-windows-msvc.tar.gz"
+      sha256 "4e0ce6117302c26f2de6d7855c6afab5c419fbda9d9e66a229d55c95507b25b7"
     end
   end
 

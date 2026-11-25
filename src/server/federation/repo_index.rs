@@ -1115,15 +1115,37 @@ impl RepoIndex {
     fn drain_queued_events(
         rx: &mut tokio::sync::mpsc::Receiver<notify::Result<notify::Event>>,
         outstanding: &std::sync::Arc<std::sync::atomic::AtomicU64>,
-    ) -> (usize, bool) {
+        git_dir: &Path,
+    ) -> (usize, bool, bool) {
         let mut drained = 0usize;
         let mut batch_had_event = false;
+        let mut only_git_dir = true;
         while let Ok(ev) = rx.try_recv() {
             outstanding.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
             batch_had_event |= ev.is_ok();
+            only_git_dir &= Self::event_only_in_git_dir(&ev, git_dir);
             drained += 1;
         }
-        (drained, batch_had_event)
+        (drained, batch_had_event, only_git_dir)
+    }
+
+    /// True when every path of `event` lies inside the repository's
+    /// `.git` directory. An error (no paths) is not counted as such.
+    fn event_only_in_git_dir(event: &notify::Result<notify::Event>, git_dir: &Path) -> bool {
+        match event {
+            Ok(ev) => !ev.paths.is_empty() && ev.paths.iter().all(|p| p.starts_with(git_dir)),
+            Err(_) => false,
+        }
+    }
+
+    /// Whether HEAD still names the commit the graph was last indexed
+    /// at. A batch of events that stayed inside `.git` and left HEAD
+    /// alone (a `git fetch`, a new branch, `git gc`) changed no file
+    /// the indexer reads, so it must not rebuild the live graph.
+    fn head_matches_indexed_commit(&self) -> bool {
+        let latest = self.git.get_latest_commit_info().ok().map(|(c, _)| c);
+        let indexed = self.db.get_last_commit().ok().flatten();
+        matches!((latest, indexed), (Some(l), Some(i)) if l == i)
     }
 
     pub async fn start_watcher(self: &Arc<Self>) -> Result<(), LainError> {
@@ -1136,6 +1158,7 @@ impl RepoIndex {
         use tokio::sync::mpsc;
 
         let path = self.source.local_path().to_path_buf();
+        let git_dir = path.join(".git");
         let weak = Arc::downgrade(self);
 
         // Bounded channel to hand events from notify's inotify thread to
@@ -1200,13 +1223,26 @@ impl RepoIndex {
                 // health stayed `ready`. One pass per batch keeps the
                 // semantics (the newest state is indexed) without the
                 // backlog multiplying the work.
-                let (collapsed, batch_had_event) = Self::drain_queued_events(&mut rx, &outstanding);
+                let first_only_git_dir = Self::event_only_in_git_dir(&res, &git_dir);
+                let (collapsed, batch_had_event, rest_only_git_dir) =
+                    Self::drain_queued_events(&mut rx, &outstanding, &git_dir);
                 if collapsed > 0 {
                     tracing::debug!(
                         "[federation] watcher coalesced {collapsed} queued event(s) into one reindex"
                     );
                 }
-                let run_pipelines = res.is_ok() || batch_had_event;
+                let mut run_pipelines = res.is_ok() || batch_had_event;
+                if run_pipelines
+                    && first_only_git_dir
+                    && rest_only_git_dir
+                    && me_for_task.head_matches_indexed_commit()
+                {
+                    tracing::debug!(
+                        "[federation] {:?}: .git changed but HEAD did not move; not re-indexing",
+                        me_for_task.source.local_path()
+                    );
+                    run_pipelines = false;
+                }
                 if run_pipelines {
                     // `index_forced` (not `index`) — the watcher fires
                     // on a kernel `notify` event, which is independent
@@ -2133,6 +2169,112 @@ mod tests {
         assert!(overlay.get_node(&unrelated.id).is_some());
     }
 
+    #[test]
+    fn event_only_in_git_dir_requires_every_path_inside_dot_git() {
+        let git_dir = Path::new("/r/.git");
+        let ev = |paths: &[&str]| {
+            let mut e = notify::Event::new(notify::EventKind::Any);
+            for p in paths {
+                e = e.add_path(std::path::PathBuf::from(p));
+            }
+            Ok(e)
+        };
+        assert!(RepoIndex::event_only_in_git_dir(
+            &ev(&["/r/.git/refs/heads/pr-base", "/r/.git/FETCH_HEAD"]),
+            git_dir
+        ));
+        assert!(!RepoIndex::event_only_in_git_dir(
+            &ev(&["/r/.git/index", "/r/src/lib.rs"]),
+            git_dir
+        ));
+        // `.gitignore` sits next to `.git`, not inside it.
+        assert!(!RepoIndex::event_only_in_git_dir(
+            &ev(&["/r/.gitignore"]),
+            git_dir
+        ));
+        assert!(!RepoIndex::event_only_in_git_dir(&ev(&[]), git_dir));
+        assert!(!RepoIndex::event_only_in_git_dir(
+            &Err(notify::Error::generic("boom")),
+            git_dir
+        ));
+    }
+
+    /// A `git fetch` + `git branch` into a watched checkout (how a PR's
+    /// commits reach the snapshot mirror) touches only `.git` and leaves
+    /// HEAD alone. It used to run a full live re-index of the repo, then
+    /// a relink of every federated repo, for nothing. A commit, which
+    /// moves HEAD, must still re-index.
+    #[tokio::test]
+    async fn the_watcher_ignores_git_dir_changes_that_leave_head_alone() {
+        let workspace = tempfile::tempdir().unwrap();
+        let git = git2::Repository::init(workspace.path()).unwrap();
+        {
+            let mut cfg = git.config().unwrap();
+            cfg.set_str("user.name", "watch-test").unwrap();
+            cfg.set_str("user.email", "watch-test@localhost").unwrap();
+        }
+        std::fs::write(workspace.path().join("lib.rs"), "pub fn watched() {}\n").unwrap();
+        let commit_all = |message: &str| {
+            let mut idx = git.index().unwrap();
+            idx.add_path(Path::new("lib.rs")).unwrap();
+            idx.write().unwrap();
+            let tree = git.find_tree(idx.write_tree().unwrap()).unwrap();
+            let sig = git.signature().unwrap();
+            let parents: Vec<git2::Commit> = git
+                .head()
+                .ok()
+                .and_then(|h| h.peel_to_commit().ok())
+                .into_iter()
+                .collect();
+            let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
+            git.commit(Some("HEAD"), &sig, &sig, message, &tree, &parent_refs)
+                .unwrap()
+        };
+        let first = commit_all("init");
+
+        let state = tempfile::tempdir().unwrap();
+        let src: Box<dyn RepoSource> = Box::new(
+            WorkspaceDirSource::new(
+                RepoId::new("watched").unwrap(),
+                workspace.path().to_path_buf(),
+            )
+            .unwrap(),
+        );
+        let mut ri = RepoIndex::new(src, state.path()).unwrap();
+        // Disable the 30 s self-trigger guard: it would also swallow the
+        // branch-only event, and this test must show the new check does.
+        ri.cycle_threshold_secs = 0;
+        let ri = Arc::new(ri);
+        for _ in 0..4 {
+            ri.lsp.next().lock().await.mark_unavailable("rust-analyzer");
+        }
+        ri.index_forced().await.unwrap();
+        let indexed_at = ri.last_indexed();
+        ri.start_watcher().await.unwrap();
+
+        // A new branch at HEAD: `.git/refs/heads/*` and reflogs change.
+        git.branch("parallax-pr-1-base", &git.find_commit(first).unwrap(), true)
+            .unwrap();
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        assert_eq!(
+            ri.last_indexed(),
+            indexed_at,
+            "a branch that leaves HEAD alone must not re-index the repo"
+        );
+
+        // Control: a commit moves HEAD (again only `.git` changes, since the
+        // tree is unchanged) and must re-index, so the watcher is live.
+        commit_all("second");
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while ri.last_indexed() == indexed_at && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        assert!(
+            ri.last_indexed() > indexed_at,
+            "a commit that moves HEAD must still re-index the repo"
+        );
+    }
+
     /// Regression for the 2026-09-21 federation-mode cold-start
     /// loop: `index → topology → re-scan → index → …` where every
     /// cycle took 30 s – 3 min and the HTTP listener never bound.
@@ -2298,7 +2440,8 @@ mod tests {
                 .unwrap();
         }
 
-        let (drained, batch_had_event) = RepoIndex::drain_queued_events(&mut rx, &outstanding);
+        let (drained, batch_had_event, _) =
+            RepoIndex::drain_queued_events(&mut rx, &outstanding, Path::new("/r/.git"));
         assert_eq!(drained, 5, "every queued event must be consumed");
         assert!(batch_had_event, "real events must signal a pipeline run");
         assert_eq!(
@@ -2322,7 +2465,8 @@ mod tests {
             .await
             .unwrap();
 
-        let (drained, batch_had_event) = RepoIndex::drain_queued_events(&mut rx, &outstanding);
+        let (drained, batch_had_event, _) =
+            RepoIndex::drain_queued_events(&mut rx, &outstanding, Path::new("/r/.git"));
         assert_eq!(drained, 1);
         assert!(
             !batch_had_event,
