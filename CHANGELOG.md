@@ -3,7 +3,7 @@
 All notable changes to LAIN are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## [0.16.2] - 2026-11-25
 
 ### Fixed
 
