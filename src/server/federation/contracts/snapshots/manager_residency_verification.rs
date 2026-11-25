@@ -164,3 +164,36 @@ fn evict_resident_reports_whether_it_removed_something() {
     assert!(!m.evict_resident("a"));
     assert!(ids(&m).is_empty());
 }
+
+#[test]
+fn evict_idle_residents_drops_only_unheld_federations_idle_past_the_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let m = manager(dir.path(), 3);
+    let now = crate::server::time::now_unix();
+    let idle = fed(dir.path(), "idle", 0);
+    let fresh = fed(dir.path(), "fresh", 0);
+    let held = fed(dir.path(), "held", 0);
+    for f in [&idle, &fresh, &held] {
+        m.install_resident(Arc::clone(f), 0).unwrap();
+    }
+    let (_, guard) = m.hold_if_resident("held").unwrap();
+    // Installing and holding stamp `last_used` with the clock; set it after.
+    *idle.last_used_unix.lock() = now - 120;
+    *fresh.last_used_unix.lock() = now - 10;
+    *held.last_used_unix.lock() = now - 120;
+
+    assert_eq!(m.evict_idle_residents(0, now), 0, "0 disables the sweep");
+    assert_eq!(ids(&m), vec!["fresh", "held", "idle"]);
+
+    assert_eq!(m.evict_idle_residents(60, now), 1);
+    assert_eq!(
+        ids(&m),
+        vec!["fresh", "held"],
+        "a held federation stays however idle it looks"
+    );
+
+    drop(guard);
+    *held.last_used_unix.lock() = now - 120;
+    assert_eq!(m.evict_idle_residents(60, now), 1);
+    assert_eq!(ids(&m), vec!["fresh"]);
+}
