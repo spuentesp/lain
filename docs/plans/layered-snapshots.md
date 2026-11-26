@@ -194,3 +194,82 @@ co-change, NLP), and snapshot layers in `IndexMode::Snapshot`, which skips all o
 differ even at the same commit. Live is also mutated in place (stale retraction, anchor-miner nodes,
 `CrossRepoSameSymbol` reconciliation, re-projection on reload). Sharing would need live to *consume* a snapshot
 layer plus a live-only delta, which is a bigger redesign. **Out of scope for this plan**; snapshot↔snapshot only.
+
+### Q4. Where does the memory go? (baseline)
+
+**Basis.** Engine A only (OpenShell, NemoClaw, NeMo-Fabric at the Fly pins), one local `lain server` process
+with the Fly image's settings (no language servers, `LAIN_DISABLE_COMMIT_SYNC=1`,
+`LAIN_DISABLE_FILE_WATCHER=1`), mimalloc, inside a `systemd-run` scope with `MemorySwapMax=0`. Footprint is
+RSS + swap, sampled every 200 ms by `scripts/measure_pr_memory.py`; per-phase numbers come from `LAIN_MEM_PROBE=1`.
+The live graph is restored from its checkpoint (warm). "Cold PR commits" means the index-cache entries of the
+four PR commits were deleted, and nothing else: exactly four `index_job`s ran, which is the situation on Fly
+for a new pull request. This is **not** the Fly container figure, which also includes engine B and the API.
+
+| MB, two PRs back to back (#4995 then #6003) | untrimmed, warm | untrimmed, cold PR commits | **trimmed, cold PR commits** | trimmed, warm |
+|---|---|---|---|---|
+| engine after start | 1 246 | 1 246 | 1 241 | 1 246 |
+| #4995 peak | 2 939 | 3 866 | **2 522** | 2 080 |
+| #6003 peak | 3 475 | 5 757 | **2 889** | 2 496 |
+| at rest after both (2 snapshots still resident) | 2 551 | 4 377 | **1 435** | 1 423 |
+| wall: #4995 base / head / diff (s) | – | 27.1 / 26.0 / 19.8 | 26.6 / 25.7 / 19.6 | – |
+| wall: #6003 base / head / diff (s) | – | 31.6 / 27.9 / 27.3 | 31.1 / 28.0 / 26.2 | – |
+
+Runs: A, P3, P2 and P1 in `target/bench-fixture/` (not committed). "Trimmed" means the `heap::trim` fix in this
+branch. The untrimmed cold run reproduces the Fly numbers for one engine: 3.9 → 5.8 GB peaks, and +3.1 GB at rest.
+
+**What a phase costs** (live data, read after `mi_collect` + `malloc_trim`, runs B/F/H):
+
+| Phase | Live after | Transient peak | Notes |
+|---|---|---|---|
+| one resident snapshot federation (3 repos, ~100k nodes, ~310k edges) | **~0.29 GB** | – | dropped on eviction (verified: `federation_dropped`) |
+| hydrate + project, per repo | – | +0.1 to +0.4 GB | NemoClaw is the largest |
+| `rust_rpc::resolve` | ~0 | +0.5 to +0.7 GB | reads and parses every `.rs` blob of the snapshot through libgit2/tree-sitter |
+| join | ~0 | ~+0.2 GB | |
+| `trace_impact`, `get_service`, `get_coverage` | ~0 | < 20 MB | |
+| snapshot index job (one OpenShell commit) | ~0 | **0.8 to 1.2 GB** freed by the trim after it | |
+
+**The finding that changes the plan.** Most of the growth was not snapshot data. It was **freed memory that
+glibc kept**. Lain's Rust heap is mimalloc, which returns pages by itself. libgit2, tree-sitter, zlib and the C++
+runtime allocate through glibc `malloc`, and glibc keeps their frees in per-thread arenas:
+- about 0.9 GB right after startup (the engine goes from 1.47 to 0.55 GB on one `malloc_trim(0)`);
+- about 0.7 GB after the first snapshot build;
+- 0.8 to 1.2 GB after every index job.
+
+`mi_collect` cannot reach any of it. `RssAnon` stayed at ~0.7 GB over start with every federation dropped, until
+`malloc_trim` was added. The static `PreparedRepository` LRU and the parse cache were suspected and ruled out (the
+first is empty in snapshot builds; the second is off by default).
+
+Fixed in this branch (`src/server/heap.rs`): trim after startup indexing/restore, after each snapshot build,
+after each index job, plus a rate-limited idle trim. Each trim takes 8 to 44 ms, and wall times are unchanged
+(table above). The shipped binary is `x86_64-unknown-linux-gnu` and the Fly image runs glibc 2.39, so the fix
+applies there.
+
+**Residency.** `LAIN_SNAPSHOT_RESIDENT_IDLE_SECS=120` does bring memory back once trimming is on (0.83 GB at
+rest with both residents dropped, run H). Parallax's EXPLAINING step and the UI use the head snapshot after the
+analysis, so dropping it costs a rebuild later (~10 s with a warm cache). With trimming, keeping two residents
+costs ~0.6 GB. Left at the current default (off); this is the user's call.
+
+Also seen: a new federation is built *before* the LRU entry it replaces is evicted (`install_resident_held`),
+so a build at the cap briefly holds cap + 1 federations: ~0.3 GB extra, now that a federation is 0.29 GB.
+
+### What this means for phases 1–3
+
+The plan assumed the duplicated per-repo projections were the problem. Measured, a whole resident snapshot is
+~0.29 GB, so Part 1 (layer sharing) saves at most the unchanged repos' share of that per snapshot: about
+0.2 GB for a single-repo PR. Part 2 (interface-first) would mainly cut the build *transients*: hydrate/project
+and `rust_rpc`'s read of every Rust blob.
+
+With the trim, the targets of this plan are met without phases 1–3, for these two PRs on engine A:
+- #4995 peaks at 2.5 GB, against "well under 4 GB";
+- at rest, memory comes back to start + resident snapshots (± ~0.2 GB);
+- wall time is unchanged.
+
+Not yet verified: the Fly container itself (both engines + API, podman recipe) and the other demo PRs.
+
+Cheaper next steps, in order of measured payoff:
+1. Measure the Fly image with this build (podman recipe), both engines.
+2. `rust_rpc`: open each mirror once per build (today `open_bare` runs per file read), and cache its per-repo
+   wrapper/candidate scan per (repo, commit) like `graph.bin`. Cuts the +0.5–0.7 GB transient and part of the
+   build time.
+3. Evict before building when at the cap (saves one federation, ~0.3 GB, at peak).
+4. Only then reconsider phases 1–3; the equivalence suite remains their gate.
