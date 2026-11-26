@@ -151,6 +151,20 @@ impl SnapshotFederation {
     }
 }
 
+impl Drop for SnapshotFederation {
+    fn drop(&mut self) {
+        // `LAIN_MEM_PROBE=1`: an evicted federation must actually be freed;
+        // this line (and the probe after it) is how the harness checks that
+        // nothing else still holds an `Arc` to it.
+        if crate::server::mem_probe::enabled() {
+            crate::server::mem_probe::phase(
+                "federation_dropped",
+                &format!("{} nodes={}", self.snapshot_id, self.backend.node_count()),
+            );
+        }
+    }
+}
+
 /// Input shape for `prepare_snapshot`. Built from the tool's `args`
 /// JSON after `repo_not_registered` / `ref_not_found` validation;
 /// the manager does the rest.

@@ -176,9 +176,10 @@ declared gap (decide in phase 1; Parallax's `stepCodeImpact` does not use snapsh
 
 - `traverse_impact` (`PetgraphBackend`, `graph_backend.rs` ~L590) builds an id→index map and an adjacency over
   **every edge of the federation** per call, then runs a BFS. The walk crosses repos only through edges whose
-  endpoints are in two repos: `Binds` (overlay) and cross-repo `Calls`/`CrossRepoSameSymbol` (not produced in
-  `IndexMode::Snapshot`; to confirm with a count on the demo snapshots). In layered mode, reaching a bind
-  into repo R is what loads R's layer.
+  endpoints are in two repos. **Measured** (`mem_probe_edges`, all four snapshots of #4995 and #6003): the only
+  cross-repo edges are the join's `Binds` (47 of ~310k). Projection writes none: a per-repo layer is
+  self-contained, and the overlay owns every cross-repo edge. In layered mode, reaching a bind into repo R is
+  what loads R's layer.
 - `find_nodes_by_name` in `analysis.rs` is always filtered to the caller's repo afterwards: a one-layer lookup.
 - `evidence.rs` `list_nodes` scans are filtered to one repo: one-layer lookups.
 - `trace_flow.rs` (`trace_flow` tool) builds adjacency over `all_edges()` and name-searches across the whole

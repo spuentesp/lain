@@ -84,6 +84,19 @@ def rss_kb(pid: int) -> int:
     return total
 
 
+def status_breakdown_kb(pid: int) -> dict:
+    out = {}
+    try:
+        with open(f"/proc/{pid}/status") as fh:
+            for line in fh:
+                key = line.split(":", 1)[0]
+                if key in ("RssAnon", "RssFile", "RssShmem", "VmSwap"):
+                    out[key] = int(line.split()[1])
+    except OSError:
+        pass
+    return out
+
+
 class Sampler(threading.Thread):
     """Samples one pid's RSS; `window()` returns the peak since the last call."""
 
@@ -332,6 +345,11 @@ def main() -> int:
             return curve
         curve = step(f"rest {args.rest_secs}s", rest)
         results["rest_curve_mb"] = curve
+        # Heap vs file-backed pages at rest: mapped git packs and cache
+        # files are reclaimable page cache, anonymous memory is not.
+        breakdown = status_breakdown_kb(proc.pid)
+        results["rest_breakdown_mb"] = {k: v // 1024 for k, v in breakdown.items()}
+        print(f"  at rest: " + "  ".join(f"{k} {v // 1024} MB" for k, v in breakdown.items()), flush=True)
     finally:
         sampler.stop.set()
         proc.send_signal(signal.SIGTERM)
