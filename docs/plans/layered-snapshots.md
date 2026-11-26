@@ -207,14 +207,17 @@ for a new pull request. This is **not** the Fly container figure, which also inc
 
 | MB, two PRs back to back (#4995 then #6003) | untrimmed, warm | untrimmed, cold PR commits | **trimmed, cold PR commits** | trimmed, warm |
 |---|---|---|---|---|
-| engine after start | 1 246 | 1 246 | 1 241 | 1 246 |
+| engine when it first answers (`ready_threshold: 0`, startup still finishing) | 1 246 | 1 246 | 1 241 | 1 246 |
+| settled after a restored start, process tree incl. git sidecars (separate runs) | 1 334 | 1 334 | **655** | 655 |
 | #4995 peak | 2 939 | 3 866 | **2 522** | 2 080 |
 | #6003 peak | 3 475 | 5 757 | **2 889** | 2 496 |
 | at rest after both (2 snapshots still resident) | 2 551 | 4 377 | **1 435** | 1 423 |
 | wall: #4995 base / head / diff (s) | – | 27.1 / 26.0 / 19.8 | 26.6 / 25.7 / 19.6 | – |
 | wall: #6003 base / head / diff (s) | – | 31.6 / 27.9 / 27.3 | 31.1 / 28.0 / 26.2 | – |
 
-Runs: A, P3, P2 and P1 in `target/bench-fixture/` (not committed). "Trimmed" means the `heap::trim` fix in this
+Runs: A, P3, P2 and P1 in `target/bench-fixture/` (not committed). The settled row comes from separate
+starts with `LAIN_GIT_SIDECAR_BIN` set as on Fly: the startup trim fires when the checkpoint restore completes
+and frees ~690 MB in 35 ms. "Trimmed" means the `heap::trim` fix in this
 branch. The untrimmed cold run reproduces the Fly numbers for one engine: 3.9 → 5.8 GB peaks, and +3.1 GB at rest.
 
 **What a phase costs** (live data, read after `mi_collect` + `malloc_trim`, runs B/F/H):
