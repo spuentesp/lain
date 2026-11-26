@@ -15,6 +15,31 @@ All notable changes to LAIN are documented here. Versions follow
   never contend for the same cargo lock. An operator who already set
   `CARGO_TARGET_DIR` chose where cargo writes, and that choice is left
   alone.
+- **The engine kept gigabytes of memory it no longer used.** libgit2,
+  tree-sitter, zlib and the C++ runtime allocate through glibc, which
+  keeps freed memory in its arenas (Lain's own heap, mimalloc, gives it
+  back). Startup, every snapshot build and every snapshot index job left
+  0.7–1.2 GB behind. The server now trims the C heap after each of them
+  and once idle (`LAIN_HEAP_TRIM=0` turns it off; glibc builds only).
+  Two PR analyses on the Parallax demo federation, one engine, new PR
+  commits: peaks 3.9 / 5.8 GB -> 2.5 / 2.9 GB, at rest 4.4 GB -> 1.4 GB,
+  same wall time.
+- **A snapshot job killed mid-index left its worktree and scratch graph
+  behind for good** (the scratch graph in `$TMPDIR`, which is RAM on a
+  tmpfs `/tmp`; an indexing error leaked it too). The scratch graph now
+  lives under `<data_dir>/job-tmp/` and is removed on every exit path,
+  and starting the snapshot workers removes what a crashed process left.
+- **Index-cache entries of an older analyzer version stayed on disk** until
+  the size budget reached them, though nothing can read them again. The
+  server removes them at startup.
+
+### Added
+
+- `LAIN_MEM_PROBE=1` logs RSS, swap and the peak since the previous probe
+  for each snapshot build phase, index job and tool call;
+  `scripts/measure_pr_memory.py` replays a Parallax PR analysis against a
+  real server and reports them. `measure_snapshot_memory` reports the real
+  per-phase peak (`VmHWM`) instead of the RSS at exit.
 
 ## [0.16.2] - 2026-11-25
 
