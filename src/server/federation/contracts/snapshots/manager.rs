@@ -921,6 +921,10 @@ impl SnapshotManager {
         if self.worker_handles.lock().is_some() {
             return;
         }
+        // Before any job runs: remove worktrees and scratch graphs that a
+        // crashed or killed process left behind (they are never reused
+        // unless the very same sha is indexed again).
+        super::jobs::sweep_orphaned_job_state(&self.data_dir);
         let n_workers = snapshot_workers();
         info!(
             data_dir = %self.data_dir.display(),
@@ -1376,6 +1380,9 @@ impl SnapshotManager {
             &rust_details,
         )?;
         crate::federation::contracts::rust_rpc::attach(&mut contract_index, rust_details);
+        if crate::server::mem_probe::enabled() {
+            log_cross_repo_edge_histogram(backend.as_ref(), &record.id);
+        }
         crate::server::mem_probe::phase(
             "join",
             &format!(
@@ -1606,6 +1613,32 @@ impl SnapshotManager {
     pub fn evict_resident(self: &Arc<Self>, snapshot_id: &str) -> bool {
         self.resident.lock().remove(snapshot_id).is_some()
     }
+}
+
+/// `LAIN_MEM_PROBE=1` only: count the snapshot's edges whose endpoints
+/// sit in two different repos, by edge type. Layered snapshots
+/// (`docs/plans/layered-snapshots.md`) keep per-repo layers plus an
+/// overlay; every cross-repo edge type that the projection itself
+/// produces (not the join) must be owned by one side or by the overlay.
+fn log_cross_repo_edge_histogram(backend: &PetgraphBackend, snapshot_id: &str) {
+    fn repo_of(id: &str) -> &str {
+        id.split_once(':').map(|(r, _)| r).unwrap_or("")
+    }
+    let mut cross: BTreeMap<String, usize> = BTreeMap::new();
+    let mut total = 0usize;
+    let _ = backend.visit_edges(&mut |e| {
+        total += 1;
+        if repo_of(&e.source_id) != repo_of(&e.target_id) {
+            *cross.entry(format!("{:?}", e.edge_type)).or_default() += 1;
+        }
+    });
+    info!(
+        target: "lain::mem_probe",
+        snapshot = snapshot_id,
+        total_edges = total,
+        cross_repo = ?cross,
+        "mem_probe_edges"
+    );
 }
 
 /// Bounded retries when a joined build is evicted before the joiner holds it.

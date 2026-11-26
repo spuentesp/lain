@@ -8,6 +8,10 @@
 //! `scripts/measure_pr_memory.py` reads these lines from the server log
 //! to split a PR analysis's peak into hydrate / project / join / trace.
 //!
+//! With `LAIN_MEM_PROBE_COLLECT=1` each probe first asks mimalloc to
+//! return free pages (`mi_collect`), so the logged RSS is live data, not
+//! allocator retention.
+//!
 //! Linux only; elsewhere (or when `/proc` is unreadable) the probe logs
 //! nothing. It never fails the caller.
 
@@ -49,6 +53,36 @@ pub fn swap_kb() -> u64 {
         .unwrap_or(0)
 }
 
+// `mi_collect` from the mimalloc C library that the `mimalloc` crate
+// links (the binary's global allocator). Declared here rather than
+// through `libmimalloc-sys`'s `extended` feature to keep the dependency
+// set unchanged. `extern crate` makes sure the static library is linked
+// even into binaries that do not install mimalloc as their allocator.
+extern crate mimalloc as _;
+extern "C" {
+    fn mi_collect(force: bool);
+}
+
+/// Ask mimalloc to return every free page it can to the OS now.
+/// The probe calls it before reading RSS when `LAIN_MEM_PROBE_COLLECT=1`,
+/// which separates live data (stays resident) from pages the allocator
+/// merely holds after a free (go away). Without the global allocator
+/// being mimalloc this only collects mimalloc's own (empty) heaps.
+pub fn allocator_collect() {
+    // SAFETY: `mi_collect` takes a plain bool, has no preconditions and
+    // is safe to call from any thread at any time.
+    unsafe { mi_collect(true) }
+}
+
+fn collect_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("LAIN_MEM_PROBE_COLLECT")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    })
+}
+
 /// Reset the kernel's peak-RSS counter (`VmHWM`) to the current RSS.
 /// Returns whether the reset was accepted.
 pub fn reset_peak() -> bool {
@@ -62,7 +96,14 @@ pub fn phase(label: &str, detail: &str) {
     if !enabled() {
         return;
     }
-    let Some((rss_kb, peak_kb)) = rss_and_peak_kb() else {
+    // Peak first: a collect only lowers RSS, and the peak must be the
+    // phase's own, read before anything else touches memory.
+    let peak_kb = rss_and_peak_kb().map(|(_, p)| p);
+    let collected = collect_enabled();
+    if collected {
+        allocator_collect();
+    }
+    let (Some(peak_kb), Some((rss_kb, _))) = (peak_kb, rss_and_peak_kb()) else {
         return;
     };
     let swap_kb = swap_kb();
@@ -74,6 +115,7 @@ pub fn phase(label: &str, detail: &str) {
         rss_kb,
         swap_kb,
         peak_kb,
+        collected,
         peak_reset = reset,
         "mem_probe"
     );
@@ -105,8 +147,14 @@ mod tests {
             return;
         }
         let (rss, after) = rss_and_peak_kb().unwrap();
-        assert!(after <= before, "peak grew across a reset: {before} -> {after}");
+        assert!(
+            after <= before,
+            "peak grew across a reset: {before} -> {after}"
+        );
         // Other test threads allocate concurrently; allow slack.
-        assert!(after <= rss + (32 << 10), "peak {after} KiB far above rss {rss} KiB after reset");
+        assert!(
+            after <= rss + (32 << 10),
+            "peak {after} KiB far above rss {rss} KiB after reset"
+        );
     }
 }

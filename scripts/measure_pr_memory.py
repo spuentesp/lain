@@ -32,6 +32,20 @@ config is pinned at its checkout's HEAD in both snapshots (what
 Parallax does for repos a PR does not touch). Repos that only exist in
 the config are read from `source.path` (workspace_dir sources only).
 
+The server runs with the Fly image's settings (no language servers,
+`LAIN_DISABLE_COMMIT_SYNC=1`, `LAIN_DISABLE_FILE_WATCHER=1`); pass
+--host-env to use this host's instead. With a language server on PATH,
+a live re-index runs rust-analyzer inside the measured process tree and
+dwarfs everything a snapshot costs.
+
+Any change under src/ changes `analyzer_version` (it carries the source
+fingerprint) and the build id, so the first run after a rebuild
+re-indexes the live repos and every snapshot commit. --warmup runs the
+same PRs once, unmeasured, in a separate server process first.
+
+Run it in a scope without swap so pages cannot hide from RSS, e.g.
+  systemd-run --user --scope -p MemorySwapMax=0 -p MemoryMax=12G scripts/measure_pr_memory.py …
+
 Linux only (reads /proc).
 """
 
@@ -204,12 +218,31 @@ def main() -> int:
     ap.add_argument("--log", default=None, help="server log path (default: next to --json or ./lain-measure.log)")
     ap.add_argument("--json", default=None)
     ap.add_argument("--env", action="append", default=[], help="extra KEY=VALUE for the server")
+    ap.add_argument("--host-env", action="store_true", help="do not apply the Fly image's settings")
+    ap.add_argument("--warmup", action="store_true", help="run the PRs once, unmeasured, first")
     args = ap.parse_args()
+
+    if args.warmup:
+        argv = [a for a in sys.argv[1:] if a != "--warmup"]
+        if "--json" in argv:
+            i = argv.index("--json")
+            argv[i + 1] = os.path.splitext(argv[i + 1])[0] + ".warmup.json"
+        argv += ["--rest-secs", "10"]
+        print("warm-up pass (unmeasured)", flush=True)
+        subprocess.run([sys.executable, os.path.abspath(__file__)] + argv, check=False)
+        print("measured pass", flush=True)
 
     log_path = args.log or (os.path.splitext(args.json)[0] + ".log" if args.json else "lain-measure.log")
     env = dict(os.environ)
     env["LAIN_MEM_PROBE"] = "1"
     env["NO_COLOR"] = "1"
+    if not args.host_env:
+        # deploy/fly in Parallax: the image ships no language servers.
+        env.update({
+            "LAIN_DISABLE_LSP": "1",
+            "LAIN_DISABLE_COMMIT_SYNC": "1",
+            "LAIN_DISABLE_FILE_WATCHER": "1",
+        })
     env.setdefault("RUST_LOG", "info")
     for kv in args.env:
         k, v = kv.split("=", 1)
@@ -309,12 +342,19 @@ def main() -> int:
         log.close()
 
     probes = []
+    edges = []
     pat = re.compile(r"mem_probe.*?phase=\"?([\w:]+)\"?.*?detail=\"?([^\"]*?)\"? rss_kb=(\d+)(?: swap_kb=(\d+))? peak_kb=(\d+)")
     with open(log_path, errors="replace") as fh:
         for line in fh:
             if "mem_probe" not in line:
                 continue
-            m = pat.search(ANSI.sub("", line))
+            line = ANSI.sub("", line)
+            if "mem_probe_edges" in line:
+                e = re.search(r"snapshot=\"?(\S+?)\"? total_edges=(\d+) cross_repo=(\{.*?\})", line)
+                if e:
+                    edges.append({"snapshot": e.group(1), "total_edges": int(e.group(2)), "cross_repo": e.group(3)})
+                continue
+            m = pat.search(line)
             if m:
                 probes.append({
                     "phase": m.group(1), "detail": m.group(2),
@@ -324,9 +364,13 @@ def main() -> int:
                 })
     print("\nserver mem_probe phases (peak = resident peak since previous probe; excludes swap)")
     for p in probes:
-        print(f"  {p['phase']:<22} {p['detail'][:60]:<60} peak {p['peak_mb']:>6} MB  rss {p['rss_mb']:>6} MB  swap {p['swap_mb']:>5} MB")
+        print(f"  {p['phase']:<22} {p['detail']:<66} peak {p['peak_mb']:>6} MB  rss {p['rss_mb']:>6} MB  swap {p['swap_mb']:>5} MB")
+    if edges:
+        print("\nsnapshot edges (cross-repo by type)")
+        for e in edges:
+            print(f"  {e['snapshot']}  total {e['total_edges']}  cross {e['cross_repo']}")
     print(f"\noverall sampled peak: {round(sampler.overall / 1024)} MB")
-    results.update({"steps": steps, "probes": probes, "overall_peak_mb": round(sampler.overall / 1024)})
+    results.update({"steps": steps, "probes": probes, "edges": edges, "overall_peak_mb": round(sampler.overall / 1024)})
     if args.json:
         with open(args.json, "w") as fh:
             json.dump(results, fh, indent=2)
