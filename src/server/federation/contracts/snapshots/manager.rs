@@ -240,11 +240,16 @@ impl SnapshotManager {
             Ok(n) => info!("snapshot retention removed {n} expired record(s)"),
             Err(e) => warn!("snapshot retention could not run: {e}"),
         }
-        // Cache entries of another analyzer version can never be read again.
-        match mgr
-            .cache
-            .remove_other_analyzer_versions(&crate::federation::contracts::analyzer_version())
-        {
+        // Cache entries of another analyzer version are never read by this
+        // build; remove the ones no build has used within the retention
+        // window (another build may share this data dir).
+        let unused_since = now_unix().saturating_sub(
+            i64::try_from(mgr.retention_days.saturating_mul(86_400)).unwrap_or(i64::MAX),
+        );
+        match mgr.cache.remove_other_analyzer_versions(
+            &crate::federation::contracts::analyzer_version(),
+            unused_since,
+        ) {
             Ok((0, _)) => {}
             Ok((n, bytes)) => info!(
                 removed = n,

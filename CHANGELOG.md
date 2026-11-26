@@ -30,8 +30,10 @@ All notable changes to LAIN are documented here. Versions follow
   lives under `<data_dir>/job-tmp/` and is removed on every exit path,
   and starting the snapshot workers removes what a crashed process left.
 - **Index-cache entries of an older analyzer version stayed on disk** until
-  the size budget reached them, though nothing can read them again. The
-  server removes them at startup.
+  the size budget reached them, though this build never reads them. The
+  server now removes, at startup, those no build has used within the
+  snapshot retention window (`LAIN_SNAPSHOT_RETENTION_DAYS`, default 7), so
+  two versions sharing a data dir do not delete each other's cache.
 
 ### Added
 
