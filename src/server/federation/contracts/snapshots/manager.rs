@@ -240,6 +240,19 @@ impl SnapshotManager {
             Ok(n) => info!("snapshot retention removed {n} expired record(s)"),
             Err(e) => warn!("snapshot retention could not run: {e}"),
         }
+        // Cache entries of another analyzer version can never be read again.
+        match mgr
+            .cache
+            .remove_other_analyzer_versions(&crate::federation::contracts::analyzer_version())
+        {
+            Ok((0, _)) => {}
+            Ok((n, bytes)) => info!(
+                removed = n,
+                freed_mb = bytes / (1024 * 1024),
+                "index cache: removed entries of other analyzer versions"
+            ),
+            Err(e) => warn!("index cache: stale analyzer versions not removed: {e}"),
+        }
         mgr
     }
 

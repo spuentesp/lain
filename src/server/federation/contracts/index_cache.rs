@@ -606,6 +606,28 @@ impl IndexCache {
         Ok(out)
     }
 
+    /// Remove every entry indexed by an analyzer other than `current`.
+    ///
+    /// The analyzer version carries the source fingerprint, so every
+    /// upgrade (and every dev rebuild) starts a fresh key space; entries of
+    /// the old one are never read again (a snapshot recorded under another
+    /// version is refused with `analyzer_mismatch`) and only left disk when
+    /// the size budget happened to reach them. Held entries are skipped.
+    /// Returns `(entries removed, bytes freed)`.
+    pub fn remove_other_analyzer_versions(&self, current: &str) -> Result<(usize, u64), LainError> {
+        let mut removed = 0usize;
+        let mut freed = 0u64;
+        for entry in self.collect_entries()? {
+            if entry.key.analyzer_version == current || self.is_held(&entry.key) {
+                continue;
+            }
+            self.remove_entry(&entry.key)?;
+            removed += 1;
+            freed = freed.saturating_add(entry.bytes);
+        }
+        Ok((removed, freed))
+    }
+
     /// Remove every cache entry (used by tests and by the rare
     /// operator `lain cache purge`). Held entries are skipped.
     pub fn purge(&self) -> Result<usize, LainError> {
@@ -729,6 +751,42 @@ impl ResidencyTracker {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    fn put(cache: &IndexCache, repo: &str, sha: &str, version: &str) -> CacheKey {
+        let key = CacheKey::new(repo, sha, version);
+        let manifest = build_manifest(repo, sha, version, vec![], Default::default(), 4);
+        cache.write_entry(&key, b"data", &manifest).unwrap();
+        key
+    }
+
+    #[test]
+    fn remove_other_analyzer_versions_keeps_current_and_held_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = IndexCache::new(dir.path());
+        let current = put(&cache, "orders", "aaaa", "1.0+new+c1");
+        let stale = put(&cache, "orders", "aaaa", "1.0+old+c1");
+        let stale_other_repo = put(&cache, "billing", "bbbb", "0.9+older+c1");
+        let held_stale = put(&cache, "billing", "cccc", "1.0+old+c1");
+        let _hold = cache.acquire_hold(held_stale.clone());
+
+        let (removed, freed) = cache.remove_other_analyzer_versions("1.0+new+c1").unwrap();
+
+        assert_eq!(removed, 2);
+        assert_eq!(freed, 8);
+        assert!(cache.has_entry(&current));
+        assert!(!cache.has_entry(&stale));
+        assert!(!cache.has_entry(&stale_other_repo));
+        assert!(
+            cache.has_entry(&held_stale),
+            "removed an entry a snapshot holds"
+        );
+        assert!(
+            !entry_dir(dir.path(), &stale).exists(),
+            "left the directory behind"
+        );
+    }
+
     #[test]
     fn retry_transient_rides_out_a_brief_open_failure() {
         let mut left = 3;
