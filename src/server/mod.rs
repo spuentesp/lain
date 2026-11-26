@@ -26,6 +26,7 @@ pub mod tuning;
 // Analytical side
 pub mod claims;
 pub mod env_util;
+pub mod mem_probe;
 pub mod models;
 pub mod nlp;
 pub mod overlay;

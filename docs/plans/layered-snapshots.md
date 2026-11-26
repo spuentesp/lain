@@ -137,3 +137,59 @@ reaches C), a removed endpoint (traced on base, as Parallax does today), and a r
 3. Is the live federation's per-repo projection stable enough to share layers with snapshots later?
 4. How much of the 5.6 GB is the hydrate copy vs. the projection vs. the residents? The harness answers this and tells
    which phase pays most.
+
+---
+
+## Phase 0 findings
+
+### Q1. Which `GraphBackend` methods do the snapshot tools call?
+
+`resolve_view` (`mcp/contract_tools/view.rs`) hands every contract tool the snapshot as
+`Arc<dyn GraphBackend>`. Calls under `mcp/contract_tools/` (tests excluded):
+
+| Method | Calls | Where |
+|---|---|---|
+| `get_node` | 19 | everywhere (point lookups) |
+| `find_nodes_by_name` | 4 | `analysis.rs` (`caller_node_id`, `enclosing_sender`: filtered to one repo), `trace_flow.rs` |
+| `edges_to` / `edges_from` | 4 / 3 | `analysis.rs`, `trace_flow.rs` |
+| `traverse_impact` | 2 | `analysis.rs` (`trace_impact`, consumer/provider paths in `diff_contracts`) |
+| `list_nodes` | 2 | `evidence.rs` (`same_symbol_at_other_line`, `innermost_node_at_line`), through the concrete `fed.backend` |
+| `all_edges` | 1 | `trace_flow.rs::build_adjacency` |
+| writes (`upsert_*`) | 4 | test-only fixtures in `contracts.rs`/`context.rs` |
+
+Not called: `query_graph_view*`, `visit_*`, `traverse`, `find_path`, `subgraph_around`, `remove_*`.
+
+Outside the trait: the **raw snapshot tools** (`handler.rs` ~L862: `query_graph`, `find_symbol`, `get_context`,
+`get_call_sites`, `get_cross_runtime_callers`, `explain_symbol`, `assess_change`, `explain_dispatch` with a
+`snapshot` argument) take `snapshot_federation.backend.db()`, the concrete merged `GraphDatabase`, and run the
+ordinary single-graph tools over it (scoped by `set_symbol_repo_scope` when `repo_id` is given).
+
+**Decision: (a), implement `GraphBackend` for a `LayeredBackend`.** The tool surface already goes through
+`dyn GraphBackend`; a narrowed trait would touch every tool for no gain. Writes go to the overlay (snapshot
+writes are only the post-projection `Binds` + Rust RPC facts). The concrete-type escapes need a change of
+their own: the three `fed.backend.list_nodes()` / `.as_ref()` uses in `evidence.rs`/`analysis.rs` move to the
+trait (and to a per-repo scan, since they filter to one repo), and the raw tools get the *layer's*
+`GraphDatabase` when `repo_id` names one repo. Without `repo_id`, they need either a merged view or a
+declared gap (decide in phase 1; Parallax's `stepCodeImpact` does not use snapshot raw tools today).
+
+### Q2. Does anything need nodes from a repo the trace did not reach through a bind?
+
+- `traverse_impact` (`PetgraphBackend`, `graph_backend.rs` ~L590) builds an id→index map and an adjacency over
+  **every edge of the federation** per call, then runs a BFS. The walk crosses repos only through edges whose
+  endpoints are in two repos: `Binds` (overlay) and cross-repo `Calls`/`CrossRepoSameSymbol` (not produced in
+  `IndexMode::Snapshot`; to confirm with a count on the demo snapshots). In layered mode, reaching a bind
+  into repo R is what loads R's layer.
+- `find_nodes_by_name` in `analysis.rs` is always filtered to the caller's repo afterwards: a one-layer lookup.
+- `evidence.rs` `list_nodes` scans are filtered to one repo: one-layer lookups.
+- `trace_flow.rs` (`trace_flow` tool) builds adjacency over `all_edges()` and name-searches across the whole
+  federation: a whole-federation tool. In layered mode it must load every layer or declare a gap. Parallax does
+  not call it on snapshots.
+- The raw snapshot tools without `repo_id` do a cross-repo name search (`ambiguous_symbol` check): same as above.
+
+### Q3. Can live federation layers be shared with snapshots later?
+
+Not as things stand. Live repos are indexed in `IndexMode::Live` (LSP pass, cross-repo resolver, overlay,
+co-change, NLP), and snapshot layers in `IndexMode::Snapshot`, which skips all of those. So the two graphs
+differ even at the same commit. Live is also mutated in place (stale retraction, anchor-miner nodes,
+`CrossRepoSameSymbol` reconciliation, re-projection on reload). Sharing would need live to *consume* a snapshot
+layer plus a live-only delta, which is a bigger redesign. **Out of scope for this plan**; snapshot↔snapshot only.

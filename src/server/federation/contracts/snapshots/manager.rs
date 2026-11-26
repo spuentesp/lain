@@ -1302,6 +1302,7 @@ impl SnapshotManager {
             .data_dir
             .join("snapshots")
             .join(format!("{}.ephemeral", record.id));
+        crate::server::mem_probe::phase("snapshot_build_start", &record.id);
         let backend = Arc::new(PetgraphBackend::ephemeral(&ephemeral_path));
         let residency = Arc::new(ResidencyTracker::new());
 
@@ -1331,7 +1332,11 @@ impl SnapshotManager {
             let key = CacheKey::new(repo, commit, &record.analyzer_version);
             let bytes = self.cache.read_graph_bytes(&key)?;
             let db = hydrate_graph(&bytes, &ephemeral_path)?;
+            crate::server::mem_probe::phase("hydrate", repo);
             project_graph(&db, repo, backend.clone())?;
+            drop(db);
+            drop(bytes);
+            crate::server::mem_probe::phase("project", repo);
         }
 
         // Run the contract rejoin. The `from_snapshot` hook the
@@ -1364,12 +1369,22 @@ impl SnapshotManager {
                     .map_err(|e| LainError::Other(format!("Rust RPC source is not UTF-8: {e}")))
             })?;
         let _ = rust_nodes; // resolve already installed facts in the ephemeral backend
+        crate::server::mem_probe::phase("rust_rpc", &record.id);
         let mut contract_index = build_snapshot_contract_index_with_rust_details(
             backend.as_ref(),
             &config,
             &rust_details,
         )?;
         crate::federation::contracts::rust_rpc::attach(&mut contract_index, rust_details);
+        crate::server::mem_probe::phase(
+            "join",
+            &format!(
+                "{} nodes={} edges={}",
+                record.id,
+                backend.node_count(),
+                backend.edge_count()
+            ),
+        );
         let fed = Arc::new(SnapshotFederation {
             snapshot_id: record.id.clone(),
             backend,
@@ -2009,7 +2024,9 @@ fn snapshot_worker_loop(mgr: Arc<SnapshotManager>) {
         if let Some(state) = next {
             idle_polls = 0;
             info!(repo = %state.spec.repo, sha = %state.spec.sha, "snapshot worker: picked job");
+            let job_label = format!("{}@{}", state.spec.repo, state.spec.sha);
             let result = run_job(&mgr.runner, state);
+            crate::server::mem_probe::phase("index_job", &job_label);
             match &result {
                 Ok(_) => info!("snapshot worker: job finished OK"),
                 Err(e) => warn!(error = %e, "snapshot worker: job failed"),
@@ -2017,8 +2034,10 @@ fn snapshot_worker_loop(mgr: Arc<SnapshotManager>) {
         } else {
             idle_polls += 1;
             // Every ~5 s of idleness (50 polls of 100 ms).
-            if idle_polls.is_multiple_of(50) {
-                mgr.evict_idle_residents(resident_idle_secs, now_unix());
+            if idle_polls.is_multiple_of(50)
+                && mgr.evict_idle_residents(resident_idle_secs, now_unix()) > 0
+            {
+                crate::server::mem_probe::phase("evict_idle", "");
             }
             if idle_polls == 50 {
                 info!(

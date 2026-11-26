@@ -926,6 +926,29 @@ async fn dispatch_tool_call(
     server: Option<&LainServer>,
     snapshots: Option<&Arc<crate::federation::contracts::snapshots::SnapshotManager>>,
     name: &str,
+    args_map: Map<String, serde_json::Value>,
+) -> (String, bool, Option<serde_json::Value>) {
+    let out = dispatch_tool_call_inner(
+        executor, federation, workspaces, status, reload_bus, server, snapshots, name, args_map,
+    )
+    .await;
+    // `LAIN_MEM_PROBE=1`: one line per tool call with RSS now and the
+    // peak since the previous probe (the tool's own peak, unless a
+    // snapshot build ran meanwhile; those probe themselves).
+    crate::server::mem_probe::phase("tool", name);
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_tool_call_inner(
+    executor: &ToolExecutor,
+    federation: Option<&FederatedIndex>,
+    workspaces: Option<&Arc<RwLock<crate::federation::workspace::WorkspacesFile>>>,
+    status: &HandlerStatus,
+    reload_bus: Option<&crate::server::reload::ReloadBus>,
+    server: Option<&LainServer>,
+    snapshots: Option<&Arc<crate::federation::contracts::snapshots::SnapshotManager>>,
+    name: &str,
     mut args_map: Map<String, serde_json::Value>,
 ) -> (String, bool, Option<serde_json::Value>) {
     // Phase 3.2: presence / audit / status / reload tools now go through
