@@ -839,6 +839,43 @@ impl LspMultiplexer {
             .and_then(|e| self.registry.get(e))
     }
 
+    /// Whether this language server shells out to cargo.
+    ///
+    /// rust-analyzer asks cargo for crate metadata, so it builds the
+    /// workspace it is analysing — gigabytes of regenerable build output
+    /// in a repository Lain was only asked to read.
+    fn server_uses_cargo(binary: &str) -> bool {
+        matches!(binary, "rust-analyzer")
+    }
+
+    /// The directory cargo should build into for `workspace`.
+    ///
+    /// `root` is where the per-workspace directories live.
+    /// `operator_override` is the value already in `CARGO_TARGET_DIR`, if
+    /// any: an operator who set it chose where cargo writes, and that
+    /// choice is left alone.
+    ///
+    /// The directory is per workspace, so two repositories never contend for
+    /// the same cargo lock, and it lives under Lain's own home rather than in
+    /// a repository Lain was only asked to read. It is regenerable —
+    /// deleting it costs a rebuild, nothing else.
+    fn lsp_cargo_target_dir(
+        root: &Path,
+        workspace: &Path,
+        operator_override: Option<&str>,
+    ) -> Option<PathBuf> {
+        if operator_override.is_some_and(|v| !v.is_empty()) {
+            return None;
+        }
+        let abs = std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
+        let digest = blake3::hash(abs.to_string_lossy().as_bytes()).to_hex();
+        let dir = root.join(&digest[..16]);
+        // If the directory cannot be made, leave cargo's own choice
+        // alone rather than pointing it at a path that does not exist.
+        std::fs::create_dir_all(&dir).ok()?;
+        Some(dir)
+    }
+
     pub async fn ensure_server(&mut self, path: &Path) -> Result<String, LainError> {
         if self.remote.is_some() {
             // A bridged server is already running and already
@@ -872,6 +909,19 @@ impl LspMultiplexer {
             let mut lsp_config = LspServerConfig::new()
                 .command(&binary)
                 .root_path(self.workspace.clone());
+            // A cargo-based server would otherwise build the workspace it
+            // is analysing, in the workspace. Give it a target directory
+            // of Lain's own instead.
+            if Self::server_uses_cargo(&binary) {
+                let operator = std::env::var("CARGO_TARGET_DIR").ok();
+                let root = crate::config::lain_home().join("lsp-target");
+                if let Some(dir) =
+                    Self::lsp_cargo_target_dir(&root, &self.workspace, operator.as_deref())
+                {
+                    lsp_config =
+                        lsp_config.env("CARGO_TARGET_DIR", dir.to_string_lossy().to_string());
+                }
+            }
 
             if let Some(init_opts) = initialization_options_for(&binary, self.profile) {
                 lsp_config = lsp_config.initialization_options(init_opts);
@@ -3802,6 +3852,66 @@ mod initialization_options_tests {
             assert_eq!(LspProfile::from_raw(Some(v)), LspProfile::Fidelity, "{v:?}");
         }
         assert_eq!(LspProfile::from_raw(None), LspProfile::Fidelity);
+    }
+}
+
+#[cfg(test)]
+mod cargo_target_tests {
+    use super::*;
+
+    #[test]
+    fn rust_analyzer_is_the_cargo_based_server() {
+        assert!(LspMultiplexer::server_uses_cargo("rust-analyzer"));
+        assert!(!LspMultiplexer::server_uses_cargo("gopls"));
+        assert!(!LspMultiplexer::server_uses_cargo("pylsp"));
+        assert!(!LspMultiplexer::server_uses_cargo(
+            "typescript-language-server"
+        ));
+    }
+
+    #[test]
+    fn the_target_dir_is_outside_the_workspace_and_differs_per_workspace() {
+        let root = tempfile::tempdir().unwrap();
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let dir_a = LspMultiplexer::lsp_cargo_target_dir(root.path(), a.path(), None)
+            .expect("a target dir");
+        let dir_b = LspMultiplexer::lsp_cargo_target_dir(root.path(), b.path(), None)
+            .expect("a target dir");
+        assert_ne!(dir_a, dir_b, "each workspace gets its own cargo target dir");
+        assert!(
+            !dir_a.starts_with(a.path()),
+            "the cache must not land in the workspace: {}",
+            dir_a.display()
+        );
+        assert!(
+            dir_a.exists(),
+            "the target dir is made before the server starts"
+        );
+        // The same workspace resolves to the same directory, so the cache
+        // survives between runs.
+        let again = LspMultiplexer::lsp_cargo_target_dir(root.path(), a.path(), None)
+            .expect("a target dir");
+        assert_eq!(dir_a, again);
+    }
+
+    #[test]
+    fn an_operator_chosen_target_dir_is_left_alone() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        assert!(
+            LspMultiplexer::lsp_cargo_target_dir(
+                root.path(),
+                workspace.path(),
+                Some("/somewhere/else")
+            )
+            .is_none(),
+            "an operator's CARGO_TARGET_DIR is their choice"
+        );
+        // An empty value is not a choice.
+        assert!(
+            LspMultiplexer::lsp_cargo_target_dir(root.path(), workspace.path(), Some("")).is_some()
+        );
     }
 }
 

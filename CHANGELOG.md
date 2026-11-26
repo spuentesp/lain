@@ -3,6 +3,19 @@
 All notable changes to LAIN are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Fixed
+
+- **Indexing a Rust repository built it.** rust-analyzer asks cargo for crate
+  metadata, so it wrote the workspace's own `target/` — gigabytes of
+  regenerable build output in a repository Lain was only asked to read. The
+  Rust language server now gets a cargo target directory of Lain's own,
+  under `~/.local/lain/lsp-target/`, one per workspace so two repositories
+  never contend for the same cargo lock. An operator who already set
+  `CARGO_TARGET_DIR` chose where cargo writes, and that choice is left
+  alone.
+
 ## [0.16.2] - 2026-11-25
 
 ### Fixed
