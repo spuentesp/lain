@@ -751,8 +751,6 @@ impl ResidencyTracker {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     fn put(cache: &IndexCache, repo: &str, sha: &str, version: &str) -> CacheKey {
         let key = CacheKey::new(repo, sha, version);
         let manifest = build_manifest(repo, sha, version, vec![], Default::default(), 4);
