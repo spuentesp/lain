@@ -53,6 +53,13 @@ pub fn oneshot_socket_path(workspace: &std::path::Path) -> PathBuf {
 /// budget for any sane runtime dir; callers still check
 /// [`crate::server::mcp::socket_server::path_fits`] before binding.
 pub fn shared_socket_path(workspaces: &[PathBuf]) -> PathBuf {
+    shared_socket_path_in(&run_dir(), workspaces)
+}
+
+/// [`shared_socket_path`] under an explicit runtime dir. `run_dir()` reads
+/// `XDG_RUNTIME_DIR`, which is process-wide state; tests that compare two
+/// socket paths use this so a concurrent override cannot split them.
+fn shared_socket_path_in(run_dir: &std::path::Path, workspaces: &[PathBuf]) -> PathBuf {
     use blake3::Hasher;
     let mut canonical: Vec<String> = workspaces
         .iter()
@@ -79,33 +86,40 @@ pub fn shared_socket_path(workspaces: &[PathBuf]) -> PathBuf {
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .collect();
-    run_dir().join(format!("lain-mcp-{safe_stem}.sock"))
+    run_dir.join(format!("lain-mcp-{safe_stem}.sock"))
 }
 
 #[cfg(test)]
 mod socket_path_tests {
     use super::*;
 
+    // These compare socket paths under a fixed runtime dir: `run_dir()`
+    // follows `XDG_RUNTIME_DIR`, and other tests override that variable
+    // while they run (under their own module's lock), so two calls to the
+    // env-reading wrappers could land in different dirs.
+    const RUN: &str = "/run/lain-test";
+
+    fn one(workspace: &std::path::Path) -> PathBuf {
+        shared_socket_path_in(std::path::Path::new(RUN), &[workspace.to_path_buf()])
+    }
+
     #[test]
     fn deterministic_for_same_workspace() {
         let tmp = tempfile::tempdir().unwrap();
-        let p1 = oneshot_socket_path(tmp.path());
-        let p2 = oneshot_socket_path(tmp.path());
-        assert_eq!(p1, p2);
+        assert_eq!(one(tmp.path()), one(tmp.path()));
     }
 
     #[test]
     fn different_for_different_workspaces() {
         let a = tempfile::tempdir().unwrap();
         let b = tempfile::tempdir().unwrap();
-        assert_ne!(oneshot_socket_path(a.path()), oneshot_socket_path(b.path()));
+        assert_ne!(one(a.path()), one(b.path()));
     }
 
     #[test]
-    fn path_lives_under_run_dir() {
+    fn path_lives_under_the_run_dir() {
         let tmp = tempfile::tempdir().unwrap();
-        let p = oneshot_socket_path(tmp.path());
-        assert!(p.starts_with(run_dir()));
+        assert_eq!(one(tmp.path()).parent(), Some(std::path::Path::new(RUN)));
     }
 
     #[test]
@@ -114,18 +128,29 @@ mod socket_path_tests {
         let b = tempfile::tempdir().unwrap();
         let pa = a.path().to_path_buf();
         let pb = b.path().to_path_buf();
+        let set = |ws: &[PathBuf]| shared_socket_path_in(std::path::Path::new(RUN), ws);
         // Same set, different order / duplication → same socket.
         assert_eq!(
-            shared_socket_path(&[pa.clone(), pb.clone()]),
-            shared_socket_path(&[pb.clone(), pa.clone(), pa.clone()])
+            set(&[pa.clone(), pb.clone()]),
+            set(&[pb.clone(), pa.clone(), pa.clone()])
         );
         // A singleton set must hash exactly what `oneshot_socket_path`
         // hashes, so oneshot and mcp keep sharing one daemon.
-        assert_eq!(shared_socket_path(&[pa.clone()]), oneshot_socket_path(&pa));
+        assert_eq!(set(&[pa.clone()]), one(&pa));
         // A different set must get a different socket.
-        assert_ne!(
-            shared_socket_path(&[pa.clone()]),
-            shared_socket_path(&[pa, pb])
+        assert_ne!(set(&[pa.clone()]), set(&[pa, pb]));
+    }
+
+    #[test]
+    fn the_public_paths_use_the_run_dir_they_resolve() {
+        // One read of the env-dependent dir, compared structurally: the
+        // file name does not depend on it.
+        let tmp = tempfile::tempdir().unwrap();
+        let p = oneshot_socket_path(tmp.path());
+        assert_eq!(p.file_name(), one(tmp.path()).file_name());
+        assert_eq!(
+            shared_socket_path(&[tmp.path().to_path_buf()]).file_name(),
+            p.file_name()
         );
     }
 }

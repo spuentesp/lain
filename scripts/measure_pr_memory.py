@@ -97,12 +97,24 @@ def status_breakdown_kb(pid: int) -> dict:
     return out
 
 
-class Sampler(threading.Thread):
-    """Samples one pid's RSS; `window()` returns the peak since the last call."""
+def cgroup_kb(cgroup_dir: str) -> int:
+    """Footprint of a cgroup (a container): memory.current + memory.swap.current."""
+    total = 0
+    for name in ("memory.current", "memory.swap.current"):
+        try:
+            with open(os.path.join(cgroup_dir, name)) as fh:
+                total += int(fh.read().strip())
+        except (OSError, ValueError):
+            pass
+    return total // 1024
 
-    def __init__(self, pid: int, every: float = 0.2):
+
+class Sampler(threading.Thread):
+    """Samples a footprint (KiB); `window()` returns the peak since the last call."""
+
+    def __init__(self, measure, every: float = 0.2):
         super().__init__(daemon=True)
-        self.pid = pid
+        self.measure = measure
         self.every = every
         self.lock = threading.Lock()
         self.peak = 0
@@ -111,14 +123,14 @@ class Sampler(threading.Thread):
 
     def run(self):
         while not self.stop.is_set():
-            v = rss_kb(self.pid)
+            v = self.measure()
             with self.lock:
                 self.peak = max(self.peak, v)
                 self.overall = max(self.overall, v)
             time.sleep(self.every)
 
     def window(self) -> int:
-        v = rss_kb(self.pid)
+        v = self.measure()
         with self.lock:
             peak = max(self.peak, v)
             self.peak = v
@@ -194,10 +206,10 @@ def git_head(path: str) -> str:
     return subprocess.check_output(["git", "-C", path, "rev-parse", "HEAD"], text=True).strip()
 
 
-def wait_ready(lain: Lain, proc: subprocess.Popen, limit_s: int) -> float:
+def wait_ready(lain: Lain, proc, limit_s: int) -> float:
     started = time.time()
     while time.time() - started < limit_s:
-        if proc.poll() is not None:
+        if proc is not None and proc.poll() is not None:
             raise RuntimeError(f"lain exited with {proc.returncode} before it was ready")
         try:
             lain.call("list_services", {"snapshot": "live"})
@@ -222,7 +234,8 @@ def await_snapshot(lain: Lain, repos: dict, limit_s: int) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--lain", required=True)
-    ap.add_argument("--config", required=True)
+    ap.add_argument("--config", default=None, help="repos.yaml (required unless --url with --pin)")
+    ap.add_argument("--pin", action="append", default=[], help="repo=sha for a repo the PRs do not change (default: its checkout's HEAD)")
     ap.add_argument("--port", type=int, default=9989)
     ap.add_argument("--pr", action="append", required=True)
     ap.add_argument("--rest-secs", type=int, default=150)
@@ -233,6 +246,8 @@ def main() -> int:
     ap.add_argument("--env", action="append", default=[], help="extra KEY=VALUE for the server")
     ap.add_argument("--host-env", action="store_true", help="do not apply the Fly image's settings")
     ap.add_argument("--warmup", action="store_true", help="run the PRs once, unmeasured, first")
+    ap.add_argument("--url", default=None, help="measure an already running server (e.g. in a container) instead of starting one")
+    ap.add_argument("--cgroup", default=None, help="with --url: cgroup dir to sample (memory.current + memory.swap.current)")
     args = ap.parse_args()
 
     if args.warmup:
@@ -261,19 +276,35 @@ def main() -> int:
         k, v = kv.split("=", 1)
         env[k] = v
 
-    repos_paths = config_repos(args.config)
-    pinned = {rid: git_head(path) for rid, path in repos_paths.items()}
+    if not args.config and not (args.url and args.pin):
+        ap.error("--config is required (or --url with --pin)")
+    pinned = {}
+    if args.config:
+        pinned = {rid: git_head(path) for rid, path in config_repos(args.config).items()}
+    for kv in args.pin:
+        rid, sha = kv.split("=", 1)
+        pinned[rid] = sha
 
-    log = open(log_path, "w")
-    proc = subprocess.Popen(
-        [args.lain, "server", "--config", args.config, "--transport", "http", "--port", str(args.port)],
-        stdout=log,
-        stderr=subprocess.STDOUT,
-        env=env,
-    )
-    sampler = Sampler(proc.pid)
+    if args.url:
+        # Attach mode: the server (and its log) belong to someone else.
+        if not args.cgroup:
+            ap.error("--url needs --cgroup to know what to sample")
+        log = None
+        proc = None
+        footprint = lambda: cgroup_kb(args.cgroup)
+        lain = Lain(args.url)
+    else:
+        log = open(log_path, "w")
+        proc = subprocess.Popen(
+            [args.lain, "server", "--config", args.config, "--transport", "http", "--port", str(args.port)],
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            env=env,
+        )
+        footprint = lambda: rss_kb(proc.pid)
+        lain = Lain(f"http://127.0.0.1:{args.port}/mcp")
+    sampler = Sampler(footprint)
     sampler.start()
-    lain = Lain(f"http://127.0.0.1:{args.port}/mcp")
     steps = []
 
     def step(name: str, fn):
@@ -289,7 +320,7 @@ def main() -> int:
             "step": name,
             "seconds": round(time.time() - t0, 1),
             "peak_mb": round(peak / 1024),
-            "rss_after_mb": round(rss_kb(proc.pid) / 1024),
+            "rss_after_mb": round(footprint() / 1024),
             "error": err,
         }
         steps.append(row)
@@ -341,28 +372,31 @@ def main() -> int:
             curve = []
             for _ in range(max(1, args.rest_secs // 10)):
                 time.sleep(10)
-                curve.append(round(rss_kb(proc.pid) / 1024))
+                curve.append(round(footprint() / 1024))
             return curve
         curve = step(f"rest {args.rest_secs}s", rest)
         results["rest_curve_mb"] = curve
         # Heap vs file-backed pages at rest: mapped git packs and cache
         # files are reclaimable page cache, anonymous memory is not.
-        breakdown = status_breakdown_kb(proc.pid)
-        results["rest_breakdown_mb"] = {k: v // 1024 for k, v in breakdown.items()}
-        print(f"  at rest: " + "  ".join(f"{k} {v // 1024} MB" for k, v in breakdown.items()), flush=True)
+        if proc is not None:
+            breakdown = status_breakdown_kb(proc.pid)
+            results["rest_breakdown_mb"] = {k: v // 1024 for k, v in breakdown.items()}
+            print(f"  at rest: " + "  ".join(f"{k} {v // 1024} MB" for k, v in breakdown.items()), flush=True)
     finally:
         sampler.stop.set()
-        proc.send_signal(signal.SIGTERM)
-        try:
-            proc.wait(timeout=30)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-        log.close()
+        if proc is not None:
+            proc.send_signal(signal.SIGTERM)
+            try:
+                proc.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        if log is not None:
+            log.close()
 
     probes = []
     edges = []
     pat = re.compile(r"mem_probe.*?phase=\"?([\w:]+)\"?.*?detail=\"?([^\"]*?)\"? rss_kb=(\d+)(?: swap_kb=(\d+))? peak_kb=(\d+)")
-    with open(log_path, errors="replace") as fh:
+    with open(log_path if os.path.exists(log_path) else os.devnull, errors="replace") as fh:
         for line in fh:
             if "mem_probe" not in line:
                 continue
