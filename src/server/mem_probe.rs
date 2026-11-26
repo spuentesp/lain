@@ -18,14 +18,15 @@
 
 use std::sync::OnceLock;
 
-/// Is the probe on? Read once per process.
+/// `1` or `true` (any case) turns a flag on; anything else, or unset, is off.
+fn flag_on(value: Option<&str>) -> bool {
+    matches!(value, Some(v) if v == "1" || v.eq_ignore_ascii_case("true"))
+}
+
+/// Is the probe on (`LAIN_MEM_PROBE`)? Read once per process.
 pub fn enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
-        std::env::var("LAIN_MEM_PROBE")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
-    })
+    *ON.get_or_init(|| flag_on(std::env::var("LAIN_MEM_PROBE").ok().as_deref()))
 }
 
 fn status_field_kb(text: &str, name: &str) -> Option<u64> {
@@ -78,11 +79,7 @@ pub fn allocator_collect() {
 
 fn collect_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
-        std::env::var("LAIN_MEM_PROBE_COLLECT")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
-    })
+    *ON.get_or_init(|| flag_on(std::env::var("LAIN_MEM_PROBE_COLLECT").ok().as_deref()))
 }
 
 /// Reset the kernel's peak-RSS counter (`VmHWM`) to the current RSS.
@@ -91,72 +88,133 @@ pub fn reset_peak() -> bool {
     std::fs::write("/proc/self/clear_refs", "5").is_ok()
 }
 
-/// Record the end of a phase: log RSS now and the peak since the last
-/// probe, then reset the peak. `label` names the phase that just ended;
-/// `detail` is free text (repo id, snapshot id, counts).
-pub fn phase(label: &str, detail: &str) {
-    if !enabled() {
-        return;
-    }
-    // Peak first: a collect only lowers RSS, and the peak must be the
-    // phase's own, read before anything else touches memory.
-    let peak_kb = rss_and_peak_kb().map(|(_, p)| p);
-    let collected = collect_enabled();
-    if collected {
+/// One probe reading, in KiB.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Sample {
+    /// Resident now (after the collect, when one ran).
+    pub rss_kb: u64,
+    /// In swap now.
+    pub swap_kb: u64,
+    /// Resident peak since the previous reset.
+    pub peak_kb: u64,
+}
+
+/// Read peak, optionally collect, read RSS and swap, reset the peak.
+/// The peak is read first: a collect only lowers RSS, and the peak must
+/// be the phase's own. `None` when `/proc` is unreadable.
+fn sample_and_reset(collect: bool) -> Option<(Sample, bool)> {
+    let (_, peak_kb) = rss_and_peak_kb()?;
+    if collect {
         allocator_collect();
     }
-    let (Some(peak_kb), Some((rss_kb, _))) = (peak_kb, rss_and_peak_kb()) else {
-        return;
+    let (rss_kb, _) = rss_and_peak_kb()?;
+    let sample = Sample {
+        rss_kb,
+        swap_kb: swap_kb(),
+        peak_kb,
     };
-    let swap_kb = swap_kb();
-    let reset = reset_peak();
+    Some((sample, reset_peak()))
+}
+
+/// Record the end of a phase: log RSS now and the peak since the last
+/// probe, then reset the peak. `label` names the phase that just ended;
+/// `detail` is free text (repo id, snapshot id, counts). Returns what it
+/// logged; `None` when the probe is off.
+pub fn phase(label: &str, detail: &str) -> Option<Sample> {
+    if !enabled() {
+        return None;
+    }
+    let collected = collect_enabled();
+    let (sample, reset) = sample_and_reset(collected)?;
     tracing::info!(
         target: "lain::mem_probe",
         phase = label,
         detail,
-        rss_kb,
-        swap_kb,
-        peak_kb,
+        rss_kb = sample.rss_kb,
+        swap_kb = sample.swap_kb,
+        peak_kb = sample.peak_kb,
         collected,
         peak_reset = reset,
         "mem_probe"
     );
+    Some(sample)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn flags_turn_on_only_for_1_or_true() {
+        assert!(flag_on(Some("1")));
+        assert!(flag_on(Some("true")));
+        assert!(flag_on(Some("TRUE")));
+        assert!(!flag_on(Some("0")));
+        assert!(!flag_on(Some("yes")));
+        assert!(!flag_on(Some("")));
+        assert!(!flag_on(None));
+    }
+
+    #[test]
+    fn status_fields_parse_by_name() {
+        let text = "Name:\tlain\nVmHWM:\t  2048 kB\nVmRSS:\t  1500 kB\nVmSwap:\t     7 kB\n";
+        assert_eq!(status_field_kb(text, "VmRSS:"), Some(1500));
+        assert_eq!(status_field_kb(text, "VmHWM:"), Some(2048));
+        assert_eq!(status_field_kb(text, "VmSwap:"), Some(7));
+        assert_eq!(status_field_kb(text, "VmData:"), None);
+    }
+
+    #[test]
+    fn phase_is_silent_unless_the_probe_is_on() {
+        if std::env::var_os("LAIN_MEM_PROBE").is_some() {
+            return; // a developer ran the suite with the probe on
+        }
+        assert_eq!(phase("test", ""), None);
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn reads_rss_and_peak_and_peak_is_at_least_rss() {
         let (rss, peak) = rss_and_peak_kb().expect("/proc/self/status readable on linux");
-        assert!(rss > 0);
+        assert!(
+            rss > 1024,
+            "a test process holds more than 1 MiB: {rss} KiB"
+        );
         assert!(peak >= rss, "VmHWM {peak} < VmRSS {rss}");
     }
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn reset_brings_peak_down_to_current_rss() {
-        // Touch ~64 MiB, free it, then reset: the peak must drop back
-        // near the current RSS. Proves the per-phase peak is per phase.
+    fn a_sample_reads_the_process_and_resets_the_peak() {
         let big = vec![1u8; 64 << 20];
         std::hint::black_box(&big);
         drop(big);
-        let (_, before) = rss_and_peak_kb().unwrap();
-        if !reset_peak() {
-            // Some sandboxes mount /proc read-only; nothing to check.
-            return;
-        }
-        let (rss, after) = rss_and_peak_kb().unwrap();
+        let (sample, reset) = sample_and_reset(false).expect("readable /proc");
+        assert!(reset, "/proc/self/clear_refs refused the peak reset");
+        assert!(sample.rss_kb > 1024);
         assert!(
-            after <= before,
-            "peak grew across a reset: {before} -> {after}"
+            sample.peak_kb >= 64 * 1024,
+            "the 64 MiB touched before the sample is missing from its peak: {sample:?}"
         );
+        let (_, after) = rss_and_peak_kb().unwrap();
         // Other test threads allocate concurrently; allow slack.
         assert!(
-            after <= rss + (32 << 10),
-            "peak {after} KiB far above rss {rss} KiB after reset"
+            after < sample.peak_kb,
+            "peak not reset: {after} KiB vs {} KiB before",
+            sample.peak_kb
+        );
+    }
+
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[test]
+    fn a_collect_returns_freed_c_heap() {
+        let (resident_kb, kept) = crate::server::heap::tests::fragment_glibc_heap();
+        allocator_collect();
+        let (after, _) = rss_and_peak_kb().unwrap();
+        crate::server::heap::tests::free_kept(kept);
+        assert!(
+            after + 100 * 1024 < resident_kb,
+            "collect gave back too little: {resident_kb} KiB -> {after} KiB"
         );
     }
 }

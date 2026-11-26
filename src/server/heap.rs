@@ -74,10 +74,11 @@ pub fn trim_raw() {
 }
 
 /// Trim the C heap now and log what it gave back. `reason` names the
-/// call site in the log line.
-pub fn trim(reason: &str) {
+/// call site in the log line. Returns the KiB of RSS it gave back (0 when
+/// trimming is off or unsupported).
+pub fn trim(reason: &str) -> u64 {
     if !enabled() || !supported() {
-        return;
+        return 0;
     }
     let before = crate::server::mem_probe::rss_and_peak_kb().map(|(rss, _)| rss);
     let started = std::time::Instant::now();
@@ -88,18 +89,19 @@ pub fn trim(reason: &str) {
     ACTIVITY_SINCE_TRIM.store(false, Ordering::Relaxed);
     // Only forward: the idle path may already have claimed a later stamp.
     LAST_TRIM_UNIX.fetch_max(crate::server::time::now_unix(), Ordering::Relaxed);
-    let freed_mb = match (before, after) {
-        (Some(b), Some(a)) => b.saturating_sub(a) / 1024,
+    let freed_kb = match (before, after) {
+        (Some(b), Some(a)) => b.saturating_sub(a),
         _ => 0,
     };
     tracing::info!(
         target: "lain::heap",
         reason,
-        freed_mb,
+        freed_mb = freed_kb / 1024,
         rss_mb = after.unwrap_or(0) / 1024,
         elapsed_ms,
         "heap trim"
     );
+    freed_kb
 }
 
 /// The idle fallback: trim if something ran since the last trim and the
@@ -126,7 +128,7 @@ pub fn trim_if_idle_due(now_unix: i64) -> bool {
 }
 
 #[cfg(all(test, target_os = "linux", target_env = "gnu"))]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     extern "C" {
@@ -134,21 +136,22 @@ mod tests {
         fn free(ptr: *mut std::ffi::c_void);
     }
 
-    /// The failure mode this module exists for, reproduced in miniature:
-    /// a C library on some thread allocates many small blocks through glibc,
-    /// frees most of them but keeps a few scattered ones alive. glibc keeps
-    /// the freed pages in that thread's arena; RSS stays up until a trim.
-    #[test]
-    fn trim_returns_a_fragmented_glibc_arena_to_the_os() {
+    /// The failure mode this module exists for, in miniature: a C library
+    /// on some thread allocates many small blocks through glibc, frees most
+    /// of them and keeps a few scattered ones alive. glibc keeps the freed
+    /// pages in that thread's arena. Returns the process RSS (KiB) after the
+    /// frees and the still-live blocks (release them with [`free_kept`]).
+    pub(crate) fn fragment_glibc_heap() -> (u64, Vec<usize>) {
         const BLOCKS: usize = 200_000;
         const SIZE: usize = 1024; // ~200 MiB, below the mmap threshold
         let (before_free, after_free, kept) = std::thread::spawn(|| {
             let ptrs: Vec<usize> = (0..BLOCKS)
                 .map(|_| {
-                    // SAFETY: plain malloc of a small block; freed below.
+                    // SAFETY: plain malloc of a small block, freed below or
+                    // by `free_kept`.
                     let p = unsafe { malloc(SIZE) };
                     assert!(!p.is_null());
-                    // Touch it so it is resident.
+                    // SAFETY: `p` points to SIZE writable bytes.
                     unsafe { std::ptr::write_bytes(p as *mut u8, 1, SIZE) };
                     p as usize
                 })
@@ -157,7 +160,7 @@ mod tests {
             let mut kept = Vec::new();
             for (i, p) in ptrs.into_iter().enumerate() {
                 if i % 64 == 0 {
-                    kept.push(p); // pins the arena's top: no automatic shrink
+                    kept.push(p); // pins the arena: no automatic shrink
                 } else {
                     // SAFETY: each pointer came from malloc and is freed once.
                     unsafe { free(p as *mut _) };
@@ -168,8 +171,8 @@ mod tests {
         })
         .join()
         .unwrap();
-        // Preconditions: the blocks were resident, and glibc kept the
-        // freed ones resident (the bug), so there is something to trim.
+        // Preconditions: the blocks were resident, and glibc kept the freed
+        // ones resident (the bug), so there is something to give back.
         assert!(
             before_free > 150 * 1024,
             "test setup: expected >150 MiB resident, got {before_free} KiB"
@@ -178,39 +181,66 @@ mod tests {
             after_free > 120 * 1024,
             "test setup: glibc returned the freed blocks by itself ({after_free} KiB)"
         );
-        let retained_kb = after_free;
-        trim_raw();
-        let after_trim = crate::server::mem_probe::rss_and_peak_kb().unwrap().0;
-        // Other tests run concurrently and allocate; demand a large drop.
-        assert!(
-            after_trim + 100 * 1024 < retained_kb,
-            "trim gave back too little: {retained_kb} KiB -> {after_trim} KiB"
-        );
+        (after_free, kept)
+    }
+
+    pub(crate) fn free_kept(kept: Vec<usize>) {
         for p in kept {
-            // SAFETY: still-live blocks from malloc above, freed once.
+            // SAFETY: still-live blocks from `fragment_glibc_heap`, freed once.
             unsafe { free(p as *mut _) };
         }
     }
 
     #[test]
-    fn idle_trim_needs_activity_and_is_rate_limited() {
-        // Only this test calls trim_if_idle_due; other tests may call
-        // trim(), which only ever moves the stamp forward to real time.
-        // A clock far ahead of real time, so trims that other tests run
-        // concurrently (which stamp the real time) cannot reset it.
+    fn trim_returns_a_fragmented_glibc_arena_to_the_os() {
+        if !enabled() {
+            return; // LAIN_HEAP_TRIM=0 in the test environment
+        }
+        let (resident_kb, kept) = fragment_glibc_heap();
+        let before = trim_count();
+        let freed_kb = trim("test");
+        let after_kb = crate::server::mem_probe::rss_and_peak_kb().unwrap().0;
+        free_kept(kept);
+        assert!(trim_count() > before, "the trim was not counted");
+        // Other tests run concurrently and allocate; demand a large drop.
+        assert!(
+            freed_kb >= 100 * 1024,
+            "trim reported {freed_kb} KiB freed of a fragmented ~200 MiB arena"
+        );
+        assert!(
+            after_kb + 100 * 1024 < resident_kb,
+            "trim gave back too little: {resident_kb} KiB -> {after_kb} KiB"
+        );
+    }
+
+    #[test]
+    fn idle_trim_needs_activity_is_rate_limited_and_fires_at_the_interval() {
+        if !enabled() {
+            return;
+        }
+        // Only this test calls trim_if_idle_due; other tests may call trim(),
+        // which only ever moves the stamp forward to real time. A clock far
+        // ahead of real time keeps those from resetting it.
         let now = crate::server::time::now_unix() + 100 * IDLE_TRIM_INTERVAL_SECS;
-        LAST_TRIM_UNIX.store(now - IDLE_TRIM_INTERVAL_SECS - 1, Ordering::Relaxed);
+        LAST_TRIM_UNIX.store(now - IDLE_TRIM_INTERVAL_SECS, Ordering::Relaxed);
         ACTIVITY_SINCE_TRIM.store(false, Ordering::Relaxed);
         assert!(!trim_if_idle_due(now), "trimmed with no activity");
         note_activity();
         let before = trim_count();
-        assert!(trim_if_idle_due(now), "did not trim when due");
+        assert!(
+            trim_if_idle_due(now),
+            "did not trim exactly one interval after the last trim"
+        );
         assert!(trim_count() > before);
         note_activity();
         assert!(
             !trim_if_idle_due(now + 1),
             "trimmed again inside the interval"
         );
-        assert!(trim_if_idle_due(now + IDLE_TRIM_INTERVAL_SECS + 1));
+        assert!(
+            !trim_if_idle_due(now + IDLE_TRIM_INTERVAL_SECS - 1),
+            "trimmed a second before the interval ended"
+        );
+        assert!(trim_if_idle_due(now + IDLE_TRIM_INTERVAL_SECS));
     }
 }

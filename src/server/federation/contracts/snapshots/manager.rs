@@ -1650,12 +1650,13 @@ impl SnapshotManager {
     }
 }
 
-/// `LAIN_MEM_PROBE=1` only: count the snapshot's edges whose endpoints
-/// sit in two different repos, by edge type. Layered snapshots
+/// Count a snapshot's edges, and those whose endpoints sit in two
+/// different repos by edge type. Layered snapshots
 /// (`docs/plans/layered-snapshots.md`) keep per-repo layers plus an
-/// overlay; every cross-repo edge type that the projection itself
-/// produces (not the join) must be owned by one side or by the overlay.
-fn log_cross_repo_edge_histogram(backend: &PetgraphBackend, snapshot_id: &str) {
+/// overlay; every cross-repo edge type the projection itself produces (not
+/// the join) must be owned by one side or by the overlay. Measured on the
+/// demo snapshots: only the join's `Binds`.
+fn cross_repo_edge_histogram(backend: &PetgraphBackend) -> (usize, BTreeMap<String, usize>) {
     fn repo_of(id: &str) -> &str {
         id.split_once(':').map(|(r, _)| r).unwrap_or("")
     }
@@ -1667,6 +1668,12 @@ fn log_cross_repo_edge_histogram(backend: &PetgraphBackend, snapshot_id: &str) {
             *cross.entry(format!("{:?}", e.edge_type)).or_default() += 1;
         }
     });
+    (total, cross)
+}
+
+/// `LAIN_MEM_PROBE=1` only: log [`cross_repo_edge_histogram`].
+fn log_cross_repo_edge_histogram(backend: &PetgraphBackend, snapshot_id: &str) {
+    let (total, cross) = cross_repo_edge_histogram(backend);
     info!(
         target: "lain::mem_probe",
         snapshot = snapshot_id,
@@ -3083,11 +3090,47 @@ repos:
         let before = crate::server::heap::trim_count();
         let (_fed, _hold) = mgr.from_snapshot(&record).expect("empty snapshot builds");
         let trimmed = crate::server::heap::trim_count() > before;
-        assert_eq!(
-            trimmed,
-            crate::server::heap::supported() && crate::server::heap::enabled(),
-            "a snapshot build must trim exactly where trimming is possible"
-        );
+        if cfg!(all(target_os = "linux", target_env = "gnu"))
+            && std::env::var_os("LAIN_HEAP_TRIM").is_none()
+        {
+            assert!(trimmed, "a snapshot build on glibc did not trim");
+        } else {
+            assert!(!trimmed, "trimmed where trimming is off or unsupported");
+        }
+    }
+
+    #[test]
+    fn cross_repo_edges_are_counted_by_type() {
+        use crate::schema::{EdgeType, NodeType};
+        let dir = tempfile::tempdir().unwrap();
+        let backend = PetgraphBackend::ephemeral(dir.path());
+        let node = |repo: &str, name: &str| {
+            let mut n = GraphNode::new(NodeType::Function, name.into(), "m.rs".into());
+            n.id = GlobalId::new(
+                &RepoId::new(repo).unwrap(),
+                NodeType::Function,
+                "m.rs",
+                name,
+                Some(1),
+            )
+            .as_str()
+            .to_string();
+            n
+        };
+        let (x, y, z) = (node("a", "x"), node("a", "y"), node("b", "z"));
+        backend
+            .upsert_nodes_batch(&[x.clone(), y.clone(), z.clone()])
+            .unwrap();
+        backend
+            .upsert_edges_batch(&[
+                GraphEdge::new(EdgeType::Calls, x.id.clone(), y.id.clone()),
+                GraphEdge::new(EdgeType::Binds, y.id.clone(), z.id.clone()),
+                GraphEdge::new(EdgeType::Binds, z.id.clone(), x.id.clone()),
+            ])
+            .unwrap();
+        let (total, cross) = cross_repo_edge_histogram(&backend);
+        assert_eq!(total, 3);
+        assert_eq!(cross, BTreeMap::from([("Binds".to_string(), 2)]));
     }
 
     /// `install_resident_held` returns the entry already held: a concurrent

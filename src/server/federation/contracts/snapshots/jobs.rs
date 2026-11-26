@@ -871,14 +871,41 @@ mod tests {
         let alive = tmp
             .path()
             .join(format!("lain-snapshot-job-orders-0123456789ab-{me}-0-def"));
+        // pid 1 is always running, and is not this process.
+        let other_live = tmp
+            .path()
+            .join("lain-snapshot-job-orders-0123456789ab-1-0-ghi");
         let unrelated = tmp.path().join("lain-something-else-4000000000-1-x");
-        for d in [&dead, &alive, &unrelated] {
+        for d in [&dead, &alive, &other_live, &unrelated] {
             std::fs::create_dir_all(d).unwrap();
         }
         assert_eq!(sweep_legacy_tmp(tmp.path()), 1);
         assert!(!dead.exists());
-        assert!(alive.exists(), "removed the scratch dir of a live process");
+        assert!(alive.exists(), "removed this process's scratch dir");
+        assert!(
+            other_live.exists(),
+            "removed the scratch dir of another live process"
+        );
         assert!(unrelated.exists(), "removed a dir that is not a job's");
+    }
+
+    #[test]
+    fn scratch_graphs_live_under_the_data_dir() {
+        let data = Path::new("/srv/lain-data");
+        assert_eq!(
+            job_tmp_root(data, "orders"),
+            data.join("job-tmp").join("orders")
+        );
+    }
+
+    #[test]
+    fn the_startup_sweep_entry_point_removes_a_crashed_jobs_state() {
+        let (src, sha) = one_commit_repo();
+        let data = tempfile::tempdir().unwrap();
+        let (wt, scratch) = crashed_job_residue(data.path(), src.path(), &sha);
+        let report = sweep_orphaned_job_state(data.path());
+        assert_eq!((report.worktrees, report.job_tmp), (1, 1), "{report:?}");
+        assert!(!wt.exists() && !scratch.exists());
     }
 
     #[test]
