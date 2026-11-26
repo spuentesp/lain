@@ -936,6 +936,7 @@ async fn dispatch_tool_call(
     // peak since the previous probe (the tool's own peak, unless a
     // snapshot build ran meanwhile; those probe themselves).
     crate::server::mem_probe::phase("tool", name);
+    crate::server::heap::note_activity();
     out
 }
 

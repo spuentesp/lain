@@ -1394,6 +1394,9 @@ impl SnapshotManager {
             &rust_details,
         )?;
         crate::federation::contracts::rust_rpc::attach(&mut contract_index, rust_details);
+        // The build read and parsed every Rust source of the snapshot through
+        // libgit2 and tree-sitter (glibc heap); give that back now.
+        crate::server::heap::trim("snapshot_build");
         if crate::server::mem_probe::enabled() {
             log_cross_repo_edge_histogram(backend.as_ref(), &record.id);
         }
@@ -2073,6 +2076,7 @@ fn snapshot_worker_loop(mgr: Arc<SnapshotManager>) {
             info!(repo = %state.spec.repo, sha = %state.spec.sha, "snapshot worker: picked job");
             let job_label = format!("{}@{}", state.spec.repo, state.spec.sha);
             let result = run_job(&mgr.runner, state);
+            crate::server::heap::trim("index_job");
             crate::server::mem_probe::phase("index_job", &job_label);
             match &result {
                 Ok(_) => info!("snapshot worker: job finished OK"),
@@ -2081,10 +2085,13 @@ fn snapshot_worker_loop(mgr: Arc<SnapshotManager>) {
         } else {
             idle_polls += 1;
             // Every ~5 s of idleness (50 polls of 100 ms).
-            if idle_polls.is_multiple_of(50)
-                && mgr.evict_idle_residents(resident_idle_secs, now_unix()) > 0
-            {
-                crate::server::mem_probe::phase("evict_idle", "");
+            if idle_polls.is_multiple_of(50) {
+                if mgr.evict_idle_residents(resident_idle_secs, now_unix()) > 0 {
+                    crate::server::mem_probe::phase("evict_idle", "");
+                }
+                // Live re-index, reloads and tool calls churn the C heap too;
+                // trim once things are quiet (rate-limited, one thread).
+                crate::server::heap::trim_if_idle_due(now_unix());
             }
             if idle_polls == 50 {
                 info!(
@@ -3031,6 +3038,37 @@ repos:
             mgr.in_flight.lock().contains_key(&id),
             "joiner does not remove the in_flight slot; \
              only the builder's atomic publish+remove does"
+        );
+    }
+
+    /// A snapshot build hands the C heap (libgit2 blob reads, tree-sitter
+    /// parses) back to the OS when it finishes: on the Parallax demo
+    /// federation that was ~0.7 GB kept per process otherwise.
+    #[test]
+    fn building_a_snapshot_federation_trims_the_c_heap() {
+        use crate::server::federation::contracts::snapshots::record::SnapshotState;
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = SnapshotManager::with_cap(dir.path(), IndexCache::new(dir.path()), 2);
+        let record = SnapshotRecord {
+            id: "snap_trims_heap".into(),
+            repos: BTreeMap::new(),
+            excluded: Vec::new(),
+            refs_: BTreeMap::new(),
+            join_config: serde_json::to_value(ContractFederationConfig::default()).unwrap(),
+            config_hash: String::new(),
+            analyzer_version: String::new(),
+            state: SnapshotState::Ready,
+            repo_states: BTreeMap::new(),
+            created_unix: now_unix(),
+            last_access_unix: now_unix(),
+        };
+        let before = crate::server::heap::trim_count();
+        let (_fed, _hold) = mgr.from_snapshot(&record).expect("empty snapshot builds");
+        let trimmed = crate::server::heap::trim_count() > before;
+        assert_eq!(
+            trimmed,
+            crate::server::heap::supported() && crate::server::heap::enabled(),
+            "a snapshot build must trim exactly where trimming is possible"
         );
     }
 

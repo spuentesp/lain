@@ -8,9 +8,10 @@
 //! `scripts/measure_pr_memory.py` reads these lines from the server log
 //! to split a PR analysis's peak into hydrate / project / join / trace.
 //!
-//! With `LAIN_MEM_PROBE_COLLECT=1` each probe first asks mimalloc to
-//! return free pages (`mi_collect`), so the logged RSS is live data, not
-//! allocator retention.
+//! With `LAIN_MEM_PROBE_COLLECT=1` each probe first asks both allocators
+//! to return free pages (mimalloc's `mi_collect`, glibc's `malloc_trim`
+//! for the C libraries), so the logged RSS is live data, not allocator
+//! retention.
 //!
 //! Linux only; elsewhere (or when `/proc` is unreadable) the probe logs
 //! nothing. It never fails the caller.
@@ -63,15 +64,16 @@ extern "C" {
     fn mi_collect(force: bool);
 }
 
-/// Ask mimalloc to return every free page it can to the OS now.
+/// Ask mimalloc, then glibc ([`crate::server::heap::trim_raw`]), to return
+/// every free page they can to the OS now.
 /// The probe calls it before reading RSS when `LAIN_MEM_PROBE_COLLECT=1`,
 /// which separates live data (stays resident) from pages the allocator
-/// merely holds after a free (go away). Without the global allocator
-/// being mimalloc this only collects mimalloc's own (empty) heaps.
+/// merely holds after a free (go away).
 pub fn allocator_collect() {
     // SAFETY: `mi_collect` takes a plain bool, has no preconditions and
     // is safe to call from any thread at any time.
     unsafe { mi_collect(true) }
+    crate::server::heap::trim_raw();
 }
 
 fn collect_enabled() -> bool {
