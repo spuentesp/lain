@@ -220,6 +220,26 @@ starts with `LAIN_GIT_SIDECAR_BIN` set as on Fly: the startup trim fires when th
 and frees ~690 MB in 35 ms. "Trimmed" means the `heap::trim` fix in this
 branch. The untrimmed cold run reproduces the Fly numbers for one engine: 3.9 → 5.8 GB peaks, and +3.1 GB at rest.
 
+**The Fly container itself** (the README's podman recipe: the deployed image, 4 GB cap with swap allowed,
+`memory.current + memory.swap.current` of the whole container: both engines, the API, the git sidecars).
+"0.16.2" is the deployed image; "this branch" is the same image with this branch's `lain` and
+`lain-git-sidecar` (built on Ubuntu 24.04) and re-baked with `bake.sh`. Both have the #4995/#6003 commits
+fetched as branches, outside the baked snapshot cache; engine A driven as above.
+
+| MB, whole container | 0.16.2 | this branch |
+|---|---|---|
+| settled 90 s after engine A is ready | 2 095 | 1 757 |
+| #4995 peak | 5 324 | **4 262** |
+| #6003 peak | 6 213 | **4 329** |
+| at rest after both | 4 779 | **2 784** |
+| wall: #4995 base / head / diff (s) | 141.6 / 33.0 / 24.7 | 128.9 / 31.5 / 25.2 |
+| wall: #6003 base / head / diff (s) | 41.3 / 41.6 / 36.3 | 34.9 / 29.2 / 28.7 |
+
+The 0.16.2 column reproduces the README's own figures (peaks 5.6 / 6.2 GB, rest 5.1 GB). The container
+target of this plan ("well under 4 GB" for #4995) is **not** met: the remaining peak is inside the index jobs
+themselves (the trim runs after each job), plus engine B and the API (~1.2 GB). On the 7.9 GB Fly machine the
+headroom at the worst peak goes from ~1.7 GB to ~3.6 GB.
+
 **What a phase costs** (live data, read after `mi_collect` + `malloc_trim`, runs B/F/H):
 
 | Phase | Live after | Transient peak | Notes |
@@ -262,15 +282,19 @@ The plan assumed the duplicated per-repo projections were the problem. Measured,
 0.2 GB for a single-repo PR. Part 2 (interface-first) would mainly cut the build *transients*: hydrate/project
 and `rust_rpc`'s read of every Rust blob.
 
-With the trim, the targets of this plan are met without phases 1–3, for these two PRs on engine A:
-- #4995 peaks at 2.5 GB, against "well under 4 GB";
-- at rest, memory comes back to start + resident snapshots (± ~0.2 GB);
-- wall time is unchanged.
+With the trim, for these two PRs:
+- engine A peaks at 2.5 GB; the whole container at 4.3 GB. That is short of "well under 4 GB" for the
+  container, by about the index jobs' own transient (see the container table);
+- at rest, memory comes back to start + resident snapshots (± ~0.2 GB) on engine A, and the container rests
+  2.0 GB lower than 0.16.2;
+- wall time is unchanged or better.
 
-Not yet verified: the Fly container itself (both engines + API, podman recipe) and the other demo PRs.
+Not yet verified: the other demo PRs.
 
 Cheaper next steps, in order of measured payoff:
-1. Measure the Fly image with this build (podman recipe), both engines.
+1. The index job's own transient (0.8–1.2 GB of C-heap churn per OpenShell commit, freed only when the job
+   ends). Trimming inside the job, between indexing phases, or bounding glibc's arenas
+   (`M_ARENA_MAX`), would cut the container peak further.
 2. `rust_rpc`: open each mirror once per build (today `open_bare` runs per file read), and cache its per-repo
    wrapper/candidate scan per (repo, commit) like `graph.bin`. Cuts the +0.5–0.7 GB transient and part of the
    build time.

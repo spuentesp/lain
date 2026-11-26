@@ -21,9 +21,9 @@ All notable changes to LAIN are documented here. Versions follow
   back). Startup, every snapshot build and every snapshot index job left
   0.7–1.2 GB behind. The server now trims the C heap after each of them
   and once idle (`LAIN_HEAP_TRIM=0` turns it off; glibc builds only).
-  Two PR analyses on the Parallax demo federation, one engine, new PR
-  commits: peaks 3.9 / 5.8 GB -> 2.5 / 2.9 GB, at rest 4.4 GB -> 1.4 GB,
-  same wall time.
+  Two PR analyses (NVIDIA/OpenShell #4995 then #6003) on the Parallax Fly
+  image, whole container: peaks 5.3 / 6.2 GB -> 4.3 / 4.3 GB, at rest
+  4.8 GB -> 2.8 GB, same wall time.
 - **A snapshot job killed mid-index left its worktree and scratch graph
   behind for good** (the scratch graph in `$TMPDIR`, which is RAM on a
   tmpfs `/tmp`; an indexing error leaked it too). The scratch graph now

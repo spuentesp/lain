@@ -233,7 +233,7 @@ def await_snapshot(lain: Lain, repos: dict, limit_s: int) -> str:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--lain", required=True)
+    ap.add_argument("--lain", default=None, help="lain binary (not needed with --url)")
     ap.add_argument("--config", default=None, help="repos.yaml (required unless --url with --pin)")
     ap.add_argument("--pin", action="append", default=[], help="repo=sha for a repo the PRs do not change (default: its checkout's HEAD)")
     ap.add_argument("--port", type=int, default=9989)
@@ -276,6 +276,8 @@ def main() -> int:
         k, v = kv.split("=", 1)
         env[k] = v
 
+    if not args.url and not args.lain:
+        ap.error("--lain is required unless --url is given")
     if not args.config and not (args.url and args.pin):
         ap.error("--config is required (or --url with --pin)")
     pinned = {}
@@ -329,7 +331,7 @@ def main() -> int:
 
     results = {"pinned": pinned, "prs": []}
     try:
-        print(f"lain pid {proc.pid}, log {log_path}", flush=True)
+        print(f"lain pid {proc.pid}, log {log_path}" if proc else f"attached to {args.url}, sampling {args.cgroup}", flush=True)
         step("startup (until list_services answers)", lambda: wait_ready(lain, proc, args.ready_secs))
         for spec in args.pr:
             pr = parse_pr(spec)
