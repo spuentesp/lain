@@ -226,19 +226,26 @@ branch. The untrimmed cold run reproduces the Fly numbers for one engine: 3.9 �
 `lain-git-sidecar` (built on Ubuntu 24.04) and re-baked with `bake.sh`. Both have the #4995/#6003 commits
 fetched as branches, outside the baked snapshot cache; engine A driven as above.
 
-| MB, whole container | 0.16.2 | this branch |
-|---|---|---|
-| settled 90 s after engine A is ready | 2 095 | 1 757 |
-| #4995 peak | 5 324 | **4 262** |
-| #6003 peak | 6 213 | **4 329** |
-| at rest after both | 4 779 | **2 784** |
-| wall: #4995 base / head / diff (s) | 141.6 / 33.0 / 24.7 | 128.9 / 31.5 / 25.2 |
-| wall: #6003 base / head / diff (s) | 41.3 / 41.6 / 36.3 | 34.9 / 29.2 / 28.7 |
+| MB, whole container | 0.16.2 | this branch | + #428 + `mi_collect` |
+|---|---|---|---|
+| settled 90 s after engine A is ready | 2 095 | 1 757 | 1 394 |
+| #4995 peak | 5 324 | **4 262** | **2 740** |
+| #6003 peak | 6 213 | **4 329** | **3 203** |
+| at rest after both | 4 779 | **2 784** | **2 578** |
+| wall: #4995 base / head / diff (s) | 141.6 / 33.0 / 24.7 | 128.9 / 31.5 / 25.2 | 182.7 / 51.1 / 32.9 |
+| wall: #6003 base / head / diff (s) | 41.3 / 41.6 / 36.3 | 34.9 / 29.2 / 28.7 | 57.4 / 49.8 / 50.5 |
 
 The 0.16.2 column reproduces the README's own figures (peaks 5.6 / 6.2 GB, rest 5.1 GB). The container
 target of this plan ("well under 4 GB" for #4995) is **not** met: the remaining peak is inside the index jobs
 themselves (the trim runs after each job), plus engine B and the API (~1.2 GB). On the 7.9 GB Fly machine the
 headroom at the worst peak goes from ~1.7 GB to ~3.6 GB.
+
+**Update (third column, 2026-11-27).** The index jobs' peak was mostly the gRPC consumer sensor holding a
+tree-sitter tree of every Rust file at once (+0.83–0.86 GB per OpenShell job; fixed in #428, which re-parses
+the few files it needs instead: +0.25 GB). `heap::trim` now also runs `mi_collect(true)`, which gave back
+~0.3 GB more after a job. With both, #4995 peaks at **2.7 GB**, so the container target is met, and the worst
+peak of the two PRs is 3.2 GB. The third column's wall times are not comparable: that run had host load
+10–14 from unrelated processes. The same-binary alternating A/B for #428 measured +4.4 s per index job (~14%).
 
 **What a phase costs** (live data, read after `mi_collect` + `malloc_trim`, runs B/F/H):
 
