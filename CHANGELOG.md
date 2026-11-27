@@ -7,6 +7,13 @@ All notable changes to LAIN are documented here. Versions follow
 
 ### Fixed
 
+- **Agents claiming files at the same time could get "presence coordination
+  unavailable" instead of a grant or a conflict.** Each claim holds the
+  presence lock for a zoanthrope round trip, and a waiter gave up after a
+  fixed 5 s, so with ten agents on a slow machine the last ones in the queue
+  failed (seen as `linearizability_n10_stress` flaking on Windows CI). A
+  claim now keeps waiting while other claims keep completing, up to 30 s,
+  and still gives up after 5 s if the holder is stuck.
 - **Indexing a Rust repository built it.** rust-analyzer asks cargo for crate
   metadata, so it wrote the workspace's own `target/` — gigabytes of
   regenerable build output in a repository Lain was only asked to read. The

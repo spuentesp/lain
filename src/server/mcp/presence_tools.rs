@@ -537,22 +537,18 @@ pub fn run_claim_files(server: &LainServer, args: Value) -> Result<Value, String
 /// exactly the thing that must not become the claim's answer. Claims
 /// are arbitrated by zoanthrope under its own state lock; the session
 /// table is a hint, so waiting a little longer for its lock is safe.
-/// Every other coordination error still surfaces — the caller must
-/// see a refresh/persist failure.
+/// It waits while other calls keep completing (up to 30 s) and gives
+/// up after 5 s without any. Every other coordination error still
+/// surfaces — the caller must see a refresh/persist failure.
 fn with_presence_busy_retry<T>(
     server: &LainServer,
-    mut f: impl FnMut() -> T,
+    f: impl FnMut() -> T,
 ) -> Result<T, crate::server::ingest::handles::presence::CoordinationError> {
-    use crate::server::ingest::handles::presence::CoordinationError;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    loop {
-        match server.with_shared_presence(&mut f) {
-            Err(CoordinationError::Unavailable) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(std::time::Duration::from_millis(25));
-            }
-            out => return out,
-        }
-    }
+    server.with_shared_presence_patient(
+        f,
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(30),
+    )
 }
 
 fn run_claim_files_inner(server: &LainServer, a: ClaimFilesArgs) -> Result<Value, String> {
