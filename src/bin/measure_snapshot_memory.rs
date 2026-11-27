@@ -5,9 +5,12 @@
 //! each repo path given on the command line, hydrates each into
 //! a `PetgraphBackend::ephemeral()` federation, runs
 //! `ContractJoiner::run` to derive a `ContractIndex`, and records
-//! peak RSS via `/proc/self/status` polling.
+//! the process's peak RSS (`VmHWM`) per phase.
 //!
-//! Prints `peak_bytes=<N>` on stdout. The shell wrapper
+//! Uses the server's allocator (mimalloc) so the numbers match what
+//! `lain server` pays. Prints one `phase=<name> rss_bytes=<N>
+//! peak_bytes=<N>` line per phase (peak since the previous phase), and
+//! a final `peak_bytes=<N>` (the largest phase peak) on stdout. The shell wrapper
 //! (`scripts/measure_snapshot_memory.sh`) runs this binary twice —
 //! once against the §15.1 fixture, once against tokio + bytes —
 //! and combines the two peaks into the final ceiling.
@@ -15,7 +18,6 @@
 //! Usage: `measure_snapshot_memory <repo-1> [<repo-2> ...]`
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 use std::time::SystemTime;
 
 use lain::federation::contracts::index_cache::{build_manifest, CacheKey, IndexCache};
@@ -28,6 +30,23 @@ use lain::git::{AnyGitSensor, GitSensorMode};
 use lain::graph::GraphDatabase;
 use lain::schema::RepoNamespace;
 use lain::server::ingest::ingestion::{index_one_repo, IndexMode, IndexRequest};
+use lain::server::mem_probe;
+
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+/// Print the phase line and reset the kernel's peak counter so the
+/// next phase reports its own peak. Returns the phase peak in bytes.
+fn report_phase(name: &str) -> u64 {
+    let (rss_kb, peak_kb) = mem_probe::rss_and_peak_kb().unwrap_or((0, 0));
+    mem_probe::reset_peak();
+    println!(
+        "phase={name} rss_bytes={} peak_bytes={}",
+        rss_kb * 1024,
+        peak_kb * 1024
+    );
+    peak_kb * 1024
+}
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -45,6 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ));
     std::fs::create_dir_all(&work_dir)?;
     let cache = IndexCache::new(&work_dir);
+    let mut max_peak = report_phase("start");
     let analyzer_version = lain::federation::contracts::analyzer_version();
 
     // Index every repo into the cache. The graph bytes are kept
@@ -88,6 +108,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         cache.write_entry(&key, &bytes, &manifest)?;
         let _ = std::fs::remove_file(&staging);
+        max_peak = max_peak.max(report_phase(&format!("index:{repo_id}")));
     }
 
     // Hydrate each into a federation over `PetgraphBackend::ephemeral`
@@ -101,7 +122,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let key = CacheKey::new(&repo_id, &sha, analyzer_version.clone());
         let bytes = cache.read_graph_bytes(&key)?;
         let db = hydrate_graph(&bytes, &fed_path)?;
+        max_peak = max_peak.max(report_phase(&format!("hydrate:{repo_id}")));
         project_graph(&db, &repo_id, backend.clone())?;
+        drop(db);
+        drop(bytes);
+        max_peak = max_peak.max(report_phase(&format!("project:{repo_id}")));
     }
     // Force the joiner to run so peak RSS during the contract
     // derivation is captured (per §8.5 — the federation
@@ -111,15 +136,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &lain::federation::contracts::config::ContractFederationConfig::default(),
     )?;
 
-    // Sample peak RSS from `/proc/self/status`.
-    let mut peak_rss_kb: u64 = 0;
-    for _ in 0..50 {
-        if let Some(rss) = read_rss_kb() {
-            peak_rss_kb = peak_rss_kb.max(rss);
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    println!("peak_bytes={}", peak_rss_kb * 1024);
+    max_peak = max_peak.max(report_phase("join"));
+    drop(backend);
+    max_peak = max_peak.max(report_phase("drop_federation"));
+    println!("peak_bytes={max_peak}");
     Ok(())
 }
 
@@ -155,15 +175,4 @@ fn head_sha(repo_root: &Path) -> String {
         String::from_utf8_lossy(&out.stderr)
     );
     String::from_utf8_lossy(&out.stdout).trim().to_string()
-}
-
-fn read_rss_kb() -> Option<u64> {
-    let text = std::fs::read_to_string("/proc/self/status").ok()?;
-    for line in text.lines() {
-        if let Some(rest) = line.strip_prefix("VmRSS:") {
-            let kb: u64 = rest.split_whitespace().next()?.parse().ok()?;
-            return Some(kb);
-        }
-    }
-    None
 }

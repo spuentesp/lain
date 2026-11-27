@@ -15,6 +15,39 @@ All notable changes to LAIN are documented here. Versions follow
   never contend for the same cargo lock. An operator who already set
   `CARGO_TARGET_DIR` chose where cargo writes, and that choice is left
   alone.
+- **On macOS a PR fetch still re-indexed the watched repo.** The watcher
+  skips events that stay inside `.git` and leave HEAD alone, but FSEvents
+  reports paths with symlinks resolved, so a checkout under a symlink (any
+  macOS temp dir: `/var` -> `/private/var`) never matched its own `.git`.
+  Both spellings now match.
+- **The engine kept gigabytes of memory it no longer used.** libgit2,
+  tree-sitter, zlib and the C++ runtime allocate through glibc, which
+  keeps freed memory in its arenas, and Lain's own allocator (mimalloc)
+  holds freed pages a while too. Startup, every snapshot build and every
+  snapshot index job left 0.7–1.2 GB behind. The server now returns both
+  allocators' free memory after each of them and once idle
+  (`LAIN_HEAP_TRIM=0` turns it off; glibc builds only).
+  Two PR analyses (NVIDIA/OpenShell #4995 then #6003) on the Parallax Fly
+  image, whole container: peaks 5.3 / 6.2 GB -> 4.3 / 4.3 GB, at rest
+  4.8 GB -> 2.8 GB, same wall time.
+- **A snapshot job killed mid-index left its worktree and scratch graph
+  behind for good** (the scratch graph in `$TMPDIR`, which is RAM on a
+  tmpfs `/tmp`; an indexing error leaked it too). The scratch graph now
+  lives under `<data_dir>/job-tmp/` and is removed on every exit path,
+  and starting the snapshot workers removes what a crashed process left.
+- **Index-cache entries of an older analyzer version stayed on disk** until
+  the size budget reached them, though this build never reads them. The
+  server now removes, at startup, those no build has used within the
+  snapshot retention window (`LAIN_SNAPSHOT_RETENTION_DAYS`, default 7), so
+  two versions sharing a data dir do not delete each other's cache.
+
+### Added
+
+- `LAIN_MEM_PROBE=1` logs RSS, swap and the peak since the previous probe
+  for each snapshot build phase, index job and tool call;
+  `scripts/measure_pr_memory.py` replays a Parallax PR analysis against a
+  real server and reports them. `measure_snapshot_memory` reports the real
+  per-phase peak (`VmHWM`) instead of the RSS at exit.
 
 ## [0.16.2] - 2026-11-25
 
