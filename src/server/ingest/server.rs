@@ -507,6 +507,17 @@ impl LainServer {
         self.presence.with_shared_presence(f)
     }
 
+    /// See [`crate::server::ingest::handles::presence::PresenceLayer::with_shared_presence_patient`].
+    pub fn with_shared_presence_patient<T>(
+        &self,
+        f: impl FnMut() -> T,
+        quiet: std::time::Duration,
+        ceiling: std::time::Duration,
+    ) -> Result<T, crate::server::ingest::handles::presence::CoordinationError> {
+        self.presence
+            .with_shared_presence_patient(f, quiet, ceiling)
+    }
+
     /// Best-effort refresh for read-only listings: a failed read leaves
     /// the in-memory view as it was, so log it rather than fail the call.
     pub fn refresh_shared_presence(&self) {
