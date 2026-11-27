@@ -7,6 +7,13 @@ All notable changes to LAIN are documented here. Versions follow
 
 ### Fixed
 
+- **The gRPC consumer sensor held a parse tree of every Rust file at once.**
+  Following wrapper methods takes two passes over a repository, and the
+  first kept each file's tree-sitter tree for the second: about 0.85 GB on
+  OpenShell (~780 Rust files), the largest part of a snapshot index job's
+  peak. The second pass now parses each file again and drops it before the
+  next: about 0.17 GB, at the cost of a second parse (+4 s per OpenShell
+  job, ~14%). Same candidates either way.
 - **Indexing a Rust repository built it.** rust-analyzer asks cargo for crate
   metadata, so it wrote the workspace's own `target/` — gigabytes of
   regenerable build output in a repository Lain was only asked to read. The
