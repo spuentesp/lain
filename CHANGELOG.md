@@ -15,6 +15,11 @@ All notable changes to LAIN are documented here. Versions follow
   never contend for the same cargo lock. An operator who already set
   `CARGO_TARGET_DIR` chose where cargo writes, and that choice is left
   alone.
+- **On macOS a PR fetch still re-indexed the watched repo.** The watcher
+  skips events that stay inside `.git` and leave HEAD alone, but FSEvents
+  reports paths with symlinks resolved, so a checkout under a symlink (any
+  macOS temp dir: `/var` -> `/private/var`) never matched its own `.git`.
+  Both spellings now match.
 - **The engine kept gigabytes of memory it no longer used.** libgit2,
   tree-sitter, zlib and the C++ runtime allocate through glibc, which
   keeps freed memory in its arenas (Lain's own heap, mimalloc, gives it
