@@ -459,6 +459,11 @@ pub(crate) async fn complete_startup(fed: &Arc<FederatedIndex>) -> StartupCache 
         }
     }
 
+    // Indexing or restoring the checkpoint churned the C heap (tree-sitter,
+    // zlib, libgit2); without this the engine idles ~0.9 GB above its live
+    // data on the Parallax demo federation.
+    crate::server::heap::trim("startup");
+
     cache
 }
 

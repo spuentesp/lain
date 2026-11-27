@@ -297,6 +297,141 @@ pub struct JobOutcome {
 /// before returning; the `JobState` is updated through the runner's
 /// `mark_*` helpers so the manager's `refresh_repo_states` sees the
 /// failure immediately.
+/// `<data_dir>/job-tmp/<repo>`: where a snapshot job keeps its scratch
+/// graph while it indexes `repo`.
+pub fn job_tmp_root(data_dir: &Path, repo: &str) -> PathBuf {
+    data_dir.join("job-tmp").join(repo)
+}
+
+/// Removes a directory tree when dropped (best effort).
+struct RemoveDirOnDrop(PathBuf);
+
+impl Drop for RemoveDirOnDrop {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// What [`sweep_orphaned_job_state`] removed.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct SweepReport {
+    /// `<data_dir>/worktrees/<repo>/<sha>` directories.
+    pub worktrees: usize,
+    /// `<data_dir>/job-tmp/<repo>/*` scratch directories.
+    pub job_tmp: usize,
+    /// Pre-0.16.3 `$TMPDIR/lain-snapshot-job-*` directories whose owning
+    /// process is gone (Linux only: liveness is read from `/proc`).
+    pub legacy_tmp: usize,
+    /// Repos skipped because a job holds their lock right now.
+    pub busy_repos: usize,
+}
+
+/// Remove what crashed or killed snapshot jobs left behind.
+///
+/// A job adds a worktree and a scratch graph under the repo lock and
+/// removes both before releasing it. A process that dies mid-job leaves
+/// both on disk forever: `git worktree prune` only forgets worktrees
+/// whose directory is already gone, and `worktree_add` reuses an
+/// existing directory only if the same sha is indexed again. So for each
+/// repo whose lock is free (no job is running, in this process or
+/// another over the same data dir), everything under its `worktrees/`
+/// and `job-tmp/` entries is an orphan and is removed. Repos whose lock
+/// is held are left alone: their job cleans up after itself.
+pub fn sweep_orphaned_job_state(data_dir: &Path) -> SweepReport {
+    sweep_orphaned_job_state_in(data_dir, Some(&std::env::temp_dir()))
+}
+
+/// [`sweep_orphaned_job_state`] with the legacy scratch location as a
+/// parameter (`None` skips it), so tests never touch the host's `/tmp`.
+fn sweep_orphaned_job_state_in(data_dir: &Path, legacy_tmp: Option<&Path>) -> SweepReport {
+    let mut report = SweepReport::default();
+    let mut repos: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for root in [data_dir.join("worktrees"), data_dir.join("job-tmp")] {
+        if let Ok(entries) = std::fs::read_dir(&root) {
+            for entry in entries.flatten() {
+                if entry.path().is_dir() {
+                    repos.insert(entry.file_name().to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
+    for repo in repos {
+        let lock = match RepoLock::try_acquire(data_dir, &repo) {
+            Ok(Some(lock)) => lock,
+            Ok(None) => {
+                report.busy_repos += 1;
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(repo = %repo, error = %e, "snapshot sweep: cannot lock repo; skipped");
+                continue;
+            }
+        };
+        let wt_root = data_dir.join("worktrees").join(&repo);
+        if let Ok(entries) = std::fs::read_dir(&wt_root) {
+            for entry in entries.flatten() {
+                let sha = entry.file_name().to_string_lossy().into_owned();
+                // Through git first so the mirror forgets the worktree;
+                // a plain removal (then `prune`) when git cannot.
+                if worktree_remove(data_dir, &repo, &sha).is_err() || entry.path().exists() {
+                    let _ = std::fs::remove_dir_all(entry.path());
+                }
+                if !entry.path().exists() {
+                    report.worktrees += 1;
+                }
+            }
+            let _ = worktree_prune(data_dir, &repo);
+        }
+        let tmp_root = job_tmp_root(data_dir, &repo);
+        if let Ok(entries) = std::fs::read_dir(&tmp_root) {
+            for entry in entries.flatten() {
+                if std::fs::remove_dir_all(entry.path()).is_ok() {
+                    report.job_tmp += 1;
+                }
+            }
+        }
+        drop(lock);
+    }
+    report.legacy_tmp = legacy_tmp.map(sweep_legacy_tmp).unwrap_or(0);
+    if report != SweepReport::default() {
+        info!(?report, "snapshot sweep: removed orphaned job state");
+    }
+    report
+}
+
+/// Pre-0.16.3 jobs kept their scratch graph in
+/// `$TMPDIR/lain-snapshot-job-<repo>-<sha12>-<pid>-<seq>-<uuid>`. Remove
+/// the ones whose `<pid>` is no longer running. Only where `/proc` tells
+/// liveness (Linux); elsewhere nothing is removed.
+fn sweep_legacy_tmp(tmp: &Path) -> usize {
+    if !Path::new("/proc/self").exists() {
+        return 0;
+    }
+    let Ok(entries) = std::fs::read_dir(tmp) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(rest) = name.strip_prefix("lain-snapshot-job-") else {
+            continue;
+        };
+        // `<repo>-<sha12>-<pid>-<seq>-<uuid>`; the repo may contain '-'.
+        let mut parts = rest.rsplitn(4, '-');
+        let (_uuid, _seq, pid) = (parts.next(), parts.next(), parts.next());
+        let Some(pid) = pid.and_then(|p| p.parse::<u32>().ok()) else {
+            continue;
+        };
+        if pid == std::process::id() || Path::new(&format!("/proc/{pid}")).exists() {
+            continue;
+        }
+        if std::fs::remove_dir_all(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
 pub fn run_job(runner: &JobRunner, state: Arc<JobState>) -> Result<JobOutcome, LainError> {
     let spec = state.spec.clone();
     runner.mark_indexing(&state);
@@ -391,25 +526,26 @@ fn run_job_inner(
     // payload path that gets cleaned up after we serialize) and run
     // `index_one_repo` in snapshot mode.
     let index_result = (|| -> Result<IndexedJobPayload, LainError> {
-        // Per-job tempdir for the per-repo graph. Created in
-        // `std::env::temp_dir()` so it does not collide with the
-        // federation's own per-repo state directories. The path is
-        // only used as the `GraphDatabase` `persistence_path`; we
-        // serialize and rename the bytes into the cache entry's
-        // `graph.bin` and never leave the temp file behind (the
-        // `RunJobCleanup` block below removes any residue).
+        // Per-job scratch dir for the per-repo graph, under
+        // `<data_dir>/job-tmp/<repo>/` (not `std::env::temp_dir()`: on
+        // hosts where /tmp is tmpfs that is RAM, and a crashed job's
+        // graph stayed there until reboot). The guard removes it on
+        // every exit path, error or success; the repo lock (held for
+        // the whole job) lets the startup sweep remove what a crash
+        // leaves behind ([`sweep_orphaned_job_state`]).
         static JOB_TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let seq = JOB_TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let short_sha = &sha[..sha.len().min(12)];
-        let tmp = std::env::temp_dir().join(format!(
-            "lain-snapshot-job-{}-{}-{}-{}-{}",
-            spec.repo,
+        let tmp = job_tmp_root(runner.data_dir(), &spec.repo).join(format!(
+            "{}-{}-{}-{}",
             short_sha,
             std::process::id(),
             seq,
             uuid::Uuid::new_v4().simple(),
         ));
-        let _ = std::fs::create_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp)
+            .map_err(|e| LainError::Io(format!("snapshot job: create {}: {e}", tmp.display())))?;
+        let _tmp_guard = RemoveDirOnDrop(tmp.clone());
 
         // Run a synchronous indexing pass against the per-job graph.
         // We use the `run_job_index` helper which avoids the async
@@ -425,7 +561,6 @@ fn run_job_inner(
 
         let bytes = std::fs::read(tmp.join("graph.bin"))
             .map_err(|e| LainError::Io(format!("snapshot job: read indexed graph: {e}")))?;
-        let _ = std::fs::remove_dir_all(&tmp);
         Ok((
             bytes.len() as u64,
             files,
@@ -628,6 +763,171 @@ mod tests {
         assert_eq!(claimed, 1, "one queued job must be claimed once");
         assert!(runner.claim_next().is_none());
         assert_eq!(runner.counters().indexing, 1);
+    }
+
+    /// A one-commit git repo; returns `(dir, sha)`.
+    fn one_commit_repo() -> (tempfile::TempDir, String) {
+        let src = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(src.path())
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+        git(&["init", "-q"]);
+        std::fs::write(src.path().join("main.rs"), "fn main() {}\n").unwrap();
+        git(&["add", "."]);
+        git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "-m",
+            "init",
+        ]);
+        let sha = git(&["rev-parse", "HEAD"]);
+        (src, sha)
+    }
+
+    /// Leave behind exactly what a job killed mid-index leaves: a
+    /// worktree registered in the mirror and a scratch graph.
+    fn crashed_job_residue(data: &Path, src: &Path, sha: &str) -> (PathBuf, PathBuf) {
+        ensure_mirror(data, "orders", &src.display().to_string()).unwrap();
+        let lock = RepoLock::acquire(data, "orders").unwrap();
+        let wt = worktree_add(data, "orders", sha).unwrap();
+        let scratch = job_tmp_root(data, "orders").join("deadbeef-1-0-x");
+        std::fs::create_dir_all(&scratch).unwrap();
+        std::fs::write(scratch.join("graph.bin"), b"partial").unwrap();
+        drop(lock);
+        assert!(wt.exists() && scratch.exists());
+        (wt, scratch)
+    }
+
+    fn mirror_worktrees(data: &Path) -> String {
+        let out = std::process::Command::new("git")
+            .args(["worktree", "list", "--porcelain"])
+            .current_dir(crate::federation::contracts::mirrors::mirror_path(
+                data, "orders",
+            ))
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap()
+    }
+
+    #[test]
+    fn sweep_removes_what_a_crashed_job_left_behind() {
+        let (src, sha) = one_commit_repo();
+        let data = tempfile::tempdir().unwrap();
+        let (wt, scratch) = crashed_job_residue(data.path(), src.path(), &sha);
+        assert!(mirror_worktrees(data.path()).contains(&sha));
+
+        let report = sweep_orphaned_job_state_in(data.path(), None);
+
+        assert_eq!(report.worktrees, 1, "{report:?}");
+        assert_eq!(report.job_tmp, 1, "{report:?}");
+        assert_eq!(report.busy_repos, 0);
+        assert!(!wt.exists(), "orphaned worktree still on disk");
+        assert!(!scratch.exists(), "orphaned scratch graph still on disk");
+        assert!(
+            !mirror_worktrees(data.path()).contains(&sha),
+            "the mirror still lists the removed worktree"
+        );
+        // A second sweep finds nothing.
+        let again = sweep_orphaned_job_state_in(data.path(), None);
+        assert_eq!((again.worktrees, again.job_tmp), (0, 0));
+    }
+
+    #[test]
+    fn sweep_leaves_a_repo_alone_while_a_job_holds_its_lock() {
+        let (src, sha) = one_commit_repo();
+        let data = tempfile::tempdir().unwrap();
+        let (wt, scratch) = crashed_job_residue(data.path(), src.path(), &sha);
+        let running_job = RepoLock::acquire(data.path(), "orders").unwrap();
+
+        let report = sweep_orphaned_job_state_in(data.path(), None);
+
+        assert_eq!(report.busy_repos, 1, "{report:?}");
+        assert_eq!((report.worktrees, report.job_tmp), (0, 0));
+        assert!(wt.exists() && scratch.exists(), "swept a live job's state");
+        drop(running_job);
+        let report = sweep_orphaned_job_state_in(data.path(), None);
+        assert_eq!((report.worktrees, report.job_tmp), (1, 1), "{report:?}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn legacy_tmp_sweep_removes_only_dead_owners() {
+        let tmp = tempfile::tempdir().unwrap();
+        let me = std::process::id();
+        // pid 4_000_000_000 is above any kernel pid_max.
+        let dead = tmp
+            .path()
+            .join("lain-snapshot-job-NeMo-Fabric-4fdf65a4b4c9-4000000000-3-abc");
+        let alive = tmp
+            .path()
+            .join(format!("lain-snapshot-job-orders-0123456789ab-{me}-0-def"));
+        // pid 1 is always running, and is not this process.
+        let other_live = tmp
+            .path()
+            .join("lain-snapshot-job-orders-0123456789ab-1-0-ghi");
+        let unrelated = tmp.path().join("lain-something-else-4000000000-1-x");
+        for d in [&dead, &alive, &other_live, &unrelated] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        assert_eq!(sweep_legacy_tmp(tmp.path()), 1);
+        assert!(!dead.exists());
+        assert!(alive.exists(), "removed this process's scratch dir");
+        assert!(
+            other_live.exists(),
+            "removed the scratch dir of another live process"
+        );
+        assert!(unrelated.exists(), "removed a dir that is not a job's");
+    }
+
+    #[test]
+    fn scratch_graphs_live_under_the_data_dir() {
+        let data = Path::new("/srv/lain-data");
+        assert_eq!(
+            job_tmp_root(data, "orders"),
+            data.join("job-tmp").join("orders")
+        );
+    }
+
+    #[test]
+    fn the_startup_sweep_entry_point_removes_a_crashed_jobs_state() {
+        let (src, sha) = one_commit_repo();
+        let data = tempfile::tempdir().unwrap();
+        let (wt, scratch) = crashed_job_residue(data.path(), src.path(), &sha);
+        let report = sweep_orphaned_job_state(data.path());
+        assert_eq!((report.worktrees, report.job_tmp), (1, 1), "{report:?}");
+        assert!(!wt.exists() && !scratch.exists());
+    }
+
+    #[test]
+    fn a_finished_job_leaves_no_worktree_or_scratch_dir() {
+        let (src, sha) = one_commit_repo();
+        let data = tempfile::tempdir().unwrap();
+        let runner = JobRunner::new(IndexCache::new(data.path()), data.path().to_path_buf());
+        let (state, _) = runner.submit(JobSpec {
+            repo: "orders".into(),
+            sha: sha.clone(),
+            analyzer_version: "0.9.0+c1".into(),
+            source: src.path().display().to_string(),
+        });
+        run_job(&runner, Arc::clone(&state)).unwrap();
+        assert!(matches!(*state.status.lock(), JobStatus::Done { .. }));
+        let leftovers = |p: PathBuf| {
+            std::fs::read_dir(p)
+                .map(|d| d.flatten().count())
+                .unwrap_or(0)
+        };
+        assert_eq!(leftovers(data.path().join("worktrees").join("orders")), 0);
+        assert_eq!(leftovers(job_tmp_root(data.path(), "orders")), 0);
     }
 
     #[test]

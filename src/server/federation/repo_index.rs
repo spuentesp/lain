@@ -1115,7 +1115,7 @@ impl RepoIndex {
     fn drain_queued_events(
         rx: &mut tokio::sync::mpsc::Receiver<notify::Result<notify::Event>>,
         outstanding: &std::sync::Arc<std::sync::atomic::AtomicU64>,
-        git_dir: &Path,
+        git_dirs: &[PathBuf],
     ) -> (usize, bool, bool) {
         let mut drained = 0usize;
         let mut batch_had_event = false;
@@ -1123,7 +1123,7 @@ impl RepoIndex {
         while let Ok(ev) = rx.try_recv() {
             outstanding.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
             batch_had_event |= ev.is_ok();
-            only_git_dir &= Self::event_only_in_git_dir(&ev, git_dir);
+            only_git_dir &= Self::event_only_in_git_dir(&ev, git_dirs);
             drained += 1;
         }
         (drained, batch_had_event, only_git_dir)
@@ -1131,11 +1131,34 @@ impl RepoIndex {
 
     /// True when every path of `event` lies inside the repository's
     /// `.git` directory. An error (no paths) is not counted as such.
-    fn event_only_in_git_dir(event: &notify::Result<notify::Event>, git_dir: &Path) -> bool {
+    /// `git_dirs` holds every spelling of that directory: the backend
+    /// may report the symlink-resolved path (macOS FSEvents does, and
+    /// its temp dirs live under the `/var` -> `/private/var` link), so
+    /// a checkout reached through a symlink is matched both ways.
+    fn event_only_in_git_dir(event: &notify::Result<notify::Event>, git_dirs: &[PathBuf]) -> bool {
         match event {
-            Ok(ev) => !ev.paths.is_empty() && ev.paths.iter().all(|p| p.starts_with(git_dir)),
+            Ok(ev) => {
+                !ev.paths.is_empty()
+                    && ev
+                        .paths
+                        .iter()
+                        .all(|p| git_dirs.iter().any(|d| p.starts_with(d)))
+            }
             Err(_) => false,
         }
+    }
+
+    /// `git_dir` and, when it differs, the path it resolves to through
+    /// symlinks: the spellings [`Self::event_only_in_git_dir`] accepts.
+    fn git_dir_spellings(git_dir: PathBuf) -> Vec<PathBuf> {
+        let resolved = std::fs::canonicalize(&git_dir).ok();
+        let mut dirs = vec![git_dir];
+        if let Some(r) = resolved {
+            if r != dirs[0] {
+                dirs.push(r);
+            }
+        }
+        dirs
     }
 
     /// Whether HEAD still names the commit the graph was last indexed
@@ -1158,7 +1181,7 @@ impl RepoIndex {
         use tokio::sync::mpsc;
 
         let path = self.source.local_path().to_path_buf();
-        let git_dir = path.join(".git");
+        let git_dirs = Self::git_dir_spellings(path.join(".git"));
         let weak = Arc::downgrade(self);
 
         // Bounded channel to hand events from notify's inotify thread to
@@ -1223,9 +1246,9 @@ impl RepoIndex {
                 // health stayed `ready`. One pass per batch keeps the
                 // semantics (the newest state is indexed) without the
                 // backlog multiplying the work.
-                let first_only_git_dir = Self::event_only_in_git_dir(&res, &git_dir);
+                let first_only_git_dir = Self::event_only_in_git_dir(&res, &git_dirs);
                 let (collapsed, batch_had_event, rest_only_git_dir) =
-                    Self::drain_queued_events(&mut rx, &outstanding, &git_dir);
+                    Self::drain_queued_events(&mut rx, &outstanding, &git_dirs);
                 if collapsed > 0 {
                     tracing::debug!(
                         "[federation] watcher coalesced {collapsed} queued event(s) into one reindex"
@@ -1930,6 +1953,7 @@ mod tests {
         assert_eq!(ri.repo_file_count(), 2, "an expired count is walked again");
     }
 
+    #[test]
     fn count_repo_files_counts_files_not_directories() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join("sub")).unwrap();
@@ -2171,7 +2195,7 @@ mod tests {
 
     #[test]
     fn event_only_in_git_dir_requires_every_path_inside_dot_git() {
-        let git_dir = Path::new("/r/.git");
+        let git_dir = &[PathBuf::from("/r/.git")][..];
         let ev = |paths: &[&str]| {
             let mut e = notify::Event::new(notify::EventKind::Any);
             for p in paths {
@@ -2197,6 +2221,44 @@ mod tests {
             &Err(notify::Error::generic("boom")),
             git_dir
         ));
+    }
+
+    /// macOS FSEvents reports paths with symlinks resolved; its temp
+    /// dirs sit under `/var` -> `/private/var`. A checkout reached
+    /// through a symlink must still recognise its own `.git` events, or
+    /// every branch a PR fetch creates re-indexes the repo.
+    #[cfg(unix)]
+    #[test]
+    fn git_dir_events_match_through_a_symlinked_checkout_path() {
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("real");
+        std::fs::create_dir_all(real.join(".git/refs/heads")).unwrap();
+        let link = root.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let dirs = RepoIndex::git_dir_spellings(link.join(".git"));
+        let resolved = std::fs::canonicalize(real.join(".git")).unwrap();
+        assert_eq!(dirs, vec![link.join(".git"), resolved.clone()]);
+
+        let ev = |p: PathBuf| Ok(notify::Event::new(notify::EventKind::Any).add_path(p));
+        assert!(RepoIndex::event_only_in_git_dir(
+            &ev(resolved.join("refs/heads/pr-base")),
+            &dirs
+        ));
+        assert!(RepoIndex::event_only_in_git_dir(
+            &ev(link.join(".git/refs/heads/pr-base")),
+            &dirs
+        ));
+        // A worktree file under either spelling is still a real change.
+        assert!(!RepoIndex::event_only_in_git_dir(
+            &ev(std::fs::canonicalize(&real).unwrap().join("lib.rs")),
+            &dirs
+        ));
+        // No symlink: one spelling only.
+        assert_eq!(
+            RepoIndex::git_dir_spellings(resolved.clone()),
+            vec![resolved]
+        );
     }
 
     /// A `git fetch` + `git branch` into a watched checkout (how a PR's
@@ -2441,7 +2503,7 @@ mod tests {
         }
 
         let (drained, batch_had_event, _) =
-            RepoIndex::drain_queued_events(&mut rx, &outstanding, Path::new("/r/.git"));
+            RepoIndex::drain_queued_events(&mut rx, &outstanding, &[PathBuf::from("/r/.git")]);
         assert_eq!(drained, 5, "every queued event must be consumed");
         assert!(batch_had_event, "real events must signal a pipeline run");
         assert_eq!(
@@ -2466,7 +2528,7 @@ mod tests {
             .unwrap();
 
         let (drained, batch_had_event, _) =
-            RepoIndex::drain_queued_events(&mut rx, &outstanding, Path::new("/r/.git"));
+            RepoIndex::drain_queued_events(&mut rx, &outstanding, &[PathBuf::from("/r/.git")]);
         assert_eq!(drained, 1);
         assert!(
             !batch_had_event,
