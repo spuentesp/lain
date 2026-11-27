@@ -22,10 +22,11 @@ All notable changes to LAIN are documented here. Versions follow
   Both spellings now match.
 - **The engine kept gigabytes of memory it no longer used.** libgit2,
   tree-sitter, zlib and the C++ runtime allocate through glibc, which
-  keeps freed memory in its arenas (Lain's own heap, mimalloc, gives it
-  back). Startup, every snapshot build and every snapshot index job left
-  0.7–1.2 GB behind. The server now trims the C heap after each of them
-  and once idle (`LAIN_HEAP_TRIM=0` turns it off; glibc builds only).
+  keeps freed memory in its arenas, and Lain's own allocator (mimalloc)
+  holds freed pages a while too. Startup, every snapshot build and every
+  snapshot index job left 0.7–1.2 GB behind. The server now returns both
+  allocators' free memory after each of them and once idle
+  (`LAIN_HEAP_TRIM=0` turns it off; glibc builds only).
   Two PR analyses (NVIDIA/OpenShell #4995 then #6003) on the Parallax Fly
   image, whole container: peaks 5.3 / 6.2 GB -> 4.3 / 4.3 GB, at rest
   4.8 GB -> 2.8 GB, same wall time.

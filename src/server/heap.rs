@@ -1,14 +1,16 @@
 //! Give the C libraries' freed heap back to the OS.
 //!
-//! Lain's Rust code allocates through mimalloc, which returns freed pages
-//! to the OS on its own. The C libraries it links (libgit2 reading blobs,
-//! tree-sitter parsing sources, zlib, the C++ runtime) allocate through
-//! glibc `malloc` instead, and glibc keeps what they free inside its
+//! Lain's Rust code allocates through mimalloc. The C libraries it links
+//! (libgit2 reading blobs, tree-sitter parsing sources, zlib, the C++
+//! runtime) allocate through glibc `malloc` instead, and glibc keeps what they free inside its
 //! per-thread arenas. Measured on the Parallax demo federation
 //! (`docs/plans/layered-snapshots.md`, phase 0): about 0.9 GB of a
 //! 1.47 GB engine right after startup, and another ~0.7 GB after the
 //! first snapshot build, was such freed-but-kept glibc memory. One
-//! `malloc_trim(0)` returned all of it.
+//! `malloc_trim(0)` returned all of it. mimalloc also keeps freed pages a
+//! while before returning them: after a snapshot index job, a forced
+//! `mi_collect` gave back another ~0.3 GB, so [`trim`] runs both
+//! ([`crate::server::mem_probe::allocator_collect`]).
 //!
 //! [`trim`] runs at the points that churn the C heap the most: the end of
 //! startup indexing, each snapshot build, each snapshot index job. A
@@ -82,7 +84,7 @@ pub fn trim(reason: &str) -> u64 {
     }
     let before = crate::server::mem_probe::rss_and_peak_kb().map(|(rss, _)| rss);
     let started = std::time::Instant::now();
-    trim_raw();
+    crate::server::mem_probe::allocator_collect();
     let elapsed_ms = started.elapsed().as_millis() as u64;
     let after = crate::server::mem_probe::rss_and_peak_kb().map(|(rss, _)| rss);
     TRIMS.fetch_add(1, Ordering::Relaxed);
