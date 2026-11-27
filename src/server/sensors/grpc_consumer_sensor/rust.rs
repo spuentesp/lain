@@ -397,7 +397,12 @@ pub fn follow_rust_grpc_wrappers(
     let mut local_types = BTreeSet::new();
     let mut wrappers = Vec::new();
     let mut counts = HashMap::new();
-    let mut trees = BTreeMap::new();
+    // Files the first pass parsed cleanly. Their trees are not kept: on a
+    // large Rust repository (OpenShell, ~780 files) holding every tree until
+    // the second pass cost about 0.85 GB at once. The second pass parses each
+    // file again and drops its tree before the next, so a repository costs
+    // two parses but at most one tree.
+    let mut parsed = BTreeSet::new();
     for (path, src) in sources {
         let Some(tree) = parse_rust_source(src) else {
             continue;
@@ -408,7 +413,7 @@ pub fn follow_rust_grpc_wrappers(
         let mut ctx = Context::new(src, path, &direct, &compiled.generated);
         ctx.index(tree.root_node(), SyntaxContext::default());
         let calls = detect_with_tree(src, path, &direct, &compiled, &tree)?;
-        trees.insert(path.clone(), tree.clone());
+        parsed.insert(path.as_str());
         for (name, methods) in &ctx.methods {
             *counts.entry(name.clone()).or_insert(0) += methods.len();
             if config.deny_methods.contains(name) {
@@ -479,7 +484,11 @@ pub fn follow_rust_grpc_wrappers(
     config.local_wrapper_types = local_types.difference(&vendored_types).cloned().collect();
     let mut files = BTreeMap::new();
     for (path, source) in sources {
-        let (candidates, probes) = if let Some(tree) = trees.get(path) {
+        let tree = parsed
+            .contains(path.as_str())
+            .then(|| parse_rust_source(source))
+            .flatten();
+        let (candidates, probes) = if let Some(tree) = &tree {
             let candidates = detect_with_tree(source, path, config, &compiled, tree)?;
             let mapped = candidates
                 .iter()
@@ -1321,14 +1330,19 @@ impl<'a> Context<'a> {
 mod review_cache_regressions {
     use super::*;
     #[test]
-    fn repository_analysis_parses_once_and_invalidates_source_and_config() {
+    fn repository_analysis_is_cached_and_invalidated_by_source_and_config() {
         let source =
             "fn once_review(c: api::orders_client::OrdersClient<Channel>) { c.review_rpc(); }";
+        // One analysis parses each file twice: once to build the wrapper
+        // table, once to detect candidates against it (the trees are not
+        // kept between the two; see `follow_rust_grpc_wrappers`). A cache
+        // hit parses nothing; a source or config change runs one analysis.
+        const PASS: usize = 2;
         let mut sources = vec![("src/once_review.rs".into(), source.to_string())];
         let before = PARSE_RUNS.with(|n| n.get());
         let mut config = RustGrpcConfig::from_sources(None, None).unwrap();
         follow_rust_grpc_wrappers(&mut config, &sources).unwrap();
-        assert_eq!(PARSE_RUNS.with(|n| n.get()), before + 1);
+        assert_eq!(PARSE_RUNS.with(|n| n.get()), before + PASS);
         assert_eq!(
             detect_rust_grpc_candidates(source, &sources[0].0, &config)
                 .unwrap()
@@ -1338,13 +1352,13 @@ mod review_cache_regressions {
         let _ = super::super::semantic::probes(source, &sources[0].0, &config);
         let mut next_pass = RustGrpcConfig::from_sources(None, None).unwrap();
         follow_rust_grpc_wrappers(&mut next_pass, &sources).unwrap();
-        assert_eq!(PARSE_RUNS.with(|n| n.get()), before + 1);
+        assert_eq!(PARSE_RUNS.with(|n| n.get()), before + PASS);
         sources[0].1.push_str("\nfn edited_review() {}");
         follow_rust_grpc_wrappers(&mut next_pass, &sources).unwrap();
-        assert_eq!(PARSE_RUNS.with(|n| n.get()), before + 2);
+        assert_eq!(PARSE_RUNS.with(|n| n.get()), before + 2 * PASS);
         next_pass.deny_methods.push("review_rpc".into());
         follow_rust_grpc_wrappers(&mut next_pass, &sources).unwrap();
-        assert_eq!(PARSE_RUNS.with(|n| n.get()), before + 3);
+        assert_eq!(PARSE_RUNS.with(|n| n.get()), before + 3 * PASS);
         assert!(
             detect_rust_grpc_candidates(&sources[0].1, &sources[0].0, &next_pass)
                 .unwrap()
