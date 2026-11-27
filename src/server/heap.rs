@@ -127,7 +127,10 @@ pub fn trim_if_idle_due(now_unix: i64) -> bool {
     true
 }
 
-#[cfg(all(test, target_os = "linux", target_env = "gnu"))]
+// Plain `#[cfg(test)]` on the module (platform gates inside) so tooling
+// such as cargo-mutants recognises it as test code.
+#[cfg(test)]
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 pub(crate) mod tests {
     use super::*;
 
