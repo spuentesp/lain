@@ -497,7 +497,7 @@ pub(crate) async fn call_tool_in_process(
     let status = HandlerStatus::in_process(federation.map(|f| f.list_repos().len()).unwrap_or(0));
     let workspaces = server.workspaces_handle();
     let reload_bus = server.reload_bus();
-    let (text, is_error, structured) = dispatch_tool_call(
+    let (text, is_error, structured) = dispatch_tool_call_probed(
         executor,
         federation,
         workspaces.as_ref(),
@@ -912,12 +912,12 @@ async fn dispatch_raw_snapshot(
     })
 }
 
-/// Unified MCP tool dispatcher shared by Stdio and HTTP transports.
-///
-/// Dispatches server-status, reload, multiplayer presence, federation,
-/// workspace, and core graph tools. Returns `(payload_text, is_error)`.
+/// [`dispatch_tool_call`], then the per-call memory probe and the idle
+/// heap-trim bookkeeping. Every transport calls this one. The dispatcher
+/// itself keeps its name: `scripts/check-mcp-dispatch-shape.py` guards
+/// the body of `fn dispatch_tool_call`.
 #[allow(clippy::too_many_arguments)]
-async fn dispatch_tool_call(
+async fn dispatch_tool_call_probed(
     executor: &ToolExecutor,
     federation: Option<&FederatedIndex>,
     workspaces: Option<&Arc<RwLock<crate::federation::workspace::WorkspacesFile>>>,
@@ -928,7 +928,7 @@ async fn dispatch_tool_call(
     name: &str,
     args_map: Map<String, serde_json::Value>,
 ) -> (String, bool, Option<serde_json::Value>) {
-    let out = dispatch_tool_call_inner(
+    let out = dispatch_tool_call(
         executor, federation, workspaces, status, reload_bus, server, snapshots, name, args_map,
     )
     .await;
@@ -940,8 +940,12 @@ async fn dispatch_tool_call(
     out
 }
 
+/// Unified MCP tool dispatcher shared by Stdio and HTTP transports.
+///
+/// Dispatches server-status, reload, multiplayer presence, federation,
+/// workspace, and core graph tools. Returns `(payload_text, is_error)`.
 #[allow(clippy::too_many_arguments)]
-async fn dispatch_tool_call_inner(
+async fn dispatch_tool_call(
     executor: &ToolExecutor,
     federation: Option<&FederatedIndex>,
     workspaces: Option<&Arc<RwLock<crate::federation::workspace::WorkspacesFile>>>,
@@ -1181,7 +1185,7 @@ impl LainHandler {
             ));
         }
 
-        let (text, is_error, structured) = dispatch_tool_call(
+        let (text, is_error, structured) = dispatch_tool_call_probed(
             &self.executor,
             self.federation.as_deref(),
             self.workspaces.as_ref(),
@@ -1649,7 +1653,7 @@ impl LainMcpServer {
                 .map(|w| w.read().workspaces.len())
                 .unwrap_or(0),
         };
-        dispatch_tool_call(
+        dispatch_tool_call_probed(
             &self.executor,
             self.federation.as_deref(),
             self.workspaces.as_ref(),
@@ -2772,7 +2776,7 @@ async fn handle_request(
                             return Ok(jsonrpc_tool_result(id, &text, is_error, Some(value)));
                         }
 
-                        let (text, is_error, structured) = dispatch_tool_call(
+                        let (text, is_error, structured) = dispatch_tool_call_probed(
                             &executor,
                             federation.as_deref(),
                             workspaces.as_ref(),
@@ -4423,7 +4427,7 @@ mod tests {
 
         let mut args = Map::new();
         args.insert("job_id".into(), serde_json::json!("job-123"));
-        let (text, _is_err, _) = dispatch_tool_call(
+        let (text, _is_err, _) = dispatch_tool_call_probed(
             &executor,
             Some(&fed),
             None,
@@ -4444,7 +4448,7 @@ mod tests {
         let mut args = Map::new();
         args.insert("key".into(), serde_json::json!("http:GET /x"));
         args.insert("snapshot".into(), serde_json::json!("live"));
-        let (text, _is_err, _) = dispatch_tool_call(
+        let (text, _is_err, _) = dispatch_tool_call_probed(
             &executor,
             Some(&fed),
             None,
