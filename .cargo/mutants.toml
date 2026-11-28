@@ -73,4 +73,33 @@ exclude_re = [
     # With the parse cache disabled the lookup has no slot, so negating the
     # enabled check takes the same path and returns the same tree.
     'parse_cache\.rs.*delete ! in get_or_parse',
+    # heap.rs: the test process runs on glibc with LAIN_HEAP_TRIM unset, so
+    # `enabled()` and `supported()` are already true, and `!enabled() ||
+    # !supported()` (the early return) is false either way round.
+    'heap\.rs.*replace (enabled|supported) -> bool with true',
+    'heap\.rs.*replace \|\| with && in trim$',
+    'heap\.rs:\d+:19: replace \|\| with && in trim_if_idle_due',
+    # mem_probe.rs: the probe is off in the test process (LAIN_MEM_PROBE and
+    # LAIN_MEM_PROBE_COLLECT unset), so these wrappers return what the mutant
+    # returns; flag parsing (`flag_on`) and the work (`sample_and_reset`)
+    # are tested directly.
+    'mem_probe\.rs.*replace enabled -> bool with false',
+    'mem_probe\.rs.*replace collect_enabled -> bool with (true|false)',
+    'mem_probe\.rs.*replace phase -> Option<Sample> with None',
+    # A live /proc read that changes between two reads; the parser
+    # (`status_field_kb`) is tested on fixed text.
+    'mem_probe\.rs.*replace swap_kb -> u64 with (0|1)',
+    # Probe-only logging (LAIN_MEM_PROBE=1): the histogram itself is
+    # `cross_repo_edge_histogram`, tested; the Drop impl only logs.
+    'manager\.rs.*replace log_cross_repo_edge_histogram with \(\)',
+    'manager\.rs.*replace <impl Drop for SnapshotFederation>::drop with \(\)',
+    # `evict_idle_residents(..) > 0` only decides whether the probe logs; the
+    # eviction itself happens in the call either way.
+    'manager\.rs.*replace > with (==|<|>=) in snapshot_worker_loop',
+    # jobs.rs sweep: `!= SweepReport::default()` only decides whether to log.
+    # `worktree_remove(..).is_err() || path.exists()`: git either removes the
+    # directory (is_err false, path gone) or fails (is_err true, path still
+    # there), so `&&` and `||` take the same branch.
+    'jobs\.rs.*replace != with == in sweep_orphaned_job_state_in',
+    'jobs\.rs.*replace \|\| with && in sweep_orphaned_job_state_in',
 ]

@@ -151,6 +151,20 @@ impl SnapshotFederation {
     }
 }
 
+impl Drop for SnapshotFederation {
+    fn drop(&mut self) {
+        // `LAIN_MEM_PROBE=1`: an evicted federation must actually be freed;
+        // this line (and the probe after it) is how the harness checks that
+        // nothing else still holds an `Arc` to it.
+        if crate::server::mem_probe::enabled() {
+            crate::server::mem_probe::phase(
+                "federation_dropped",
+                &format!("{} nodes={}", self.snapshot_id, self.backend.node_count()),
+            );
+        }
+    }
+}
+
 /// Input shape for `prepare_snapshot`. Built from the tool's `args`
 /// JSON after `repo_not_registered` / `ref_not_found` validation;
 /// the manager does the rest.
@@ -225,6 +239,24 @@ impl SnapshotManager {
             Ok(0) => {}
             Ok(n) => info!("snapshot retention removed {n} expired record(s)"),
             Err(e) => warn!("snapshot retention could not run: {e}"),
+        }
+        // Cache entries of another analyzer version are never read by this
+        // build; remove the ones no build has used within the retention
+        // window (another build may share this data dir).
+        let unused_since = now_unix().saturating_sub(
+            i64::try_from(mgr.retention_days.saturating_mul(86_400)).unwrap_or(i64::MAX),
+        );
+        match mgr.cache.remove_other_analyzer_versions(
+            &crate::federation::contracts::analyzer_version(),
+            unused_since,
+        ) {
+            Ok((0, _)) => {}
+            Ok((n, bytes)) => info!(
+                removed = n,
+                freed_mb = bytes / (1024 * 1024),
+                "index cache: removed entries of other analyzer versions"
+            ),
+            Err(e) => warn!("index cache: stale analyzer versions not removed: {e}"),
         }
         mgr
     }
@@ -921,6 +953,10 @@ impl SnapshotManager {
         if self.worker_handles.lock().is_some() {
             return;
         }
+        // Before any job runs: remove worktrees and scratch graphs that a
+        // crashed or killed process left behind (they are never reused
+        // unless the very same sha is indexed again).
+        super::jobs::sweep_orphaned_job_state(&self.data_dir);
         let n_workers = snapshot_workers();
         info!(
             data_dir = %self.data_dir.display(),
@@ -1302,6 +1338,7 @@ impl SnapshotManager {
             .data_dir
             .join("snapshots")
             .join(format!("{}.ephemeral", record.id));
+        crate::server::mem_probe::phase("snapshot_build_start", &record.id);
         let backend = Arc::new(PetgraphBackend::ephemeral(&ephemeral_path));
         let residency = Arc::new(ResidencyTracker::new());
 
@@ -1331,7 +1368,11 @@ impl SnapshotManager {
             let key = CacheKey::new(repo, commit, &record.analyzer_version);
             let bytes = self.cache.read_graph_bytes(&key)?;
             let db = hydrate_graph(&bytes, &ephemeral_path)?;
+            crate::server::mem_probe::phase("hydrate", repo);
             project_graph(&db, repo, backend.clone())?;
+            drop(db);
+            drop(bytes);
+            crate::server::mem_probe::phase("project", repo);
         }
 
         // Run the contract rejoin. The `from_snapshot` hook the
@@ -1364,12 +1405,28 @@ impl SnapshotManager {
                     .map_err(|e| LainError::Other(format!("Rust RPC source is not UTF-8: {e}")))
             })?;
         let _ = rust_nodes; // resolve already installed facts in the ephemeral backend
+        crate::server::mem_probe::phase("rust_rpc", &record.id);
         let mut contract_index = build_snapshot_contract_index_with_rust_details(
             backend.as_ref(),
             &config,
             &rust_details,
         )?;
         crate::federation::contracts::rust_rpc::attach(&mut contract_index, rust_details);
+        // The build read and parsed every Rust source of the snapshot through
+        // libgit2 and tree-sitter (glibc heap); give that back now.
+        crate::server::heap::trim("snapshot_build");
+        if crate::server::mem_probe::enabled() {
+            log_cross_repo_edge_histogram(backend.as_ref(), &record.id);
+        }
+        crate::server::mem_probe::phase(
+            "join",
+            &format!(
+                "{} nodes={} edges={}",
+                record.id,
+                backend.node_count(),
+                backend.edge_count()
+            ),
+        );
         let fed = Arc::new(SnapshotFederation {
             snapshot_id: record.id.clone(),
             backend,
@@ -1591,6 +1648,39 @@ impl SnapshotManager {
     pub fn evict_resident(self: &Arc<Self>, snapshot_id: &str) -> bool {
         self.resident.lock().remove(snapshot_id).is_some()
     }
+}
+
+/// Count a snapshot's edges, and those whose endpoints sit in two
+/// different repos by edge type. Layered snapshots
+/// (`docs/plans/layered-snapshots.md`) keep per-repo layers plus an
+/// overlay; every cross-repo edge type the projection itself produces (not
+/// the join) must be owned by one side or by the overlay. Measured on the
+/// demo snapshots: only the join's `Binds`.
+fn cross_repo_edge_histogram(backend: &PetgraphBackend) -> (usize, BTreeMap<String, usize>) {
+    fn repo_of(id: &str) -> &str {
+        id.split_once(':').map(|(r, _)| r).unwrap_or("")
+    }
+    let mut cross: BTreeMap<String, usize> = BTreeMap::new();
+    let mut total = 0usize;
+    let _ = backend.visit_edges(&mut |e| {
+        total += 1;
+        if repo_of(&e.source_id) != repo_of(&e.target_id) {
+            *cross.entry(format!("{:?}", e.edge_type)).or_default() += 1;
+        }
+    });
+    (total, cross)
+}
+
+/// `LAIN_MEM_PROBE=1` only: log [`cross_repo_edge_histogram`].
+fn log_cross_repo_edge_histogram(backend: &PetgraphBackend, snapshot_id: &str) {
+    let (total, cross) = cross_repo_edge_histogram(backend);
+    info!(
+        target: "lain::mem_probe",
+        snapshot = snapshot_id,
+        total_edges = total,
+        cross_repo = ?cross,
+        "mem_probe_edges"
+    );
 }
 
 /// Bounded retries when a joined build is evicted before the joiner holds it.
@@ -2009,7 +2099,10 @@ fn snapshot_worker_loop(mgr: Arc<SnapshotManager>) {
         if let Some(state) = next {
             idle_polls = 0;
             info!(repo = %state.spec.repo, sha = %state.spec.sha, "snapshot worker: picked job");
+            let job_label = format!("{}@{}", state.spec.repo, state.spec.sha);
             let result = run_job(&mgr.runner, state);
+            crate::server::heap::trim("index_job");
+            crate::server::mem_probe::phase("index_job", &job_label);
             match &result {
                 Ok(_) => info!("snapshot worker: job finished OK"),
                 Err(e) => warn!(error = %e, "snapshot worker: job failed"),
@@ -2018,7 +2111,12 @@ fn snapshot_worker_loop(mgr: Arc<SnapshotManager>) {
             idle_polls += 1;
             // Every ~5 s of idleness (50 polls of 100 ms).
             if idle_polls.is_multiple_of(50) {
-                mgr.evict_idle_residents(resident_idle_secs, now_unix());
+                if mgr.evict_idle_residents(resident_idle_secs, now_unix()) > 0 {
+                    crate::server::mem_probe::phase("evict_idle", "");
+                }
+                // Live re-index, reloads and tool calls churn the C heap too;
+                // trim once things are quiet (rate-limited, one thread).
+                crate::server::heap::trim_if_idle_due(now_unix());
             }
             if idle_polls == 50 {
                 info!(
@@ -2966,6 +3064,73 @@ repos:
             "joiner does not remove the in_flight slot; \
              only the builder's atomic publish+remove does"
         );
+    }
+
+    /// A snapshot build hands the C heap (libgit2 blob reads, tree-sitter
+    /// parses) back to the OS when it finishes: on the Parallax demo
+    /// federation that was ~0.7 GB kept per process otherwise.
+    #[test]
+    fn building_a_snapshot_federation_trims_the_c_heap() {
+        use crate::server::federation::contracts::snapshots::record::SnapshotState;
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = SnapshotManager::with_cap(dir.path(), IndexCache::new(dir.path()), 2);
+        let record = SnapshotRecord {
+            id: "snap_trims_heap".into(),
+            repos: BTreeMap::new(),
+            excluded: Vec::new(),
+            refs_: BTreeMap::new(),
+            join_config: serde_json::to_value(ContractFederationConfig::default()).unwrap(),
+            config_hash: String::new(),
+            analyzer_version: String::new(),
+            state: SnapshotState::Ready,
+            repo_states: BTreeMap::new(),
+            created_unix: now_unix(),
+            last_access_unix: now_unix(),
+        };
+        let before = crate::server::heap::trim_count();
+        let (_fed, _hold) = mgr.from_snapshot(&record).expect("empty snapshot builds");
+        let trimmed = crate::server::heap::trim_count() > before;
+        if cfg!(all(target_os = "linux", target_env = "gnu"))
+            && std::env::var_os("LAIN_HEAP_TRIM").is_none()
+        {
+            assert!(trimmed, "a snapshot build on glibc did not trim");
+        } else {
+            assert!(!trimmed, "trimmed where trimming is off or unsupported");
+        }
+    }
+
+    #[test]
+    fn cross_repo_edges_are_counted_by_type() {
+        use crate::schema::{EdgeType, NodeType};
+        let dir = tempfile::tempdir().unwrap();
+        let backend = PetgraphBackend::ephemeral(dir.path());
+        let node = |repo: &str, name: &str| {
+            let mut n = GraphNode::new(NodeType::Function, name.into(), "m.rs".into());
+            n.id = GlobalId::new(
+                &RepoId::new(repo).unwrap(),
+                NodeType::Function,
+                "m.rs",
+                name,
+                Some(1),
+            )
+            .as_str()
+            .to_string();
+            n
+        };
+        let (x, y, z) = (node("a", "x"), node("a", "y"), node("b", "z"));
+        backend
+            .upsert_nodes_batch(&[x.clone(), y.clone(), z.clone()])
+            .unwrap();
+        backend
+            .upsert_edges_batch(&[
+                GraphEdge::new(EdgeType::Calls, x.id.clone(), y.id.clone()),
+                GraphEdge::new(EdgeType::Binds, y.id.clone(), z.id.clone()),
+                GraphEdge::new(EdgeType::Binds, z.id.clone(), x.id.clone()),
+            ])
+            .unwrap();
+        let (total, cross) = cross_repo_edge_histogram(&backend);
+        assert_eq!(total, 3);
+        assert_eq!(cross, BTreeMap::from([("Binds".to_string(), 2)]));
     }
 
     /// `install_resident_held` returns the entry already held: a concurrent

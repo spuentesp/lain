@@ -389,6 +389,31 @@ impl RepoLock {
         Ok(Self { file, path })
     }
 
+    /// Like [`Self::acquire`] but never waits: `Ok(None)` when another
+    /// holder (a running snapshot job, in this or another process) has
+    /// the lock. The startup sweep of orphaned job state uses it so it
+    /// never blocks behind, or interferes with, a live job.
+    pub fn try_acquire(data_dir: &Path, repo: &str) -> Result<Option<Self>, MirrorError> {
+        let path = lock_path(data_dir, repo);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(Self { file, path })),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(e)) => Err(MirrorError::Io(format!(
+                "failed to try-lock {}: {e}",
+                path.display()
+            ))),
+        }
+    }
+
     /// The lock-file path. Surfaced for diagnostics (the
     /// `LockContention` test logs it).
     pub fn path(&self) -> &Path {

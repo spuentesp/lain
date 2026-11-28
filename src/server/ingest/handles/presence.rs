@@ -41,6 +41,10 @@ pub struct PresenceLayer {
     /// Loaded tuning for the state-file lock. Snapshot at construction
     /// so a tuning.toml reload doesn't change mid-flight behaviour.
     lock_timeouts: LockTimeouts,
+    /// Critical sections this process has completed. A caller waiting
+    /// for the lock reads it to tell a busy queue (it moves) from a
+    /// stuck holder (it does not).
+    sections_completed: std::sync::atomic::AtomicU64,
 }
 
 /// State-file lock timeouts. Snapshotted from `PresenceConfig` at
@@ -90,6 +94,7 @@ impl PresenceLayer {
                 retry_interval_ms: presence_config.state_lock_retry_interval_ms,
                 stale_after_secs: presence_config.state_lock_stale_after_secs,
             },
+            sections_completed: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -285,6 +290,8 @@ impl PresenceLayer {
             self.activity.clone(),
         );
         let result = f();
+        self.sections_completed
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if let Some(prev) = prev_presence_cb {
             self.presence.restore_persist_callback(prev);
         }
@@ -292,6 +299,50 @@ impl PresenceLayer {
             return Err(CoordinationError::PersistFailed(e));
         }
         Ok(result)
+    }
+
+    /// [`Self::with_shared_presence`], retrying while the lock is busy
+    /// but the queue for it moves.
+    ///
+    /// Gives up with `Unavailable` once no critical section in this
+    /// process has completed for `quiet` (a stuck holder, or a peer
+    /// process that keeps it), or after `ceiling` in all: the lock is
+    /// not FIFO, so a steady stream of other callers could otherwise
+    /// keep one waiter out forever. A fixed budget instead failed
+    /// callers that were merely queued: ten agents claiming at once
+    /// each hold the lock for a zoanthrope round trip, and on a slow
+    /// Windows runner the tenth waited past 5 s
+    /// (`linearizability_n10_stress`). Other errors return at once.
+    pub fn with_shared_presence_patient<T>(
+        &self,
+        mut f: impl FnMut() -> T,
+        quiet: std::time::Duration,
+        ceiling: std::time::Duration,
+    ) -> Result<T, CoordinationError> {
+        use std::sync::atomic::Ordering;
+        use std::time::Instant;
+        let start = Instant::now();
+        let mut seen = self.sections_completed.load(Ordering::Relaxed);
+        let mut last_progress = start;
+        loop {
+            match self.with_shared_presence(&mut f) {
+                Err(CoordinationError::Unavailable) => {
+                    let now = Instant::now();
+                    let done = self.sections_completed.load(Ordering::Relaxed);
+                    if done != seen {
+                        seen = done;
+                        last_progress = now;
+                    }
+                    if now.duration_since(last_progress) >= quiet
+                        || now.duration_since(start) >= ceiling
+                    {
+                        return Err(CoordinationError::Unavailable);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+                out => return out,
+            }
+        }
     }
 
     /// Read-only half of [`Self::with_shared_presence`]: refresh from
@@ -435,6 +486,136 @@ mod tests {
         assert_eq!(l.presence_event_tx().receiver_count(), 0);
     }
 
+    /// A layer whose single lock attempt gives up after 50 ms, plus the
+    /// tempdir its workspace lives in.
+    fn fast_lock_layer() -> (tempfile::TempDir, PresenceLayer) {
+        let tmp = tempdir();
+        let repos = tmp.path().join("repos.yaml");
+        std::fs::write(&repos, "").unwrap();
+        let cfg = crate::server::tuning::PresenceConfig {
+            state_lock_acquire_timeout_ms: 50,
+            state_lock_retry_interval_ms: 5,
+            state_lock_stale_after_secs: 60,
+            ..crate::server::tuning::PresenceConfig::default()
+        };
+        let (tx, _rx) = broadcast::channel(8);
+        let coordination = Arc::new(CoordinationProxy::new(tmp.path().to_path_buf()));
+        let intent = Arc::new(IntentBoard::new(Arc::clone(&coordination)));
+        let l = PresenceLayer::new(
+            Arc::new(Mutex::new(None)),
+            Arc::new(PresenceRegistry::new()),
+            coordination,
+            intent,
+            Arc::new(crate::server::activity::ActivityTracker::new()),
+            tx,
+            Some(&repos),
+            tmp.path(),
+            &cfg,
+        );
+        if let Some(parent) = l.state_path().parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        (tmp, l)
+    }
+
+    /// Holds the layer's state-file lock the way a peer process would.
+    fn hold_lock_as_peer(l: &PresenceLayer) -> std::fs::File {
+        let peer = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(l.state_path().with_extension("json.lock"))
+            .unwrap();
+        peer.try_lock().expect("peer takes the lock");
+        peer
+    }
+
+    /// Eight callers each hold the section for 250 ms: the last one
+    /// waits ~2 s, far past the 600 ms no-progress window, yet the
+    /// queue keeps moving, so every caller gets in. With a fixed
+    /// 600 ms budget most of them came back `Unavailable`.
+    #[test]
+    fn patient_presence_waits_out_a_queue_that_keeps_moving() {
+        let (_tmp, l) = fast_lock_layer();
+        let quiet = std::time::Duration::from_millis(600);
+        let ceiling = std::time::Duration::from_secs(60);
+        let results: Vec<Result<(), CoordinationError>> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| {
+                    s.spawn(|| {
+                        l.with_shared_presence_patient(
+                            || std::thread::sleep(std::time::Duration::from_millis(250)),
+                            quiet,
+                            ceiling,
+                        )
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        assert_eq!(results, vec![Ok(()); 8]);
+    }
+
+    /// A holder that never lets go: nothing completes, so the caller
+    /// gives up after the no-progress window, long before the ceiling.
+    #[test]
+    fn patient_presence_gives_up_on_a_stuck_holder_after_the_quiet_window() {
+        let (_tmp, l) = fast_lock_layer();
+        let _peer = hold_lock_as_peer(&l);
+        let started = std::time::Instant::now();
+        let out = l.with_shared_presence_patient(
+            || (),
+            std::time::Duration::from_millis(300),
+            std::time::Duration::from_secs(60),
+        );
+        let waited = started.elapsed();
+        assert_eq!(out, Err(CoordinationError::Unavailable));
+        assert!(
+            waited >= std::time::Duration::from_millis(300)
+                && waited < std::time::Duration::from_secs(10),
+            "gave up after {waited:?}"
+        );
+    }
+
+    /// The ceiling bounds the wait even when the no-progress window
+    /// alone would keep the caller waiting.
+    #[test]
+    fn patient_presence_stops_at_the_ceiling() {
+        let (_tmp, l) = fast_lock_layer();
+        let _peer = hold_lock_as_peer(&l);
+        let started = std::time::Instant::now();
+        let out = l.with_shared_presence_patient(
+            || (),
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_millis(300),
+        );
+        let waited = started.elapsed();
+        assert_eq!(out, Err(CoordinationError::Unavailable));
+        assert!(
+            waited >= std::time::Duration::from_millis(300)
+                && waited < std::time::Duration::from_secs(10),
+            "gave up after {waited:?}"
+        );
+    }
+
+    /// Errors other than a busy lock are not retried.
+    #[test]
+    fn patient_presence_returns_other_errors_at_once() {
+        let (_tmp, l) = fast_lock_layer();
+        std::fs::create_dir_all(l.state_path()).unwrap();
+        let mut calls = 0;
+        let out = l.with_shared_presence_patient(
+            || calls += 1,
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_secs(60),
+        );
+        assert!(
+            matches!(out, Err(CoordinationError::RefreshFailed(_))),
+            "{out:?}"
+        );
+        assert_eq!(calls, 0);
+    }
+
     /// Unit test for fail-closed: `with_shared_presence` must
     /// return `Err(CoordinationError::Unavailable)` when the
     /// state-file lock can't be acquired, so the agent sees a
@@ -478,6 +659,7 @@ mod tests {
                 retry_interval_ms: short_timeouts.state_lock_retry_interval_ms,
                 stale_after_secs: short_timeouts.state_lock_stale_after_secs,
             },
+            sections_completed: std::sync::atomic::AtomicU64::new(0),
         };
 
         // Hold the lock from another handle (as a peer process would) so
@@ -547,6 +729,7 @@ mod tests {
                 retry_interval_ms: cfg.state_lock_retry_interval_ms,
                 stale_after_secs: cfg.state_lock_stale_after_secs,
             },
+            sections_completed: std::sync::atomic::AtomicU64::new(0),
         };
 
         // Replace the state-file *content* path with a directory.

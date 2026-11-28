@@ -3,6 +3,66 @@
 All notable changes to LAIN are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.16.3] - 2026-11-27
+
+### Fixed
+
+- **Agents claiming files at the same time could get "presence coordination
+  unavailable" instead of a grant or a conflict.** Each claim holds the
+  presence lock for a zoanthrope round trip, and a waiter gave up after a
+  fixed 5 s, so with ten agents on a slow machine the last ones in the queue
+  failed (seen as `linearizability_n10_stress` flaking on Windows CI). A
+  claim now keeps waiting while other claims keep completing, up to 30 s,
+  and still gives up after 5 s if the holder is stuck.
+- **The gRPC consumer sensor held a parse tree of every Rust file at once.**
+  Following wrapper methods takes two passes over a repository, and the
+  first kept each file's tree-sitter tree for the second: about 0.85 GB on
+  OpenShell (~780 Rust files), the largest part of a snapshot index job's
+  peak. The second pass now parses each file again and drops it before the
+  next: about 0.17 GB, at the cost of a second parse (+4 s per OpenShell
+  job, ~14%). Same candidates either way.
+- **Indexing a Rust repository built it.** rust-analyzer asks cargo for crate
+  metadata, so it wrote the workspace's own `target/` — gigabytes of
+  regenerable build output in a repository Lain was only asked to read. The
+  Rust language server now gets a cargo target directory of Lain's own,
+  under `~/.local/lain/lsp-target/`, one per workspace so two repositories
+  never contend for the same cargo lock. An operator who already set
+  `CARGO_TARGET_DIR` chose where cargo writes, and that choice is left
+  alone.
+- **On macOS a PR fetch still re-indexed the watched repo.** The watcher
+  skips events that stay inside `.git` and leave HEAD alone, but FSEvents
+  reports paths with symlinks resolved, so a checkout under a symlink (any
+  macOS temp dir: `/var` -> `/private/var`) never matched its own `.git`.
+  Both spellings now match.
+- **The engine kept gigabytes of memory it no longer used.** libgit2,
+  tree-sitter, zlib and the C++ runtime allocate through glibc, which
+  keeps freed memory in its arenas, and Lain's own allocator (mimalloc)
+  holds freed pages a while too. Startup, every snapshot build and every
+  snapshot index job left 0.7–1.2 GB behind. The server now returns both
+  allocators' free memory after each of them and once idle
+  (`LAIN_HEAP_TRIM=0` turns it off; glibc builds only).
+  Two PR analyses (NVIDIA/OpenShell #4995 then #6003) on the Parallax Fly
+  image, whole container: peaks 5.3 / 6.2 GB -> 4.3 / 4.3 GB, at rest
+  4.8 GB -> 2.8 GB, same wall time.
+- **A snapshot job killed mid-index left its worktree and scratch graph
+  behind for good** (the scratch graph in `$TMPDIR`, which is RAM on a
+  tmpfs `/tmp`; an indexing error leaked it too). The scratch graph now
+  lives under `<data_dir>/job-tmp/` and is removed on every exit path,
+  and starting the snapshot workers removes what a crashed process left.
+- **Index-cache entries of an older analyzer version stayed on disk** until
+  the size budget reached them, though this build never reads them. The
+  server now removes, at startup, those no build has used within the
+  snapshot retention window (`LAIN_SNAPSHOT_RETENTION_DAYS`, default 7), so
+  two versions sharing a data dir do not delete each other's cache.
+
+### Added
+
+- `LAIN_MEM_PROBE=1` logs RSS, swap and the peak since the previous probe
+  for each snapshot build phase, index job and tool call;
+  `scripts/measure_pr_memory.py` replays a Parallax PR analysis against a
+  real server and reports them. `measure_snapshot_memory` reports the real
+  per-phase peak (`VmHWM`) instead of the RSS at exit.
+
 ## [0.16.2] - 2026-11-25
 
 ### Fixed

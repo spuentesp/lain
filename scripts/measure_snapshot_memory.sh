@@ -34,7 +34,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 run_binary() {
     # Args: list of repo paths. Echoes the peak_bytes value on stdout.
     cargo run --quiet --release -p lain --bin measure_snapshot_memory -- "$@" 2>/dev/null \
-        | grep -oE 'peak_bytes=[0-9]+' | head -1 | sed 's/peak_bytes=//'
+        | grep -E '^peak_bytes=[0-9]+$' | tail -1 | sed 's/peak_bytes=//'
 }
 
 echo "[mem] phase 1: §15.1 fixture"
